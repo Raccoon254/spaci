@@ -38,7 +38,11 @@
       "target": ["dmg", "zip"],
       "icon": "assets/branding/icon.icns"
     },
-    "win": { "target": ["nsis"], "icon": "assets/branding/icon.ico" },
+    "win": {
+      "target": ["nsis"],
+      "icon": "assets/branding/icon.ico",
+      "artifactName": "Spaci-Setup-${version}.${ext}"
+    },
     "linux": { "target": ["AppImage"], "category": "Development" }
   }
 }
