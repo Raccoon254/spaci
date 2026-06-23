@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:;" />
+  <title>Spaci</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="animations.css" />
+</head>
+<body>
+  <header class="titlebar"><div class="titlebar-actions" id="titlebarActions"></div></header>
+  <div id="topbar" class="topbar"></div>
+
+  <div class="app">
+    <nav class="sidebar">
+      <div class="brand">
+        <div class="brand-logo" id="brandLogo"></div>
+        <div class="brand-name">Spaci<b>.</b></div>
+      </div>
+      <div class="nav-group" id="navMain"></div>
+      <div class="nav-spacer"></div>
+      <div id="diskMini"></div>
+      <div class="nav-group" id="navBottom"></div>
+    </nav>
+    <main class="content" id="view"></main>
+  </div>
+
+  <div id="onboarding"></div>
+  <div class="overlay hidden" id="modal"></div>
+  <div class="toast-stack" id="toasts"></div>
+  <div id="bgorbit" class="bgorbit" title="Scanning"></div>
+
+  <script src="donut.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

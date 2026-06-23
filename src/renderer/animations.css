@@ -1,0 +1,302 @@
+/* ============================================================
+   Spaci, animations.css
+   Refined, subtle micro-interactions & entrances. Loaded AFTER
+   styles.css, so this file only ADDS polish.
+
+   Rules:
+   · FLAT, no box-shadow / drop-shadow. Depth & motion come only
+     from transform, opacity, background and border-color.
+   · Theme-agnostic, uses existing CSS variables only.
+   · Performant, hovers animate transform/opacity (+ color/border);
+     all easing uses cubic-bezier(.22,.61,.36,1).
+   · All @keyframes namespaced with a dc- prefix.
+   · Non-essential motion lives inside
+     @media (prefers-reduced-motion: no-preference).
+   · A reduce block neutralises transitions/animations.
+   ============================================================ */
+
+/* ---- shared keyframes (dc- namespaced) ---- */
+@keyframes dc-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes dc-pop {
+  0%   { transform: scale(.78); }
+  60%  { transform: scale(1.12); }
+  100% { transform: scale(1); }
+}
+@keyframes dc-navIn {
+  from { opacity: 0; transform: scaleY(0); }
+  to   { opacity: 1; transform: scaleY(1); }
+}
+@keyframes dc-shimmer {
+  from { background-position: -160% 0; }
+  to   { background-position: 160% 0; }
+}
+@keyframes dc-toastIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes dc-modalIn {
+  from { opacity: 0; transform: translateY(12px) scale(.965); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes dc-sheen {
+  from { background-position: -130% 0; }
+  to   { background-position: 130% 0; }
+}
+
+/* ============================================================
+   Motion, only when the user has no reduced-motion preference.
+   ============================================================ */
+@media (prefers-reduced-motion: no-preference) {
+
+  /* 1. Micro-lift on interactive surfaces.
+        We extend the existing transitions (border-color/background)
+        to also cover transform, instead of replacing them. */
+  .row,
+  .opt,
+  .stat {
+    transition: border-color .16s var(--ease),
+                background   .16s var(--ease),
+                transform    .18s var(--ease);
+    will-change: transform;
+  }
+  .row:hover,
+  .opt:hover,
+  .stat:hover {
+    transform: translateY(-1px);
+  }
+
+  /* interactive cards: only lift cards that are clickable / nav-ish,
+     keep plain content cards static */
+  .card[role="button"],
+  .card[tabindex],
+  .card.clickable,
+  a .card,
+  button .card {
+    transition: border-color .16s var(--ease),
+                background   .16s var(--ease),
+                transform    .18s var(--ease);
+  }
+  .card[role="button"]:hover,
+  .card[tabindex]:hover,
+  .card.clickable:hover,
+  a .card:hover,
+  button .card:hover {
+    transform: translateY(-1px);
+    border-color: var(--border-2);
+  }
+
+  /* 2. Quick press. .btn already declares transform .12s + scale(.97);
+        we reinforce it and add the same feel to .opt. */
+  .btn:active,
+  .btn-primary:active,
+  .btn-danger:active {
+    transform: scale(.97);
+  }
+  .opt {
+    transition: border-color .16s var(--ease),
+                background   .16s var(--ease),
+                transform    .12s var(--ease);
+  }
+  .opt:active {
+    transform: scale(.97);
+  }
+  /* a hovered row/stat that is also pressed settles back down */
+  .row:active,
+  .stat:active {
+    transform: translateY(0) scale(.99);
+  }
+
+  /* 2b. Primary button sheen: a soft white-alpha gradient that
+         sweeps left-to-right on hover. Position-only animation,
+         no shadow. The ::after overlay never intercepts clicks. */
+  .btn-primary {
+    position: relative;
+    overflow: hidden;
+  }
+  .btn-primary::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    opacity: 0;
+    background-image: linear-gradient(
+      105deg,
+      transparent 30%,
+      rgba(255, 255, 255, .14) 50%,
+      transparent 70%
+    );
+    background-size: 220% 100%;
+    background-repeat: no-repeat;
+    background-position: -130% 0;
+    transition: opacity .2s var(--ease);
+  }
+  .btn-primary:hover::after {
+    opacity: 1;
+    animation: dc-sheen 1.1s var(--ease);
+  }
+  .btn-primary:active::after {
+    opacity: 0;
+  }
+
+  /* 3. Staggered entrance for list rows. dc-rise + nth-child delays. */
+  .list .row {
+    animation: dc-rise .42s var(--ease) both;
+  }
+  .list .row:nth-child(1)  { animation-delay: 0ms;   }
+  .list .row:nth-child(2)  { animation-delay: 40ms;  }
+  .list .row:nth-child(3)  { animation-delay: 80ms;  }
+  .list .row:nth-child(4)  { animation-delay: 120ms; }
+  .list .row:nth-child(5)  { animation-delay: 160ms; }
+  .list .row:nth-child(6)  { animation-delay: 200ms; }
+  .list .row:nth-child(7)  { animation-delay: 240ms; }
+  .list .row:nth-child(8)  { animation-delay: 280ms; }
+  .list .row:nth-child(9)  { animation-delay: 320ms; }
+  .list .row:nth-child(10) { animation-delay: 360ms; }
+  .list .row:nth-child(11) { animation-delay: 400ms; }
+  .list .row:nth-child(12) { animation-delay: 440ms; }
+  /* rows past the 12th appear without extra delay */
+  .list .row:nth-child(n+13) { animation-delay: 460ms; }
+
+  /* 4. Checkbox bounce when it becomes active. The element already
+        transitions background/border; the pop adds a scale bounce.
+        transform-origin centred so the circle scales in place. */
+  .check.on,
+  .row.selected .check {
+    animation: dc-pop .28s var(--ease);
+    transform-origin: center;
+  }
+
+  /* 5. Active nav item: a left accent bar that scales in.
+        .nav-item has no existing ::before, so this is safe. */
+  .nav-item {
+    position: relative;
+  }
+  .nav-item::before {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 50%;
+    width: 3px;
+    height: 18px;
+    margin-top: -9px;
+    border-radius: 99px;
+    background: var(--accent-fg);
+    opacity: 0;
+    transform: scaleY(0);
+    transform-origin: center;
+    transition: opacity .16s var(--ease), transform .2s var(--ease);
+    pointer-events: none;
+  }
+  .nav-item.active::before {
+    opacity: 1;
+    transform: scaleY(1);
+    animation: dc-navIn .26s var(--ease);
+  }
+
+  /* 6. Reusable skeleton shimmer (opt-in via .skeleton).
+        Moving gradient between panel tones, background-position only. */
+  .skeleton {
+    position: relative;
+    border-radius: var(--radius-xs);
+    background-color: var(--panel-2);
+    background-image: linear-gradient(
+      90deg,
+      var(--panel-2) 0%,
+      var(--panel-3) 50%,
+      var(--panel-2) 100%
+    );
+    background-size: 200% 100%;
+    background-repeat: no-repeat;
+    background-position: -160% 0;
+    animation: dc-shimmer 1.4s var(--ease) infinite;
+    color: transparent;
+  }
+  .skeleton * { visibility: hidden; }
+
+  /* 7. Toast: add a gentle translateY+opacity entrance.
+        .toast already uses the `slide` keyframe; we layer a second,
+        non-conflicting animation (different axis, runs once). */
+  .toast {
+    animation: slide .3s var(--ease), dc-toastIn .34s var(--ease);
+  }
+
+  /* 8. Modal entrance refinement. .modal-card already uses `pop`;
+        we replace it here with a softer translateY + scale + opacity
+        for a calmer feel. (Loaded later, so this wins.) */
+  .modal-card {
+    animation: dc-modalIn .3s var(--ease);
+  }
+}
+
+/* ============================================================
+   9. Focus rings, flat, shadow-free. Outline + border-color only.
+      Kept outside the motion query so accessibility is unaffected
+      by reduced-motion settings.
+   ============================================================ */
+.btn:focus-visible,
+.chip:focus-visible,
+.opt:focus-visible,
+.nav-item:focus-visible,
+.toggle:focus-visible,
+.row:focus-visible {
+  outline: 2px solid var(--accent-fg);
+  outline-offset: 2px;
+}
+.btn-primary:focus-visible,
+.btn-danger:focus-visible {
+  outline: 2px solid var(--on-accent);
+  outline-offset: -4px;
+}
+input:focus-visible,
+input:focus {
+  outline: none;
+}
+.search:focus-within {
+  border-color: var(--accent-fg);
+}
+/* inputs that are not wrapped in .search get a flat border focus */
+input:not(.search input):focus-visible {
+  outline: none;
+  border-color: var(--accent-fg);
+}
+
+/* ============================================================
+   Reduced motion, disable non-essential transitions & animations.
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  .row,
+  .opt,
+  .stat,
+  .card,
+  .btn,
+  .btn-primary,
+  .btn-danger,
+  .check,
+  .nav-item,
+  .nav-item::before,
+  .toast,
+  .modal-card,
+  .skeleton,
+  .btn-primary::after,
+  .list .row {
+    animation: none !important;
+    transition: none !important;
+  }
+  .row:hover,
+  .opt:hover,
+  .stat:hover,
+  .card[role="button"]:hover,
+  .card[tabindex]:hover,
+  .card.clickable:hover {
+    transform: none;
+  }
+  /* keep the active-nav indicator visible, just without the animation */
+  .nav-item.active::before {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
