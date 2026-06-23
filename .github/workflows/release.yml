@@ -1,0 +1,91 @@
+name: Release
+
+# Cutting a release: add an entry to the top of changelog.json, then run
+# `make release` (or `npm run release`). That pushes a v<version> tag, which
+# triggers this workflow to build, publish binaries, and sync the website.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: '--mac --x64 --arm64'
+          - os: windows-latest
+            args: '--win'
+          - os: ubuntu-latest
+            args: '--linux'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and package
+        run: npx electron-builder ${{ matrix.args }} --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish installers to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/*.AppImage
+            release/*.blockmap
+            release/latest*.yml
+          fail_on_unmatched_files: false
+
+      - name: Stash update feed for the sync job
+        uses: actions/upload-artifact@v4
+        with:
+          name: feed-${{ matrix.os }}
+          path: release/latest*.yml
+          if-no-files-found: ignore
+
+  sync-feed:
+    name: Sync release to the website
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Collect feed files
+        uses: actions/download-artifact@v4
+        with:
+          path: feed-artifacts
+
+      - name: Flatten feed files
+        run: |
+          mkdir -p feed
+          find feed-artifacts -name 'latest*.yml' -exec cp {} feed/ \;
+          ls -la feed
+
+      - name: Publish release metadata to spaci.kentom.co.ke
+        run: node scripts/sync-feed.mjs
+        env:
+          SITE: https://spaci.kentom.co.ke
+          RELEASE_PUBLISH_SECRET: ${{ secrets.RELEASE_PUBLISH_SECRET }}
+          FEED_DIR: feed

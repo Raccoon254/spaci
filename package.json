@@ -11,7 +11,8 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "dist": "electron-builder",
-    "pack": "electron-builder --dir"
+    "pack": "electron-builder --dir",
+    "release": "node scripts/release.mjs"
   },
   "dependencies": {
     "electron-updater": "^6.8.3"

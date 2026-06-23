@@ -1,0 +1,58 @@
+[
+  {
+    "version": "1.2.0",
+    "date": "2026-06-20",
+    "tag": "Latest",
+    "major": true,
+    "summary": "Disk breakdown, background scans and a calmer cleanup flow.",
+    "added": [
+      "Disk breakdown donut that classifies storage into coding, documents, media and system.",
+      "Background scans with a slim progress bar instead of a blocking modal.",
+      "Per-app cache detail screens so you can clear caches one app at a time.",
+      "History page with reversible and permanent actions clearly separated."
+    ],
+    "improved": [
+      "Project rows now show the real favicon or app icon as a badge.",
+      "Smoother, flicker-free search while filtering projects.",
+      "Cleanup updates the project immediately so the app always feels current."
+    ],
+    "fixed": [
+      "Scans of different types no longer block each other.",
+      "Dock icon now matches the rest of the brand at every size."
+    ]
+  },
+  {
+    "version": "1.1.0",
+    "date": "2026-05-12",
+    "tag": "Feature",
+    "major": false,
+    "summary": "Project previews, smart recommendations and a quieter UI.",
+    "added": [
+      "Project previews with detected language and git status.",
+      "Recommendations that suggest what to clean and how much you would save.",
+      "Large file scanner scoped per project."
+    ],
+    "improved": [
+      "Monochrome iconography across the whole app for a calmer look.",
+      "Onboarding rewritten to get you to a first scan faster."
+    ],
+    "fixed": [
+      "Long project names now truncate cleanly.",
+      "Cache sizes were occasionally double counted."
+    ]
+  },
+  {
+    "version": "1.0.0",
+    "date": "2026-04-01",
+    "tag": "First release",
+    "major": false,
+    "summary": "The first public Spaci. One-click cleanup for developer clutter.",
+    "added": [
+      "One-click cleanup for node_modules, build output and dependency caches.",
+      "Smart detection of project types across your machine.",
+      "Safe-by-design cleaning with a preview before anything is removed."
+    ],
+    "improved": [],
+    "fixed": []
+  }
+]
