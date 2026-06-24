@@ -1,0 +1,49 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - v2-redesign
+      - 'codex/**'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        # Keep this aligned with release.yml: npm ci can fail because the
+        # lockfile omits other-platform optional electron-builder packages.
+        run: npm install --no-audit --no-fund
+
+      - name: Syntax check
+        run: |
+          node --check src/storage-classifier.js
+          node --check src/browsers.js
+          node --check src/system.js
+          node --check src/diskbreakdown.js
+          node --check src/scanner.js
+          node --check src/main.js
+
+      - name: Unit tests
+        run: npm test

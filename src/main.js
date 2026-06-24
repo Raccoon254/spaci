@@ -41,8 +41,9 @@ function savePrefs(p) {
 
 // ---------- scan cache + background scanning ----------
 const CACHE_PATH = path.join(app.getPath('userData'), 'cache.json');
-let cache = readCache() || { projects: [], system: [], scannedAt: 0, root: '' };
+let cache = readCache() || { projects: [], system: [], scannedAt: 0, root: '', meta: {} };
 if (!cache.enrich) cache.enrich = {}; // path -> { totalSize, git, at }
+if (!cache.meta) cache.meta = {};
 let bgTimer = null;
 let bgRunning = false;
 
@@ -62,9 +63,10 @@ function appendHistory(entry) {
 
 // ---------- disk usage breakdown (by category) ----------
 async function refreshBreakdown() {
+  const started = Date.now();
   try {
     const b = await diskbreakdown.diskBreakdown(os.homedir());
-    cache.diskBreakdown = { ...b, at: Date.now() };
+    cache.diskBreakdown = { ...b, at: Date.now(), meta: { ...(b.meta || {}), durationMs: Date.now() - started } };
     writeCache();
     if (win && !win.isDestroyed()) win.webContents.send('disk:breakdown-updated', cache.diskBreakdown);
     return cache.diskBreakdown;
@@ -79,27 +81,67 @@ function updateTrayTitle() {
 
 async function runBackgroundScan() {
   if (bgRunning) return;
+  const started = Date.now();
   bgRunning = true;
   if (win && !win.isDestroyed()) win.webContents.send('bg:scan', { active: true });
+  const errors = [];
+  const phaseMeta = {};
   try {
     const prefs = loadPrefs();
     const root = (prefs.scanRoots && prefs.scanRoots[0]) || os.homedir();
     const ac = new AbortController();
-    const { projects } = await scanner.scanProjects(root, null, ac.signal);
-    const targets = await system.scanSystem(null, ac.signal);
-    cache = { projects: projects.filter((p) => p.items.length), system: targets, scannedAt: Date.now(), root, enrich: cache.enrich || {} };
-    writeCache();
-    updateTrayTitle();
-    if (win && !win.isDestroyed()) win.webContents.send('cache:updated', cache);
+    try {
+      const phaseStart = Date.now();
+      const { projects } = await scanner.scanProjects(root, null, ac.signal);
+      phaseMeta.projects = { source: 'background-scan', durationMs: Date.now() - phaseStart, partial: ac.signal.aborted };
+      cache.projects = projects.filter((p) => p.items.length);
+      cache.root = root;
+      cache.scannedAt = Date.now();
+      cache.meta = { source: 'background-scan', startedAt: started, partial: false, errors, phases: phaseMeta };
+      writeCache();
+      if (win && !win.isDestroyed()) win.webContents.send('cache:updated', cache);
+    } catch (e) {
+      errors.push({ phase: 'projects', message: e && e.message ? e.message : String(e) });
+    }
+
+    try {
+      const phaseStart = Date.now();
+      const targets = await system.scanSystem(null, ac.signal);
+      phaseMeta.system = { source: 'background-scan', durationMs: Date.now() - phaseStart, partial: ac.signal.aborted };
+      cache.system = targets;
+      cache.scannedAt = Date.now();
+      cache.root = root;
+      cache.meta = { source: 'background-scan', startedAt: started, partial: false, errors, phases: phaseMeta };
+      writeCache();
+      updateTrayTitle();
+      if (win && !win.isDestroyed()) win.webContents.send('cache:updated', cache);
+    } catch (e) {
+      errors.push({ phase: 'system', message: e && e.message ? e.message : String(e) });
+    }
+
     // pre-enrich the largest projects so their details pages open instantly
     const top = [...cache.projects].sort((a, b) => b.cleanableSize - a.cleanableSize).slice(0, 25);
+    const enrichStart = Date.now();
     for (const pr of top) {
       try { const r = await scanner.enrichProject(pr.path, new AbortController().signal); cache.enrich[pr.path] = { totalSize: r.totalSize, git: r.git, at: Date.now() }; } catch (_) { /* */ }
     }
+    phaseMeta.enrich = { source: 'background-scan', durationMs: Date.now() - enrichStart, partial: false };
     writeCache();
-    await refreshBreakdown();
-  } catch (e) { /* ignore background errors */ }
-  finally { bgRunning = false; if (win && !win.isDestroyed()) win.webContents.send('bg:scan', { active: false }); }
+    try {
+      const b = await refreshBreakdown();
+      phaseMeta.breakdown = { source: 'background-scan', durationMs: b && b.meta ? b.meta.durationMs : 0, partial: false };
+    } catch (e) {
+      errors.push({ phase: 'breakdown', message: e && e.message ? e.message : String(e) });
+    }
+  } catch (e) {
+    errors.push({ phase: 'background', message: e && e.message ? e.message : String(e) });
+  }
+  finally {
+    cache.meta = { source: 'background-scan', startedAt: started, durationMs: Date.now() - started, partial: errors.length > 0, errors, phases: phaseMeta };
+    writeCache();
+    if (win && !win.isDestroyed()) win.webContents.send('cache:updated', cache);
+    bgRunning = false; if (win && !win.isDestroyed()) win.webContents.send('bg:scan', { active: false });
+  }
 }
 
 function scheduleBackground() {
@@ -141,7 +183,7 @@ function showWin() { if (!win || win.isDestroyed()) createWindow(); else { win.s
 // ---------- menu bar widget (tray popover) ----------
 let trayWin = null;
 const TRAY_W = 372;
-const TRAY_H = 624;
+const TRAY_H = 470;
 
 function createTrayWindow() {
   trayWin = new BrowserWindow({
@@ -246,13 +288,18 @@ async function diskUsage(targetPath) {
   });
 }
 
+// Reads a two-tone UI icon SVG from src/renderer/icons/<name>.svg. The name is
+// sanitized to letters/digits/dashes so it can never escape the icons folder
+// (path traversal), and works the same inside the packaged asar. Returns the
+// raw SVG text, or null when the icon does not exist.
 const iconCache = new Map();
-async function getIcon(name) {
-  if (iconCache.has(name)) return iconCache.get(name);
-  const file = path.join(__dirname, '..', 'assets', 'icons', `${name}.svg`);
-  let svg = '';
-  try { svg = await fsp.readFile(file, 'utf8'); } catch { svg = ''; }
-  iconCache.set(name, svg);
+function getIcon(name) {
+  const key = String(name == null ? '' : name).replace(/[^a-z0-9-]/gi, '');
+  if (iconCache.has(key)) return iconCache.get(key);
+  let svg = null;
+  try { svg = fs.readFileSync(path.join(__dirname, 'renderer', 'icons', key + '.svg'), 'utf8'); }
+  catch { svg = null; }
+  iconCache.set(key, svg);
   return svg;
 }
 
@@ -324,6 +371,9 @@ ipcMain.handle('disk:breakdown', async () => {
   return await refreshBreakdown();
 });
 ipcMain.handle('icon:get', (_e, name) => getIcon(name));
+
+// Biggest immediate children of a category's directories (Storage drill-down).
+ipcMain.handle('fs:top-children', (_e, dirs) => diskbreakdown.topChildren(Array.isArray(dirs) ? dirs : [], 25));
 ipcMain.handle('logo:get', (_e, name) => getLogo(name));
 ipcMain.handle('cache:get', () => cache);
 ipcMain.handle('scan:now', () => { runBackgroundScan(); return true; });
@@ -346,6 +396,9 @@ ipcMain.handle('dialog:pick-folder', async () => {
 });
 
 ipcMain.handle('scan:projects', async (e, root) => {
+  // Default to the configured scan root (the home folder) so Projects scans
+  // automatically without the user having to pick a folder first.
+  root = root || (loadPrefs().scanRoots || [])[0] || os.homedir();
   aborts.projects?.abort();
   aborts.projects = new AbortController();
   const onProgress = (p) => e.sender.send('scan:progress', p);

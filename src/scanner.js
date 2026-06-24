@@ -14,17 +14,17 @@ const { execFile } = require('child_process');
 
 /** Project types, detected by the presence of any marker in a directory. */
 const PROJECT_TYPES = [
-  { id: 'node',    name: 'Node.js',   icon: 'node',       markers: ['package.json'] },
-  { id: 'rust',    name: 'Rust',      icon: 'rust',       markers: ['Cargo.toml'] },
-  { id: 'go',      name: 'Go',        icon: 'go',         markers: ['go.mod'] },
-  { id: 'flutter', name: 'Flutter',   icon: 'flutter',    markers: ['pubspec.yaml'] },
-  { id: 'android', name: 'Android',   icon: 'android',    markers: ['settings.gradle', 'gradlew'] },
-  { id: 'gradle',  name: 'Gradle',    icon: 'gradle',     markers: ['build.gradle', 'build.gradle.kts'] },
-  { id: 'maven',   name: 'Maven',     icon: 'java',       markers: ['pom.xml'] },
-  { id: 'python',  name: 'Python',    icon: 'python',     markers: ['requirements.txt', 'pyproject.toml', 'Pipfile', 'setup.py'] },
-  { id: 'php',     name: 'Composer',  icon: 'php',        markers: ['composer.json'] },
-  { id: 'dotnet',  name: '.NET',      icon: 'box',        markers: ['*.csproj', '*.sln'] },
-  { id: 'xcode',   name: 'Xcode',     icon: 'apple',      markers: ['Podfile', '*.xcodeproj', '*.xcworkspace'] },
+  { id: 'flutter', name: 'Flutter',   icon: 'flutter',    markers: ['pubspec.yaml'], priority: 95 },
+  { id: 'android', name: 'Android',   icon: 'android',    markers: ['settings.gradle', 'gradlew'], priority: 90 },
+  { id: 'xcode',   name: 'Xcode',     icon: 'apple',      markers: ['Podfile', '*.xcodeproj', '*.xcworkspace'], priority: 86 },
+  { id: 'node',    name: 'Node.js',   icon: 'node',       markers: ['package.json'], priority: 70 },
+  { id: 'rust',    name: 'Rust',      icon: 'rust',       markers: ['Cargo.toml'], priority: 80 },
+  { id: 'go',      name: 'Go',        icon: 'go',         markers: ['go.mod'], priority: 80 },
+  { id: 'gradle',  name: 'Gradle',    icon: 'gradle',     markers: ['build.gradle', 'build.gradle.kts'], priority: 78 },
+  { id: 'maven',   name: 'Maven',     icon: 'java',       markers: ['pom.xml'], priority: 78 },
+  { id: 'python',  name: 'Python',    icon: 'python',     markers: ['requirements.txt', 'pyproject.toml', 'Pipfile', 'setup.py'], priority: 74 },
+  { id: 'php',     name: 'Composer',  icon: 'php',        markers: ['composer.json'], priority: 72 },
+  { id: 'dotnet',  name: '.NET',      icon: 'box',        markers: ['*.csproj', '*.sln'], priority: 78 },
 ];
 
 /**
@@ -67,21 +67,34 @@ const EXCLUDED_DIRS = new Set([
 
 const SKIP_DELETE = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.localized']);
 
-function hasMarker(entries, markers) {
+function matchingMarkers(entries, markers) {
+  const hits = [];
   for (const m of markers) {
     if (m.startsWith('*')) {
       const ext = m.slice(1);
-      if (entries.some((e) => e.endsWith(ext))) return true;
+      if (entries.some((e) => e.endsWith(ext))) hits.push(m);
     } else if (entries.includes(m)) {
-      return true;
+      hits.push(m);
     }
   }
-  return false;
+  return hits;
 }
 
 function detectType(entries) {
-  for (const t of PROJECT_TYPES) if (hasMarker(entries, t.markers)) return t;
-  return null;
+  return detectTypes(entries)[0] || null;
+}
+
+function detectTypes(entries) {
+  return PROJECT_TYPES
+    .map((t) => {
+      const markers = matchingMarkers(entries, t.markers);
+      if (!markers.length) return null;
+      // Specific project markers beat generic markers such as package.json.
+      const score = (t.priority || 50) + markers.length * 10;
+      return { ...t, score, matchedMarkers: markers };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
 }
 
 /** Recursively sum file sizes of a directory (apparent size). */
@@ -130,14 +143,19 @@ function gitStatus(dir) {
 async function scanProjects(root, onProgress, signal) {
   const projects = [];
   let scanned = 0;
+  let files = 0;
   let lastEmit = 0;
 
   const emit = (currentPath, force) => {
     const now = Date.now();
     if (force || now - lastEmit > 60) {
       lastEmit = now;
+      // A filesystem walk has no true total, so percent is an asymptotic
+      // estimate from folders seen: it climbs toward, but never reaches, 100%
+      // until the walk completes (when we send 100 explicitly).
+      const percent = Math.max(3, Math.min(95, Math.round(100 * (1 - 1 / (1 + scanned / 350)))));
       onProgress?.({
-        phase: 'scanning', scanned, found: projects.length, currentPath,
+        phase: 'scanning', scanned, files, found: projects.length, currentPath, percent,
       });
     }
   };
@@ -150,11 +168,12 @@ async function scanProjects(root, onProgress, signal) {
     try {
       entries = (await fsp.readdir(dir, { withFileTypes: true }));
     } catch { return; }
+    for (const e of entries) { if (e.isFile()) files++; }
     const names = entries.map((e) => e.name);
 
-    const type = detectType(names);
-    if (type) {
-      const project = await buildProject(dir, type, signal);
+    const types = detectTypes(names);
+    if (types.length) {
+      const project = await buildProject(dir, types, signal);
       if (project) { projects.push(project); emit(dir, true); }
       return; // do not descend further for project detection
     }
@@ -172,12 +191,14 @@ async function scanProjects(root, onProgress, signal) {
   }
 
   await walk(root, 0);
-  onProgress?.({ phase: 'done', scanned, found: projects.length });
+  onProgress?.({ phase: 'done', scanned, files, found: projects.length, percent: 100 });
   return { projects, scanned };
 }
 
 /** Build a project record: find cleanable items, sizes, mtime, git. */
-async function buildProject(dir, type, signal) {
+async function buildProject(dir, detected, signal) {
+  const types = Array.isArray(detected) ? detected : [detected];
+  const type = types[0];
   const items = [];
   // find cleanable directories/files anywhere inside the project
   const stack = [dir];
@@ -214,6 +235,7 @@ async function buildProject(dir, type, signal) {
     name: path.basename(dir),
     path: dir,
     type: { id: type.id, name: type.name, icon: type.icon },
+    types: types.map((t) => ({ id: t.id, name: t.name, icon: t.icon, score: t.score, markers: t.matchedMarkers || [] })),
     items,
     cleanableSize,
     totalSize: 0, // computed lazily on demand to keep scans fast
@@ -275,5 +297,5 @@ async function enrichProject(dir, signal) {
 
 module.exports = {
   PROJECT_TYPES, CLEAN_RULES, SKIP_DELETE,
-  scanProjects, dirSize, enrichProject, gitStatus,
+  scanProjects, dirSize, enrichProject, gitStatus, detectType, detectTypes,
 };

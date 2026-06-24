@@ -23,6 +23,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
+const { buildStoryCategories, systemCategory } = require('./storage-classifier');
 
 // Overall deadline so the worst-case runtime stays bounded (~20s).
 const DEADLINE_MS = 20000;
@@ -71,21 +72,46 @@ async function walkSize(root, deadline) {
  * Run `du -sk` and parse the result, falling back to a bounded Node walk
  * on any failure (missing du, timeout, permission errors, etc.).
  */
-function duSize(p, deadline) {
+function parseDuBytes(stdout) {
+  const kb = parseInt(String(stdout || '').trim(), 10);
+  return Number.isNaN(kb) ? 0 : kb * 1024;
+}
+
+function duSize(p) {
   return new Promise((resolve) => {
-    execFile('du', ['-sk', p], { timeout: 20000 }, (err, stdout) => {
-      if (err) {
-        walkSize(p, deadline).then(resolve, () => resolve(0));
-        return;
-      }
-      const kb = parseInt(stdout, 10);
-      if (Number.isNaN(kb)) {
-        walkSize(p, deadline).then(resolve, () => resolve(0));
-        return;
-      }
-      resolve(kb * 1024);
+    // `du -sk` reports real disk blocks used (APFS clones counted once). On
+    // failure/timeout we resolve 0 rather than falling back to a node walk,
+    // because that walk sums APPARENT sizes and APFS clones inflate it wildly
+    // (e.g. ~/Library measured at 365 GB instead of 62 GB).
+    execFile('du', ['-sk', p], { timeout: 90000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      const bytes = parseDuBytes(stdout);
+      if (bytes > 0 || !err) { resolve(bytes); return; }
+      resolve(err ? 0 : 0);
     });
   });
+}
+
+// Run an async mapper over items with a bounded concurrency, so we never start
+// dozens of `du` processes at once (which starve each other and time out).
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i], i); }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+function pathApiFor(p) {
+  return /^[a-zA-Z]:[\\/]/.test(String(p || '')) || String(p || '').includes('\\') ? path.win32 : path.posix;
+}
+
+function isInside(parent, child) {
+  if (!parent || !child || parent === child) return false;
+  const pathApi = pathApiFor(parent);
+  const rel = pathApi.relative(parent, child);
+  return rel && !rel.startsWith('..') && !pathApi.isAbsolute(rel);
 }
 
 /**
@@ -103,6 +129,7 @@ async function sizeOf(p, deadline) {
   }
   // Skip symlinks (avoid double-counting / escaping the tree).
   if (st.isSymbolicLink()) return 0;
+  if (st.isFile()) return st.size;
   if (!st.isDirectory()) return 0;
 
   const dl = deadline || Date.now() + DEADLINE_MS;
@@ -117,136 +144,6 @@ async function sizeOf(p, deadline) {
   } catch {
     return 0;
   }
-}
-
-/**
- * Build the finer category definitions with platform-appropriate paths.
- * Each category lists candidate directories; missing ones contribute 0.
- */
-function buildCategories(home) {
-  const platform = process.platform;
-
-  // Developer project roots: include whichever common roots exist.
-  const projectRoots = ['projects', 'dev', 'code', 'Developer']
-    .map((name) => path.join(home, name))
-    .filter((p) => {
-      try {
-        return fs.statSync(p).isDirectory();
-      } catch {
-        return false;
-      }
-    });
-
-  const developerDirs = [
-    ...projectRoots,
-    path.join(home, '.npm'),
-    path.join(home, '.gradle'),
-    path.join(home, '.m2'),
-    path.join(home, '.cargo'),
-    path.join(home, '.rustup'),
-    path.join(home, '.cocoapods'),
-    path.join(home, '.pub-cache'),
-    path.join(home, 'go'),
-    path.join(home, '.nvm'),
-    path.join(home, '.bun'),
-  ];
-  if (platform === 'darwin') {
-    developerDirs.push(path.join(home, 'Library', 'Developer'));
-  }
-
-  // Applications: system-wide on darwin plus the per-user folder.
-  const appsDirs = [];
-  if (platform === 'darwin') appsDirs.push('/Applications');
-  appsDirs.push(path.join(home, 'Applications'));
-
-  // Media video folder differs by platform.
-  const videoDir =
-    platform === 'darwin'
-      ? path.join(home, 'Movies')
-      : path.join(home, 'Videos');
-
-  const lib = (...parts) => path.join(home, 'Library', ...parts);
-
-  const defs = [
-    {
-      key: 'developer',
-      label: 'Developer',
-      icon: 'code',
-      hint: 'Code, build caches and SDKs',
-      dirs: developerDirs,
-    },
-    {
-      key: 'applications',
-      label: 'Applications',
-      icon: 'grid',
-      hint: 'Installed apps',
-      dirs: appsDirs,
-    },
-    {
-      key: 'appdata',
-      label: 'App Data',
-      icon: 'database',
-      hint: 'Per-app data and containers',
-      dirs:
-        platform === 'darwin'
-          ? [
-              lib('Application Support'),
-              lib('Containers'),
-              lib('Group Containers'),
-            ]
-          : [],
-    },
-    {
-      key: 'caches',
-      label: 'Caches',
-      icon: 'broom',
-      hint: 'Regenerable cache and log files',
-      dirs:
-        platform === 'darwin'
-          ? [lib('Caches'), lib('Logs')]
-          : platform === 'linux'
-            ? [path.join(home, '.cache')]
-            : process.env.LOCALAPPDATA
-              ? [path.join(process.env.LOCALAPPDATA, 'Temp')]
-              : [],
-    },
-    {
-      key: 'media',
-      label: 'Media',
-      icon: 'image',
-      hint: 'Photos, video and music',
-      dirs: [
-        path.join(home, 'Pictures'),
-        videoDir,
-        path.join(home, 'Music'),
-      ],
-    },
-    {
-      key: 'documents',
-      label: 'Documents',
-      icon: 'document-text',
-      hint: 'Files on your Desktop and in Documents',
-      dirs: [path.join(home, 'Documents'), path.join(home, 'Desktop')],
-    },
-    {
-      key: 'downloads',
-      label: 'Downloads',
-      icon: 'download',
-      hint: 'Your Downloads folder',
-      dirs: [path.join(home, 'Downloads')],
-    },
-    {
-      key: 'mail',
-      label: 'Mail & Messages',
-      icon: 'bell',
-      hint: 'Mail and Messages storage',
-      dirs:
-        platform === 'darwin' ? [lib('Mail'), lib('Messages')] : [],
-    },
-  ];
-
-  // Drop categories that have no candidate directories at all.
-  return defs.filter((d) => d.dirs.length > 0);
 }
 
 /**
@@ -275,16 +172,16 @@ async function diskBreakdown(home = os.homedir()) {
   // 2. Measure every directory of every category concurrently, sharing one
   //    global deadline so the whole pass stays bounded (~20s).
   const deadline = Date.now() + DEADLINE_MS;
-  const defs = buildCategories(home);
+  const defs = buildStoryCategories({ home });
 
   const allDirs = [];
   for (const def of defs) {
     for (const dir of def.dirs) allDirs.push(dir);
+    for (const dir of def.subtractDirs || []) allDirs.push(dir);
   }
 
-  const sizes = await Promise.all(
-    allDirs.map((dir) => sizeOf(dir, deadline))
-  );
+  // Bounded concurrency: at most 4 `du` processes at once so none time out.
+  const sizes = await mapLimit(allDirs, 4, (dir) => sizeOf(dir, deadline));
 
   // Map directory -> measured bytes, then sum per category.
   const sizeByDir = new Map();
@@ -297,12 +194,20 @@ async function diskBreakdown(home = os.homedir()) {
   for (const def of defs) {
     let bytes = 0;
     for (const dir of def.dirs) bytes += sizeByDir.get(dir) || 0;
+    // Parent buckets such as ~/Library/Caches subtract known child targets
+    // so Browser/Developer caches can be shown without double-counting.
+    for (const dir of def.subtractDirs || []) {
+      if (def.dirs.some((parent) => isInside(parent, dir))) bytes -= sizeByDir.get(dir) || 0;
+    }
+    bytes = Math.max(0, bytes);
     measuredTotal += bytes;
     measured.push({
       key: def.key,
       label: def.label,
       icon: def.icon,
       hint: def.hint,
+      dirs: def.dirs,
+      subtractDirs: def.subtractDirs || [],
       bytes,
     });
   }
@@ -321,6 +226,7 @@ async function diskBreakdown(home = os.homedir()) {
       label: c.label,
       icon: c.icon,
       hint: c.hint,
+      dirs: c.dirs,
       bytes: Math.round(c.bytes * factor),
     }));
   } else {
@@ -331,17 +237,12 @@ async function diskBreakdown(home = os.homedir()) {
       label: c.label,
       icon: c.icon,
       hint: c.hint,
+      dirs: c.dirs,
       bytes: Math.round(c.bytes),
     }));
     const remainder = Math.round(used - measuredTotal);
     if (remainder > 0) {
-      categories.push({
-        key: 'system',
-        label: 'System',
-        icon: 'cpu',
-        hint: 'macOS and other system files',
-        bytes: remainder,
-      });
+      categories.push(systemCategory(remainder));
     }
   }
 
@@ -355,7 +256,37 @@ async function diskBreakdown(home = os.homedir()) {
     .filter((c) => c.bytes > 0)
     .sort((a, b) => b.bytes - a.bytes);
 
-  return { total, used, free, categories: result };
+  return {
+    total,
+    used,
+    free,
+    categories: result,
+    meta: { source: 'disk-breakdown', scannedAt: Date.now(), partial: false },
+  };
 }
 
-module.exports = { diskBreakdown };
+// Enumerate the biggest immediate children across a set of directories (used by
+// the Storage category drill-down). Lists each dir's direct entries, measures
+// them with `du` (bounded concurrency, real disk blocks), and returns the
+// largest, sorted descending. Never throws: unreadable dirs are skipped.
+async function topChildren(dirs, limit = 25, deadlineMs = 45000) {
+  const list = Array.isArray(dirs) ? dirs : [];
+  const deadline = Date.now() + deadlineMs;
+  const entries = [];
+  for (const dir of list) {
+    let names;
+    try { names = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { continue; }
+    for (const d of names) {
+      if (d.name === '.DS_Store') continue;
+      entries.push({ path: path.join(dir, d.name), name: d.name, isDir: d.isDirectory() });
+    }
+  }
+  const sizes = await mapLimit(entries, 5, (e) => sizeOf(e.path, deadline));
+  return entries
+    .map((e, i) => ({ path: e.path, name: e.name, isDir: e.isDir, bytes: sizes[i] || 0 }))
+    .filter((e) => e.bytes > 0)
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, limit);
+}
+
+module.exports = { diskBreakdown, topChildren, parseDuBytes };
