@@ -6,6 +6,17 @@
 // Colour follows currentColor. SPACI_ICONS / SPACI_LOGOS come from spaci-icons.js.
 (function () {
   if (customElements.get('spaci-icon')) return;
+  // @keyframes are tree-scoped: keyframes in the document are NOT visible to
+  // elements inside a shadow root, so the ring's animations must be defined
+  // inside the shadow DOM. This <style> is injected with every animated ring.
+  var RING_KF =
+    '@keyframes sp-spin{to{transform:rotate(360deg)}}' +
+    '@keyframes sp-counter{to{transform:rotate(-360deg)}}' +
+    '@keyframes sp-breathe{0%,100%{transform:scale(.94)}50%{transform:scale(1.04)}}' +
+    '@keyframes sp-chase{0%{opacity:.16}10%{opacity:1}30%{opacity:.16}100%{opacity:.16}}' +
+    '@keyframes sp-assemble{0%{opacity:0;transform:translateY(-16px) scale(.5)}28%{opacity:1;transform:translateY(0) scale(1)}82%{opacity:1;transform:translateY(0) scale(1)}100%{opacity:0;transform:translateY(-16px) scale(.5)}}' +
+    '@keyframes sp-explode{0%{transform:translateY(0) scale(1);opacity:1}42%{transform:translateY(-18px) scale(.35);opacity:0}58%{transform:translateY(-18px) scale(.35);opacity:0}100%{transform:translateY(0) scale(1);opacity:1}}' +
+    '@keyframes sp-wave{0%{transform:scale(1);opacity:.4}25%{transform:scale(1.5);opacity:1}50%{transform:scale(1);opacity:.4}100%{transform:scale(1);opacity:.4}}';
   customElements.define(
     'spaci-icon',
     class extends HTMLElement {
@@ -67,6 +78,7 @@
               '"></ellipse></g>';
           }
           this._root.innerHTML =
+            '<style>' + RING_KF + '</style>' +
             '<svg viewBox="15 15 70 70" style="width:100%;height:100%;display:block;overflow:visible;transform-origin:center;' +
             svgA +
             '">' +

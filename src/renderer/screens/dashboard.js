@@ -49,11 +49,15 @@
     );
 
     // donut
-    const svg = svgEl('svg', { viewBox: '0 0 228 228', style: 'position:absolute;inset:0;width:228px;height:228px;overflow:visible;transform-origin:center;animation:sp-donutin .75s cubic-bezier(.22,.61,.36,1)' });
+    const svg = svgEl('svg', { viewBox: '0 0 228 228', style: 'position:absolute;inset:0;width:204px;height:204px;overflow:visible;transform-origin:center;animation:sp-donutin .75s cubic-bezier(.22,.61,.36,1)' });
     svg.appendChild(svgEl('circle', { cx: 114, cy: 114, r: 103, fill: 'none', stroke: 'var(--track)', 'stroke-width': 16 }));
+    // Normalise: arcs fill only the used fraction of the ring, split by each
+    // category's share of the breakdown (so they can never exceed 360 degrees).
+    const sumCats = cats.reduce((a, c) => a + (Number(c.bytes) || 0), 0) || 1;
+    const usedAngle = Math.min(1, d.total ? d.used / d.total : 0) * 360;
     let angle = 0;
     cats.forEach((c, i) => {
-      const span = d.total ? (c.bytes / d.total) * 360 : 0;
+      const span = ((Number(c.bytes) || 0) / sumCats) * usedAngle;
       if (span < 0.6) { angle += span; return; }
       const gap = Math.min(2, span / 3);
       svg.appendChild(svgEl('path', { d: arc(114, 114, 103, angle + gap / 2, angle + span - gap / 2), stroke: COLORS[i % COLORS.length], 'stroke-width': 16, 'stroke-linecap': 'round', fill: 'none' }));
@@ -65,7 +69,7 @@
       el('div', { style: 'font-size:12px;color:var(--text-3);font-weight:600;letter-spacing:.3px;margin-top:2px', text: fmt(d.free) + ' free' })
     ]);
 
-    const donutWrap = el('div', { style: 'position:relative;width:228px;height:228px;flex:none;display:grid;place-items:center' }, [center]);
+    const donutWrap = el('div', { style: 'position:relative;width:204px;height:204px;flex:none;display:grid;place-items:center' }, [center]);
     donutWrap.insertBefore(svg, center);
     if (S.scanning) {
       donutWrap.appendChild(el('div', { style: 'position:absolute;inset:6px;border-radius:50%;border:2px solid var(--accent-fg);animation:sp-pulsering 2.4s cubic-bezier(.22,.61,.36,1) infinite' }));
@@ -111,7 +115,7 @@
 
     // storage breakdown card
     const bar = el('div', { style: 'height:16px;border-radius:6px;overflow:hidden;display:flex;gap:3px;background:var(--track)' },
-      cats.map((c, i) => el('span', { style: `height:100%;border-radius:3px;background:${COLORS[i % COLORS.length]};flex-basis:${d.total ? (c.bytes / d.total) * 100 : 0}%;flex-grow:0;flex-shrink:0;transform-origin:left;animation:sp-segment .6s cubic-bezier(.22,.61,.36,1) backwards`, title: c.label })));
+      cats.map((c, i) => el('span', { style: `height:100%;border-radius:3px;background:${COLORS[i % COLORS.length]};flex-basis:${(Number(c.bytes) || 0) / sumCats * (usedAngle / 3.6)}%;flex-grow:0;flex-shrink:0;transform-origin:left;animation:sp-segment .6s cubic-bezier(.22,.61,.36,1) backwards`, title: c.label })));
     const legend = el('div', { style: 'display:flex;flex-wrap:wrap;gap:14px 22px;margin-top:18px' },
       cats.map((c, i) => el('div', { style: 'display:flex;align-items:center;gap:8px' }, [
         el('span', { style: `width:9px;height:9px;border-radius:3px;background:${COLORS[i % COLORS.length]};flex:none` }),

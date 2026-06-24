@@ -127,6 +127,10 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  win.webContents.on('console-message', (_e, _lvl, message, line, src) => {
+    console.log('[renderer]', message, src ? '(' + src.split('/').pop() + ':' + line + ')' : '');
+  });
+  win.webContents.on('preload-error', (_e, p, err) => console.log('[preload-error]', err && err.message));
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });
   // Closing the window hides it instead of quitting, so the app keeps running in the menu bar.
   win.on('close', (e) => { if (!isQuitting) { e.preventDefault(); win.hide(); } });

@@ -1,11 +1,13 @@
 'use strict';
+window.addEventListener('error', (e) => console.error('[err]', e.message, (e.filename || '') + ':' + e.lineno));
+window.addEventListener('unhandledrejection', (e) => console.error('[reject]', e.reason && e.reason.message));
 /* Spaci v2 renderer.
    Shell (titlebar + sidebar + content) and the Smart Scan dashboard, wired to
    the existing IPC backend (window.api). Screens register on SP.screens; the
    other screens are placeholders until rebuilt. The design lives in
    design/spaci-v2-reference.html. */
 
-const api = window.api;
+// `api` is the global exposed by preload (contextBridge). Do not redeclare it.
 
 // ---------- tiny DOM helper (supports inline style strings + hover) ----------
 function el(tag, attrs, children) {
@@ -181,8 +183,10 @@ function diskMini() {
   const free = d ? fmt(d.free) : '...';
   const total = d ? fmt(d.total) : '';
   const pct = d && d.total ? Math.round((d.used / d.total) * 100) : 0;
-  const segs = (bd && bd.categories ? bd.categories : []).map((c, i) => el('span', {
-    style: `height:100%;border-radius:2px;background:${CAT_COLORS[i % CAT_COLORS.length]};flex-basis:${d && d.total ? (c.bytes / d.total) * 100 : 0}%;flex-grow:0;flex-shrink:0`
+  const cats = bd && bd.categories ? bd.categories : [];
+  const sumCats = cats.reduce((a, c) => a + (Number(c.bytes) || 0), 0) || 1;
+  const segs = cats.map((c, i) => el('span', {
+    style: `height:100%;border-radius:2px;background:${CAT_COLORS[i % CAT_COLORS.length]};flex-basis:${((Number(c.bytes) || 0) / sumCats) * pct}%;flex-grow:0;flex-shrink:0`
   }));
   return el('div', {
     class: 'sp-hov',
@@ -235,8 +239,15 @@ async function toggleTheme() {
 }
 
 // ---------- data + scan ----------
+function normalizeDisk(d) {
+  if (!d) return null;
+  const total = Number(d.total) || 0;
+  const free = Number(d.free != null ? d.free : d.avail != null ? d.avail : 0) || 0;
+  const used = Number(d.used != null ? d.used : total - free) || 0;
+  return { total, free, used };
+}
 async function loadData() {
-  try { S.disk = await api.diskUsage(); } catch (_) {}
+  try { S.disk = normalizeDisk(await api.diskUsage()); } catch (_) {}
   try { S.breakdown = await api.diskBreakdown(); } catch (_) {}
   try { S.recs = (await api.recommendations()) || []; } catch (_) { S.recs = []; }
   try { const c = await api.cacheGet(); S.lastScan = (c && c.lastScan) || S.lastScan; } catch (_) {}
