@@ -1,8 +1,23 @@
 [
   {
-    "version": "2.0.0",
+    "version": "2.0.1",
     "date": "2026-06-24",
     "tag": "Latest",
+    "major": false,
+    "summary": "Signed and notarized macOS builds, so automatic updates now work end to end.",
+    "added": [],
+    "improved": [
+      "macOS builds are now code-signed and notarized by Apple, so Spaci opens cleanly without Gatekeeper warnings.",
+      "In-app updates now install on macOS: when a new version is downloaded, Restart to update applies it and relaunches into the new version."
+    ],
+    "fixed": [
+      "Restart to update no longer silently fails on macOS."
+    ]
+  },
+  {
+    "version": "2.0.0",
+    "date": "2026-06-24",
+    "tag": "Major",
     "major": true,
     "summary": "A complete redesign: a calmer, faster Spaci with a unified scanning experience and a richer storage breakdown.",
     "added": [
