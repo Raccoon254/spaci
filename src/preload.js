@@ -10,7 +10,9 @@ contextBridge.exposeInMainWorld('api', {
   // disk + icons
   diskUsage: (p) => ipcRenderer.invoke('disk:usage', p),
   diskBreakdown: () => ipcRenderer.invoke('disk:breakdown'),
+  topChildren: (dirs) => ipcRenderer.invoke('fs:top-children', dirs),
   icon: (name) => ipcRenderer.invoke('icon:get', name),
+  iconSvg: (name) => ipcRenderer.invoke('icon:get', name),
   logo: (name) => ipcRenderer.invoke('logo:get', name),
   cacheGet: () => ipcRenderer.invoke('cache:get'),
   scanNow: () => ipcRenderer.invoke('scan:now'),

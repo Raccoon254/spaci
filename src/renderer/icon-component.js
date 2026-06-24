@@ -50,10 +50,82 @@
         return;
       }
       var kind = this.getAttribute('kind') || 'icon';
-      var map = kind === 'logo' ? (window.SPACI_LOGOS || {}) : (window.SPACI_ICONS || {});
-      var d = map[name] || (window.SPACI_ICONS || {})['box'];
-      var body = d ? (d.p || '').replace(/opacity="(?:0?\.[0-5]\d*)"/g, 'opacity="0.72"') : '';
-      this._root.innerHTML = d ? '<svg viewBox="' + d.v + '" fill="none" style="width:100%;height:100%;display:block">' + body + '</svg>' : '';
+      // Brand/language logos stay inline (small set, loaded from spaci-logo.js).
+      if (kind === 'logo') {
+        var lmap = window.SPACI_LOGOS || {};
+        var ld = lmap[name];
+        var lbody = ld ? (ld.p || '').replace(/opacity="(?:0?\.[0-5]\d*)"/g, 'opacity="0.72"') : '';
+        this._root.innerHTML = ld ? '<svg viewBox="' + ld.v + '" fill="none" style="width:100%;height:100%;display:block">' + lbody + '</svg>' : '';
+        return;
+      }
+      // Two-tone UI icons load their SVG file from src/renderer/icons/<name>.svg
+      // (via the icon:get IPC handler). Each name is fetched once and cached, so
+      // the first paint of a name is async (placeholder, then swap) and every
+      // later paint is synchronous with no flash.
+      var cached = ICON_CACHE.get(name);
+      if (cached !== undefined) { this._root.innerHTML = wrap(cached); return; }
+      // Not loaded yet: render an empty placeholder, then resolve and swap in.
+      this._root.innerHTML = '';
+      var self = this;
+      var want = name;
+      loadIcon(name).then(function (svg) {
+        if (!self._root) return;
+        // Skip the swap if the attribute changed to a different name meanwhile.
+        if ((self.getAttribute('name') || 'box') !== want) return;
+        self._root.innerHTML = wrap(svg);
+      });
     }
   });
+
+  // name -> { v: viewBox, p: inner svg html } | null, populated on first load.
+  var ICON_CACHE = new Map();
+  var ICON_PENDING = new Map();
+
+  // Wraps a parsed icon into the themed two-tone <svg>, matching the previous
+  // inline behavior (secondary paths nudged to opacity 0.72 for the two-tone).
+  function wrap(d) {
+    if (!d) return '';
+    var body = (d.p || '').replace(/opacity="(?:0?\.[0-5]\d*)"/g, 'opacity="0.72"');
+    return '<svg viewBox="' + d.v + '" fill="none" style="width:100%;height:100%;display:block">' + body + '</svg>';
+  }
+
+  // Pulls the SVG file once per name (de-duping concurrent requests), parses out
+  // the viewBox + inner markup, and stores the result (or null) in the cache.
+  function loadIcon(name) {
+    if (ICON_PENDING.has(name)) return ICON_PENDING.get(name);
+    var p = Promise.resolve()
+      .then(function () {
+        return (window.api && window.api.iconSvg) ? window.api.iconSvg(name) : null;
+      })
+      .then(function (text) {
+        // Missing file: fall back to the generic 'box' glyph rather than render
+        // a blank hole (covers any icon name without its own SVG file).
+        if (!text && name !== 'box') {
+          return loadIcon('box').then(function (boxParsed) {
+            ICON_CACHE.set(name, boxParsed);
+            ICON_PENDING.delete(name);
+            return boxParsed;
+          });
+        }
+        var parsed = parseSvg(text);
+        ICON_CACHE.set(name, parsed);
+        ICON_PENDING.delete(name);
+        return parsed;
+      })
+      .catch(function () {
+        ICON_CACHE.set(name, null);
+        ICON_PENDING.delete(name);
+        return null;
+      });
+    ICON_PENDING.set(name, p);
+    return p;
+  }
+
+  // Extracts { v: viewBox, p: inner html } from a standalone <svg> file string.
+  function parseSvg(text) {
+    if (!text) return null;
+    var vb = text.match(/viewBox="([^"]+)"/);
+    var inner = text.replace(/^[\s\S]*?<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '').trim();
+    return { v: vb ? vb[1] : '0 0 24 24', p: inner };
+  }
 })();

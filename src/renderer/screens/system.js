@@ -1,28 +1,54 @@
 'use strict';
-/* System Cleaner screen, Spaci v2. Faithful to design/spaci-v2-reference.html
-   (data-screen-label="System Cleaner"), wired to the real system scanner.
-   Lists developer & system caches grouped by category, with per-item selection
-   toggles and a safe clean action. Every target here is regenerable. */
+/* System Cleaner screen, Spaci v2. Faithful to design/spaci-v2-reference.html.
+   Developer & system caches grouped by category, with per-item selection and a
+   safe clean action. Cache-first: it renders the last cached results instantly,
+   then revalidates with a scan in the background (no blocking spinner). The
+   scan never re-mounts the screen, so the live host is never detached and the
+   results always paint when measuring finishes. */
 (function () {
   const SP = window.SP;
   const { el, ic, ring, fmt } = SP;
   const S = SP.state;
   const api = window.api;
 
-  // Per-id selection set, persisted on shared state across re-renders.
+  // Points at the current mount's render so an async scan repaints the live
+  // (attached) host, even if it was started by an earlier mount.
+  let latestRender = null;
+  function paint() { if (latestRender) latestRender(); }
+
+  // The live scan card updates IN PLACE on each progress tick (no full paint),
+  // so toggling selection while a scan runs never rebuilds the screen / flickers.
+  let progRefs = null; // { node, set } of the current shared scan card
+
+  // Derive the live progress fields. System emits { index, total, current }: it
+  // always has a total, so this is DETERMINATE (percent = index/total). Used to
+  // build the shared scan card and to update it in place on each tick.
+  function sysProgressInfo() {
+    const pr = S.systemProgress || {};
+    const total = pr.total != null ? pr.total : 0;
+    const index = pr.index != null ? pr.index : 0;
+    const sized = Math.min(index, total);
+    const percent = total ? Math.max(0, Math.min(100, Math.round((sized / total) * 100))) : null;
+    const sub = total
+      ? sized.toLocaleString() + ' of ' + total.toLocaleString() + ' locations sized · ' + percent + '%'
+      : 'Starting…';
+    return { sub, percent, label: 'Measuring caches' };
+  }
+  function liveProgress() {
+    if (!progRefs || !progRefs.set) return;
+    const info = sysProgressInfo();
+    progRefs.set({ sub: info.sub, percent: info.percent });
+  }
+
   function selSet() {
     if (!S.systemSel || !(S.systemSel instanceof Set)) S.systemSel = new Set();
     return S.systemSel;
   }
-
-  // Default selection: every safe target preselected after a scan.
   function preselect(targets) {
     const sel = selSet();
     sel.clear();
     targets.forEach((t) => { if (t.safe) sel.add(t.id); });
   }
-
-  // Group scanned targets by their category, preserving first-seen order.
   function groupByCategory(targets) {
     const order = [];
     const map = new Map();
@@ -32,101 +58,90 @@
     });
     return order.map((cat) => ({ cat, items: map.get(cat) }));
   }
+  // Single source of truth: the shared cache mirror (loaded at boot, refreshed
+  // by foreground rescans here and by background scans via onCacheUpdated).
+  function targetsNow() { return Array.isArray(S.sysTargets) ? S.sysTargets : []; }
 
   SP.screens.system = function (host) {
-    // ---- async scan, cached on S.system; (re)render into the same host ----
-    // Uses the shared live scan banner instead of a full-screen spinner, so the
-    // header + any existing list stay visible while caches are measured.
-    async function ensureScan() {
-      if (S.system && Array.isArray(S.system.targets)) return;
-      S.system = Object.assign({}, S.system, { loading: true, error: null });
-      SP.beginScan('system', 'system caches');
+    // Detach any live progress subscription so re-renders never leak listeners.
+    function detach() {
+      if (S.systemUnsub) { try { S.systemUnsub(); } catch (_) {} S.systemUnsub = null; }
+    }
+
+    // Revalidate caches: foreground (manual button) or silent (mount, when stale).
+    // System scan streams { phase, index, total, current }: it has a total, so we
+    // render a DETERMINATE "X of Y · NN%" block. Progress lands on S.systemProgress
+    // and repaints via paint() so the running strip updates live.
+    async function runScan() {
+      if (S.systemLoading) return; // a scan is already in flight
+      detach();
+      S.systemLoading = true; S.systemError = null;
+      S.systemProgress = null;
+      // Guard against double-subscribe: detach() above already cleared any prior sub.
+      // Update the scan card in place; do NOT paint() per tick (that rebuilt the
+      // whole screen and flickered while a scan was running).
+      S.systemUnsub = api.onSystemProgress ? api.onSystemProgress((p) => {
+        if (!p || p.phase === 'done') return;
+        S.systemProgress = p;
+        liveProgress();
+      }) : null;
+      paint();
       try {
         const res = await api.scanSystem();
         if (res && res.ok) {
           const targets = (res.targets || []).slice().sort((a, b) => (b.size || 0) - (a.size || 0));
-          S.system = { loading: false, error: null, targets };
-          preselect(targets);
+          const hadSelection = selSet().size > 0;
+          S.sysTargets = targets;
+          S.lastScan = Date.now();
+          if (!hadSelection) preselect(targets);
         } else {
-          S.system = { loading: false, error: (res && res.error) || 'Scan failed', targets: S.system && S.system.targets || null };
+          S.systemError = (res && res.error) || 'Scan failed';
         }
       } catch (err) {
-        S.system = { loading: false, error: (err && err.message) || 'Scan failed', targets: S.system && S.system.targets || null };
+        S.systemError = (err && err.message) || 'Scan failed';
       } finally {
-        SP.endScan();
+        detach();
+        S.systemLoading = false;
+        S.systemProgress = null;
+        paint();
       }
-      if (S.route === 'system') render();
     }
 
-    // Force a fresh scan (Scan caches button / retry / empty state). Keeps the
-    // current list visible with the live banner above it (no blanking).
-    async function rescan() {
-      S.system = Object.assign({}, S.system, { loading: true, error: null });
-      SP.beginScan('system', 'system caches');
-      render();
-      try {
-        const res = await api.scanSystem();
-        if (res && res.ok) {
-          const targets = (res.targets || []).slice().sort((a, b) => (b.size || 0) - (a.size || 0));
-          S.system = { loading: false, error: null, targets };
-          preselect(targets);
-        } else {
-          S.system = { loading: false, error: (res && res.error) || 'Scan failed', targets: S.system && S.system.targets || null };
-        }
-      } catch (err) {
-        S.system = { loading: false, error: (err && err.message) || 'Scan failed', targets: S.system && S.system.targets || null };
-      } finally {
-        SP.endScan();
-      }
-      if (S.route === 'system') render();
-    }
-
-    // ---- clean selected targets ----
     async function cleanSelected() {
-      const st = S.system;
-      if (!st || !st.targets) return;
+      const targets = targetsNow();
       const sel = selSet();
-      const chosen = st.targets.filter((t) => sel.has(t.id));
-      if (!chosen.length || st.cleaning) return;
-
-      // Each existing path becomes a contents-empty job (keeps the dir).
+      const chosen = targets.filter((t) => sel.has(t.id));
+      if (!chosen.length || S.systemCleaning) return;
       const jobs = [];
       chosen.forEach((t) => {
         const paths = (t.existingPaths && t.existingPaths.length) ? t.existingPaths : t.paths;
         (paths || []).forEach((p) => jobs.push({ path: p, mode: t.mode || 'contents' }));
       });
       if (!jobs.length) return;
-
-      st.cleaning = true;
-      render();
+      S.systemCleaning = true; paint();
       try {
         const res = await api.clean(jobs, {
           scope: 'system',
           label: chosen.length + ' system ' + (chosen.length === 1 ? 'cache' : 'caches'),
           reversible: true
         });
-        st.cleaning = false;
         if (res && res.ok) {
-          // Drop cleaned targets from the cached list and the selection.
           const cleanedIds = new Set(chosen.map((t) => t.id));
-          st.targets = st.targets.filter((t) => !cleanedIds.has(t.id));
+          S.sysTargets = targetsNow().filter((t) => !cleanedIds.has(t.id));
           cleanedIds.forEach((id) => sel.delete(id));
-          st.lastFreed = res.totalFreed || 0;
           const freed = res.totalFreed != null ? res.totalFreed : chosen.reduce((a, t) => a + (t.size || 0), 0);
           SP.burst(fmt(freed), 'across ' + chosen.length + ' cache' + (chosen.length === 1 ? '' : 's'));
         } else {
-          st.error = (res && res.error) || 'Clean failed';
+          S.systemError = (res && res.error) || 'Clean failed';
         }
       } catch (err) {
-        st.cleaning = false;
-        st.error = (err && err.message) || 'Clean failed';
+        S.systemError = (err && err.message) || 'Clean failed';
       }
-      render();
+      S.systemCleaning = false; paint();
     }
 
-    // ---- header (title + scan button), shared by every state ----
     function header() {
-      const scanning = S.system && S.system.loading;
+      const scanning = S.systemLoading || S.bgScanning;
       return el('div', { style: 'display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:24px' }, [
         el('div', {}, [
           el('div', { style: 'font-size:31px;font-weight:700;letter-spacing:-1.1px', text: 'System Cleaner' }),
@@ -135,12 +150,20 @@
         el('button', {
           style: 'height:44px;padding:0 20px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none' + (scanning ? ';opacity:.7;pointer-events:none' : ''),
           hov: 'background:var(--accent-hover)',
-          onclick: () => { if (!scanning) rescan(); }
-        }, [scanning ? ring('spin', 17) : ic('scan', 17), scanning ? 'Scanning…' : 'Scan caches'])
+          onclick: () => { if (!scanning) runScan(); }
+        }, [scanning ? ring('elastic', 17) : ic('scanner', 17), scanning ? 'Scanning…' : 'Rescan caches'])
       ]);
     }
 
-    // ---- one selectable target row ----
+    // Centered running block, built from the SHARED scan card (spiral ring +
+    // "Measuring caches" + running badge + determinate bar), identical across
+    // screens. Stores progRefs so progress updates it in place (no full paint).
+    function scanBlock() {
+      const info = sysProgressInfo();
+      progRefs = SP.scanCard({ label: info.label, sub: info.sub, percent: info.percent });
+      return progRefs.node;
+    }
+
     function row(t) {
       const sel = selSet();
       const on = sel.has(t.id);
@@ -149,12 +172,12 @@
         class: 'sp-hov',
         style: 'display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border);cursor:pointer;box-shadow:var(--shadow-sm)',
         hov: 'border-color:var(--border-2)',
-        onclick: () => { if (on) sel.delete(t.id); else sel.add(t.id); render(); }
+        onclick: () => { if (on) sel.delete(t.id); else sel.add(t.id); paint(); }
       }, [
         el('div', {
           class: 'sp-check' + (on ? ' sp-check-on' : ''),
           style: 'width:24px;height:24px;border-radius:50%;border:1.5px solid var(--border-2);flex:none;display:grid;place-items:center;color:transparent;transition:.14s'
-        }, [ic('check', 14)]),
+        }, [ic('tick', 14)]),
         el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic(t.icon || 'database', 22)]),
         el('div', { style: 'flex:1;min-width:0' }, [
           el('div', { style: 'font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px' }, [
@@ -171,7 +194,6 @@
       ]);
     }
 
-    // ---- category section (header row + its items) ----
     function group(grp) {
       const total = grp.items.reduce((a, t) => a + (t.size || 0), 0);
       return el('div', {}, [
@@ -183,7 +205,6 @@
       ]);
     }
 
-    // ---- select-all / clear-all toggle in the section heading area ----
     function selectAllRow(targets) {
       const sel = selSet();
       const allOn = targets.length > 0 && targets.every((t) => sel.has(t.id));
@@ -192,85 +213,25 @@
         el('button', {
           style: 'height:34px;padding:0 13px;border-radius:9px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer;font-family:inherit',
           hov: 'background:var(--panel);color:var(--text)',
-          onclick: () => { if (allOn) sel.clear(); else targets.forEach((t) => sel.add(t.id)); render(); }
+          onclick: () => { if (allOn) sel.clear(); else targets.forEach((t) => sel.add(t.id)); paint(); }
         }, [ic('check-circle', 15), allOn ? 'Clear all' : 'Select all'])
       ]);
     }
 
-    // ---- loading / error / empty placeholders ----
-    function loadingState() {
-      return el('div', { style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:46vh;gap:18px;color:var(--text-3)' }, [
-        el('div', { style: 'color:var(--accent-fg)' }, [ring('orbit', 56)]),
-        el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'Measuring caches…' }),
-        el('div', { style: 'font-size:14px;max-width:360px', text: 'Spaci is sizing your developer and system caches. This only takes a moment.' })
-      ]);
-    }
-
-    function errorState(msg) {
+    // Centered placeholder (animated logo, not a static icon).
+    function bigState(anim, title, body, btnLabel, primary) {
       return el('div', { style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:46vh;gap:16px;color:var(--text-3)' }, [
-        el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
-        el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'Could not scan caches' }),
-        el('div', { style: 'font-size:13.5px;max-width:380px', text: msg || 'Something went wrong while scanning.' }),
-        el('button', {
-          style: 'height:42px;padding:0 20px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;margin-top:4px',
-          hov: 'background:var(--accent-hover)',
-          onclick: () => rescan()
-        }, [ic('scan', 16), 'Try again'])
+        el('div', { style: 'color:var(--accent-fg)' }, [ring(anim, 60)]),
+        el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: title }),
+        el('div', { style: 'font-size:13.5px;max-width:380px', text: body }),
+        btnLabel ? el('button', {
+          style: 'height:42px;padding:0 20px;border-radius:11px;border:' + (primary ? 'none;background:var(--accent);color:var(--on-accent)' : '1px solid var(--border-2);background:var(--panel-2);color:var(--text)') + ';font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;margin-top:4px',
+          hov: primary ? 'background:var(--accent-hover)' : 'background:var(--panel-3)',
+          onclick: () => runScan()
+        }, [ic('scanner', 16), btnLabel]) : null
       ]);
     }
 
-    function emptyState() {
-      return el('div', { style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:46vh;gap:16px;color:var(--text-3)' }, [
-        el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
-        el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'All clean' }),
-        el('div', { style: 'font-size:13.5px;max-width:380px', text: 'No reclaimable caches were found on this machine right now.' }),
-        el('button', {
-          style: 'height:42px;padding:0 20px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;margin-top:4px',
-          hov: 'background:var(--panel-3)',
-          onclick: () => rescan()
-        }, [ic('scan', 16), 'Scan again'])
-      ]);
-    }
-
-    // ---- master render: rebuild the screen body into host ----
-    // The header always renders. During a scan the shared live banner goes
-    // above the list and the previous results (if any) stay visible below it.
-    function render() {
-      host.innerHTML = '';
-      host.appendChild(header());
-
-      const st = S.system;
-      const scanning = SP.scanActive('system');
-      const banner = SP.scanBanner('system');
-      if (banner) host.appendChild(banner);
-
-      // Error with no prior results: show the error placeholder (unless a scan
-      // is currently running, in which case the banner already covers it).
-      if (st && st.error && !st.targets && !scanning) { host.appendChild(errorState(st.error)); SP.setActionBar(null); return; }
-
-      const targets = (st && st.targets) || [];
-      if (!targets.length) {
-        // Nothing to show yet. While scanning, the banner above carries the
-        // progress; otherwise fall back to the empty state.
-        if (!scanning) { host.appendChild(emptyState()); SP.setActionBar(null); }
-        return;
-      }
-
-      // non-blocking error notice (e.g. partial clean failure) above the list
-      if (st && st.error) {
-        host.appendChild(el('div', {
-          style: 'display:flex;align-items:center;gap:10px;padding:13px 16px;border-radius:12px;background:var(--danger-soft);color:var(--danger-fg);font-size:13px;font-weight:600;margin-bottom:4px'
-        }, [ic('warning', 17), st.error]));
-      }
-
-      host.appendChild(selectAllRow(targets));
-      groupByCategory(targets).forEach((grp) => host.appendChild(group(grp)));
-      syncActionBar(targets);
-    }
-
-    // ---- floating action bar reflecting the current cache selection ----
-    // System caches are regenerable, so this is treated as safe / reversible:
-    // accent button, "Clean", and no confirm modal.
     function syncActionBar(targets) {
       const sel = selSet();
       const chosen = targets.filter((t) => sel.has(t.id));
@@ -282,13 +243,46 @@
         size: fmt(bytes),
         action: 'Clean ' + fmt(bytes),
         danger: false,
-        onClear: () => { selSet().clear(); SP.go('system'); },
+        onClear: () => { selSet().clear(); paint(); },
         onClean: () => cleanSelected(),
       });
     }
 
-    // initial paint, then kick off a scan if we have no cached results
-    render();
-    if (!S.system || !Array.isArray(S.system.targets)) ensureScan();
+    function render() {
+      host.innerHTML = '';
+      progRefs = null; // rebuilt by scanBlock() below while scanning
+      host.appendChild(header());
+      const targets = targetsNow();
+      const loading = S.systemLoading || S.bgScanning;
+
+      // Cache-first: if results exist, always show them. A revalidation in
+      // progress shows the shared scan card above the list (centered), not a
+      // blocking spinner.
+      if (targets.length) {
+        if (loading) host.appendChild(scanBlock());
+        if (S.systemError) host.appendChild(el('div', {
+          style: 'display:flex;align-items:center;gap:10px;padding:13px 16px;border-radius:12px;background:var(--danger-soft);color:var(--danger-fg);font-size:13px;font-weight:600;margin:0 0 4px'
+        }, [ic('warning', 17), S.systemError]));
+        host.appendChild(selectAllRow(targets));
+        groupByCategory(targets).forEach((grp) => host.appendChild(group(grp)));
+        syncActionBar(targets);
+        return;
+      }
+
+      // Nothing cached yet.
+      SP.setActionBar(null);
+      if (loading) { host.appendChild(scanBlock()); return; }
+      if (S.systemError) { host.appendChild(bigState('breathe', 'Could not scan caches', S.systemError, 'Try again', true)); return; }
+      host.appendChild(bigState('breathe', 'All clean', 'No reclaimable caches were found on this machine right now.', 'Scan again', false));
+    }
+
+    latestRender = render;
+    render(); // cache-first immediate paint
+
+    // Revalidate: scan now if nothing is cached, or silently if it is stale.
+    // Skip if a background scan is already running (onCacheUpdated will repaint).
+    const haveData = targetsNow().length > 0;
+    const stale = !S.lastScan || (Date.now() - S.lastScan) > 60000;
+    if (!S.bgScanning && !S.systemLoading && (!haveData || stale)) runScan();
   };
 })();

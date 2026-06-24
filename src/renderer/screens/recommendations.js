@@ -129,7 +129,7 @@
       body.innerHTML = '';
       if (!S.recsLoaded || force) {
         body.appendChild(centerState([
-          el('div', { style: 'color:var(--accent-fg)' }, [ring('orbit', 56)]),
+          el('div', { style: 'color:var(--accent-fg)' }, [ring('spiral', 56)]),
           el('div', { style: 'font-size:16px;font-weight:600;color:var(--text-2)', text: 'Finding the safest wins…' }),
         ]));
         loadRecs(force).then(() => { if (S.route === 'recommendations') render(); });
@@ -150,7 +150,7 @@
             style: 'height:44px;padding:0 22px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer',
             hov: 'background:var(--accent-hover)',
             onclick: () => { window.SP_doScan ? window.SP_doScan() : reload(true); },
-          }, [ic('scan', 16), 'Run a scan']),
+          }, [ic('scanner', 16), 'Run a scan']),
         ]));
         return;
       }
@@ -309,7 +309,7 @@
       style: 'height:46px;padding:0 22px;border-radius:12px;border:none;color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer;flex:none' + ((cleaning || !a.jobs.length || S.actionResult) ? ';opacity:.6;pointer-events:none' : ''),
       onclick: () => apply(),
     }, [
-      cleaning ? ic('spaci-ring', 16, { anim: 'spin' }) : ic('trash', 16),
+      cleaning ? ic('spaci-ring', 16, { anim: 'elastic' }) : ic('trash', 16),
       cleaning ? 'Cleaning…' : S.actionResult ? 'Cleaned' : (safe ? 'Clean ' + fmt(a.savings) : 'Remove ' + fmt(a.savings)),
     ]);
 
@@ -333,7 +333,14 @@
       if (S.route === 'action') SP.go('action'); // reflect the cleaning state
       try {
         const res = await api.clean(a.jobs, a.meta);
-        S.actionResult = res && res.ok ? { ok: true, totalFreed: res.totalFreed } : { ok: false, error: (res && res.error) || 'Clean failed' };
+        if (res && res.ok) {
+          S.actionResult = { ok: true, totalFreed: res.totalFreed };
+          // Celebratory success overlay, same as the other clean surfaces.
+          const freed = res.totalFreed != null ? res.totalFreed : (a.savings != null ? a.savings : a.size || 0);
+          SP.burst(SP.fmt(freed), (a.meta && a.meta.label) || a.title || 'across cleaned items');
+        } else {
+          S.actionResult = { ok: false, error: (res && res.error) || 'Clean failed' };
+        }
         // this action is spent; refresh recommendations on next visit
         S.recsLoaded = false;
       } catch (err) {

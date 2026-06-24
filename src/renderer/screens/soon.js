@@ -1,9 +1,9 @@
 'use strict';
-/* Tools preview screen, Spaci v2. Faithful to design/spaci-v2-reference.html
-   (data-screen-label="{{ soonName }}", around lines 701 to 806). Shows one of
-   three upcoming-feature showcases (Duplicate Finder, Scheduled Scans, Spaci
-   Guard) chosen by S.activeSoon, with a tab switcher to flip between them.
-   These previews are not wired to a backend yet, so every figure below is
+/* Tools preview screens, Spaci v2. Faithful to design/spaci-v2-reference.html
+   (around lines 701 to 806). Three upcoming-feature showcases each live on
+   their own page now (no tab switcher): Scheduled Scans, Duplicate Finder and
+   Spaci Guard register as SP.screens.scheduled / .duplicate / .guard. These
+   previews are not wired to a backend yet, so every figure below is
    representative demo data kept inside this module. */
 (function () {
   const SP = window.SP;
@@ -22,34 +22,32 @@
   }
 
   // ---------- tool registry ----------
-  // key, tab label, tab icon, and the header copy (title + pitch + action).
+  // key, and the header copy (title + pitch + right-side action button). Each
+  // tool is its own screen now, so there is no tab metadata anymore.
   const TOOLS = [
     {
       key: 'scheduled',
-      tab: 'Scheduled Scans',
-      tabIcon: 'clock',
       name: 'Scheduled Scans',
       pitch: 'Let Spaci tidy up on its own. Pick a cadence and it quietly reclaims regenerable space in the background, on your terms.',
       actionIcon: 'play',
-      actionLabel: 'Run now'
+      actionLabel: 'Run now',
+      toast: ['Scheduled scans', 'This tool is coming soon']
     },
     {
       key: 'duplicate',
-      tab: 'Duplicate Finder',
-      tabIcon: 'copy',
       name: 'Duplicate Finder',
       pitch: 'Hunt down byte-for-byte duplicates scattered across your disk and reclaim the space they quietly waste, with a safe preview first.',
       actionIcon: 'check-circle',
-      actionLabel: 'Review & clean'
+      actionLabel: 'Review & clean',
+      toast: ['Duplicate Finder', 'This tool is coming soon']
     },
     {
       key: 'guard',
-      tab: 'Spaci Guard',
-      tabIcon: 'shield',
       name: 'Spaci Guard',
       pitch: 'Real-time protection that watches your busiest folders and clears regenerable clutter the moment it appears.',
       actionIcon: 'shield',
-      actionLabel: 'Open Guard'
+      actionLabel: 'Open Guard',
+      toast: ['Spaci Guard', 'This tool is coming soon']
     }
   ];
 
@@ -154,7 +152,8 @@
         ]),
         el('button', {
           style: 'height:48px;padding:0 24px;border-radius:13px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14.5px;display:flex;align-items:center;gap:9px;cursor:pointer;font-family:inherit;flex:none',
-          hov: 'background:var(--accent-hover)'
+          hov: 'background:var(--accent-hover)',
+          onclick: () => SP.toast('Duplicate Finder', 'This tool is coming soon')
         }, [ic('check-circle', 17), 'Review & clean'])
       ])
     );
@@ -184,7 +183,8 @@
             el('div', { style: 'font-weight:700;font-size:15px;color:var(--accent-fg);flex:none', text: g.size }),
             el('button', {
               style: 'height:36px;padding:0 13px;border-radius:9px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:12.5px;cursor:pointer;font-family:inherit;flex:none',
-              hov: 'background:var(--panel-3)'
+              hov: 'background:var(--panel-3)',
+              onclick: () => SP.toast('Duplicate Finder', 'This tool is coming soon')
             }, ['Keep newest'])
           ])
         )
@@ -212,7 +212,8 @@
         ]),
         el('button', {
           style: 'height:46px;padding:0 22px;border-radius:12px;border:1px solid var(--border-2);background:var(--panel);color:var(--text);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none',
-          hov: 'background:var(--panel-2)'
+          hov: 'background:var(--panel-2)',
+          onclick: () => SP.toast('Scheduled scans', 'This tool is coming soon')
         }, [ic('play', 16), 'Run now'])
       ])
     );
@@ -246,7 +247,8 @@
     rows.push(
       el('div', {
         style: 'display:flex;align-items:center;justify-content:center;gap:9px;padding:16px;border-radius:16px;border:1.5px dashed var(--border-2);color:var(--text-3);font-weight:600;font-size:13.5px;cursor:pointer',
-        hov: 'border-color:var(--accent-fg);color:var(--text-2)'
+        hov: 'border-color:var(--accent-fg);color:var(--text-2)',
+        onclick: () => SP.toast('Scheduled scans', 'This tool is coming soon')
       }, [ic('plus', 16), 'Add a schedule'])
     );
 
@@ -331,46 +333,35 @@
   // ============================================================
   //  SCREEN
   // ============================================================
-  SP.screens.soon = function (host) {
-    // Resolve the active tool, defaulting to the duplicate finder.
-    const activeKey = (S.activeSoon && PREVIEWS[S.activeSoon]) ? S.activeSoon : 'duplicate';
-    if (S.activeSoon !== activeKey) S.activeSoon = activeKey;
-    const tool = TOOLS.find((t) => t.key === activeKey);
-
+  // Shared renderer for one tool page: its own header (title + pitch + the
+  // right-side action button) followed by that tool's preview content. No tab
+  // chips, each tool is a standalone screen.
+  function renderTool(host, tool) {
     const root = el('div', { class: 'sp-fadeup', 'data-screen-label': tool.name });
 
     // header: title + pitch on the left, primary action on the right
     root.appendChild(
-      el('div', { style: 'display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:22px' }, [
+      el('div', { style: 'display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:24px' }, [
         el('div', {}, [
           el('div', { style: 'font-size:31px;font-weight:700;letter-spacing:-1.1px', text: tool.name }),
           el('div', { style: 'color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px', text: tool.pitch })
         ]),
         el('button', {
           style: 'height:46px;padding:0 22px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer;font-family:inherit;flex:none',
-          hov: 'background:var(--accent-hover)'
+          hov: 'background:var(--accent-hover)',
+          onclick: () => SP.toast(tool.toast[0], tool.toast[1])
         }, [ic(tool.actionIcon, 17), tool.actionLabel])
       ])
     );
 
-    // tab chips: clicking sets S.activeSoon and re-renders via SP.go('soon')
-    root.appendChild(
-      el('div', { style: 'display:flex;gap:8px;margin-bottom:24px;flex-wrap:wrap' },
-        TOOLS.map((t) => {
-          const on = t.key === activeKey;
-          return el('div', {
-            class: on ? 'sp-chip-on' : '',
-            style: 'display:flex;align-items:center;gap:8px;padding:0 16px;height:40px;border-radius:99px;background:var(--panel);border:1px solid var(--border);font-size:13.5px;font-weight:600;color:var(--text-2);cursor:pointer',
-            hov: on ? '' : 'border-color:var(--border-2);color:var(--text)',
-            onclick: () => { S.activeSoon = t.key; SP.go('soon'); }
-          }, [ic(t.tabIcon, 16), t.tab]);
-        })
-      )
-    );
-
-    // active tool preview
-    (PREVIEWS[activeKey]() || []).forEach((node) => root.appendChild(node));
+    // tool preview content
+    (PREVIEWS[tool.key]() || []).forEach((node) => root.appendChild(node));
 
     host.appendChild(root);
-  };
+  }
+
+  // Register one screen per tool: SP.screens.scheduled / .duplicate / .guard.
+  TOOLS.forEach((tool) => {
+    SP.screens[tool.key] = function (host) { renderTool(host, tool); };
+  });
 })();

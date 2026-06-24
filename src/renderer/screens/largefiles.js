@@ -3,15 +3,30 @@
    (data-screen-label="Large Files"), wired to the real large-file scanner via
    window.api.scanLargeFiles(root, minBytes) with streamed progress through
    window.api.onLargeFilesProgress(). The backend returns
-   { ok, files: [{ path, size, mtimeMs, ext }], scanned }. Results are cached on
-   S.largeFiles so navigating away and back does not rescan. Deleting is not
-   offered here (it is permanent); each row instead reveals the file in Finder
-   or opens it. */
+   { ok, files: [{ path, size, mtimeMs, ext }], scanned }.
+
+   Results are NOT in the on-disk cache, so they are kept in memory on
+   S.largeFiles ({ files, root, minBytes, scanned, scannedAt }) across mounts:
+   navigating away and back never rescans (scanning is heavy) and never shows a
+   stuck banner. The scan never re-mounts the screen (no SP.beginScan); instead a
+   module-level latestRender points at the live mount's render(), so a scan that
+   resolves after a re-mount always repaints the attached host and can never get
+   stuck. Deleting is permanent, so each delete is gated behind a confirm modal
+   and uses danger styling. */
 (function () {
   const SP = window.SP;
   const { el, ic, ring, fmt } = SP;
   const S = SP.state;
   const api = window.api;
+
+  // Points at the current mount's render so an async scan repaints the live
+  // (attached) host even if it was kicked off by an earlier mount.
+  let latestRender = null;
+  function paint() { if (latestRender) latestRender(); }
+
+  // The live scan card updates IN PLACE on each progress tick (no full paint),
+  // so toggling selection while a scan runs never rebuilds the page / flickers.
+  let progRefs = null; // { node, set } of the current shared scan card
 
   // ---------- threshold presets ----------
   const MB = 1024 * 1024;
@@ -70,39 +85,75 @@
     return S.selLarge;
   }
 
+  // Live count text. The scanner emits { scanned, found, current }: no total or
+  // percent, so this is INDETERMINATE with running counts (no fake %). Used to
+  // build the shared scan card and to update it in place on each tick.
+  function lfProgressInfo() {
+    const pr = S.largeProgress || {};
+    const dirs = pr.scanned != null ? pr.scanned : 0;
+    const found = pr.found != null ? pr.found : 0;
+    const sub = dirs
+      ? dirs.toLocaleString() + ' folders scanned · ' + found.toLocaleString() + ' large ' + (found === 1 ? 'file' : 'files')
+      : 'Checking files over ' + minLabel(minBytes()) + '…';
+    const root = S.largeRoot;
+    return { sub, label: root ? 'Scanning ' + baseName(root) : 'Scanning' };
+  }
+  function liveProgress() {
+    if (!progRefs || !progRefs.set) return;
+    const info = lfProgressInfo();
+    progRefs.set({ sub: info.sub });
+  }
+
+  // Current in-memory results (kept across mounts), and their files list.
+  function dataNow() { return S.largeFiles || null; }
+  function currentFiles() {
+    const d = dataNow();
+    return (d && Array.isArray(d.files)) ? d.files : [];
+  }
+
   // ---------- screen ----------
   SP.screens.largefiles = function (host) {
-    // progress unsubscribe handle, kept on shared state so a re-render does not
-    // leak listeners; we always detach before attaching a new one.
+    // Detach any live progress subscription so re-renders never leak listeners.
     function detach() {
       if (S.largeUnsub) { try { S.largeUnsub(); } catch (_) {} S.largeUnsub = null; }
     }
 
     // Kick off a scan. `root` null => backend defaults to the home directory.
-    // Uses the shared live scan banner (app.js listens to onLargeFilesProgress
-    // and updates it in place) so the header + any previous list stay visible.
+    // No SP.beginScan: this never re-mounts the screen. Progress streams into
+    // S.largeProgress and updates a stable node so we do not rebuild the page.
+    // Completion ALWAYS repaints via paint() (the live render), so it can never
+    // get stuck even if a re-mount happened mid-scan.
     async function runScan(root) {
+      if (S.largeFilesLoading) return; // a scan is already in flight
       detach();
       S.largeRoot = root || S.largeRoot || null;
-      S.largeScan = { loading: true, error: null, progress: null, root: S.largeRoot };
-      SP.beginScan('largefiles', S.largeRoot || 'your home folder');
-      render();
+      S.largeFilesLoading = true;
+      S.largeError = null;
+      S.largeProgress = null;
+      const want = minBytes();
+      // live progress: update the shared scan card in place (no full paint).
+      S.largeUnsub = api.onLargeFilesProgress ? api.onLargeFilesProgress((p) => {
+        if (!p || p.phase === 'done') return;
+        S.largeProgress = p;
+        liveProgress();
+      }) : null;
+      paint();
       try {
-        const res = await api.scanLargeFiles(S.largeRoot, minBytes());
+        const res = await api.scanLargeFiles(S.largeRoot, want);
         if (res && res.ok) {
           const files = (res.files || []).slice().sort((a, b) => (b.size || 0) - (a.size || 0));
-          S.largeFiles = { files, scanned: res.scanned || 0, root: S.largeRoot, minBytes: minBytes(), at: Date.now() };
-          S.largeScan = null;
+          S.largeFiles = { files, scanned: res.scanned || 0, root: S.largeRoot, minBytes: want, scannedAt: Date.now() };
+          S.largeError = null;
         } else {
-          S.largeScan = { loading: false, error: (res && res.error) || 'Scan failed', progress: null, root: S.largeRoot };
+          S.largeError = (res && res.error) || 'Scan failed';
         }
       } catch (err) {
-        S.largeScan = { loading: false, error: (err && err.message) || 'Scan failed', progress: null, root: S.largeRoot };
-      } finally {
-        detach();
-        SP.endScan();
+        S.largeError = (err && err.message) || 'Scan failed';
       }
-      if (S.route === 'largefiles') render();
+      detach();
+      S.largeFilesLoading = false;
+      S.largeProgress = null;
+      paint();
     }
 
     // Choose a folder to scan, then scan it.
@@ -116,12 +167,12 @@
     function setThreshold(bytes) {
       if (S.largeMinBytes === bytes) return;
       S.largeMinBytes = bytes;
-      render();
+      paint();
     }
 
     // ---------- header (title + threshold chips + scan) ----------
     function header() {
-      const scanning = S.largeScan && S.largeScan.loading;
+      const scanning = S.largeFilesLoading;
       const current = minBytes();
 
       const chips = PRESETS.map((p) => {
@@ -153,7 +204,7 @@
               style: 'height:44px;padding:0 20px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit' + (scanning ? ';opacity:.7;pointer-events:none' : ''),
               hov: 'background:var(--accent-hover)',
               onclick: () => { if (!scanning) runScan(S.largeRoot); }
-            }, [scanning ? ring('spin', 17) : ic('scan', 17), scanning ? 'Scanning…' : 'Scan'])
+            }, [scanning ? ring('elastic', 17) : ic('scanner', 17), scanning ? 'Scanning…' : 'Scan'])
           ])
         ]),
         // threshold chips row + active scan root
@@ -167,7 +218,7 @@
 
     // Small muted chip describing the folder being scanned.
     function rootChip() {
-      const root = (S.largeFiles && S.largeFiles.root) || S.largeRoot;
+      const root = (dataNow() && dataNow().root) || S.largeRoot;
       if (!root) return null;
       return el('div', {
         style: 'display:flex;align-items:center;gap:7px;height:40px;padding:0 13px;border-radius:99px;background:var(--panel-2);border:1px solid var(--border);font-size:12.5px;font-weight:600;color:var(--text-3);max-width:320px;overflow:hidden',
@@ -185,6 +236,15 @@
       }, [ic('warning', 17), 'Files removed here are permanently deleted and cannot be restored.']);
     }
 
+    // Centered running block, built from the SHARED scan card (spiral ring +
+    // "Scanning" + running badge + indeterminate bar), identical across screens.
+    // Stores progRefs so progress updates it in place (no full paint).
+    function scanBlock() {
+      const info = lfProgressInfo();
+      progRefs = SP.scanCard({ label: info.label, sub: info.sub, percent: null });
+      return progRefs.node;
+    }
+
     // ---------- one file row ----------
     function row(f) {
       const name = baseName(f.path);
@@ -196,12 +256,11 @@
       const check = el('div', {
         class: 'sp-check' + (sel.has(f.path) ? ' sp-check-on' : ''),
         style: 'width:24px;height:24px;border-radius:50%;border:1.5px solid var(--border-2);flex:none;display:grid;place-items:center;color:transparent;transition:.14s'
-      }, [ic('check', 14)]);
+      }, [ic('tick', 14)]);
       check.addEventListener('click', (e) => {
         stop(e);
-        if (sel.has(f.path)) { sel.delete(f.path); check.className = 'sp-check'; }
-        else { sel.add(f.path); check.className = 'sp-check sp-check-on'; }
-        syncActionBar();
+        if (sel.has(f.path)) sel.delete(f.path); else sel.add(f.path);
+        paint();
       });
 
       return el('div', {
@@ -244,45 +303,18 @@
     async function reveal(p) { try { await api.reveal(p); } catch (_) { /* ignore */ } }
     async function open(p) { try { await api.openPath(p); } catch (_) { /* ignore */ } }
 
-    // ---------- live progress (loading) ----------
-    // Painted into a stable node id so streamed updates do not rebuild the page.
-    function paintProgress() {
-      const line = document.getElementById('sp-lf-progress');
-      if (!line) return;
-      const pr = (S.largeScan && S.largeScan.progress) || {};
-      const dirs = pr.scanned != null ? pr.scanned : 0;
-      const found = pr.found != null ? pr.found : 0;
-      line.textContent = dirs.toLocaleString() + ' folders scanned · ' + found + ' large ' + (found === 1 ? 'file' : 'files') + ' found';
-    }
-
-    function loadingState() {
-      const cur = (S.largeScan && S.largeScan.progress && S.largeScan.progress.current) || '';
-      return el('div', {
-        style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:46vh;gap:18px;color:var(--text-3)'
-      }, [
-        el('div', { style: 'color:var(--accent-fg)' }, [ring('orbit', 56)]),
-        el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'Hunting for large files…' }),
-        el('div', { id: 'sp-lf-progress', style: 'font-size:13.5px;font-weight:600;color:var(--text-2);font-variant-numeric:tabular-nums' }, ['Starting…']),
-        cur ? el('div', {
-          class: 'mono',
-          style: 'font-size:11.5px;max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-4)',
-          text: cur
-        }) : null
-      ]);
-    }
-
     function errorState(msg) {
       return el('div', {
         style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:46vh;gap:16px;color:var(--text-3)'
       }, [
-        el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
+        el('div', { style: 'color:var(--accent-fg)' }, [ring('breathe', 60)]),
         el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'Could not scan for large files' }),
         el('div', { style: 'font-size:13.5px;max-width:380px', text: msg || 'Something went wrong while scanning.' }),
         el('button', {
           style: 'height:42px;padding:0 20px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;margin-top:4px',
           hov: 'background:var(--accent-hover)',
           onclick: () => runScan(S.largeRoot)
-        }, [ic('scan', 16), 'Try again'])
+        }, [ic('scanner', 16), 'Try again'])
       ]);
     }
 
@@ -291,7 +323,7 @@
       return el('div', {
         style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:42vh;gap:16px;color:var(--text-3)'
       }, [
-        el('spaci-icon', { name: 'spaci-ring', anim: 'wave', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
+        el('div', { style: 'color:var(--accent-fg)' }, [ring('breathe', 60)]),
         el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'Find your biggest files' }),
         el('div', { style: 'font-size:13.5px;max-width:400px', text: 'Scan your home folder for files at or above ' + minLabel(minBytes()) + ', or pick a specific folder to search.' }),
         el('div', { style: 'display:flex;gap:10px;margin-top:6px' }, [
@@ -299,7 +331,7 @@
             style: 'height:44px;padding:0 22px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit',
             hov: 'background:var(--accent-hover)',
             onclick: () => runScan(null)
-          }, [ic('scan', 16), 'Scan home folder']),
+          }, [ic('scanner', 16), 'Scan home folder']),
           el('button', {
             style: 'height:44px;padding:0 18px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit',
             hov: 'background:var(--panel-3)',
@@ -314,24 +346,36 @@
       return el('div', {
         style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:42vh;gap:16px;color:var(--text-3)'
       }, [
-        el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
+        el('div', { style: 'color:var(--accent-fg)' }, [ring('breathe', 60)]),
         el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'No large files found' }),
-        el('div', { style: 'font-size:13.5px;max-width:400px', text: 'Nothing here is at or above ' + minLabel((S.largeFiles && S.largeFiles.minBytes) || minBytes()) + '. Try a smaller threshold or a different folder.' }),
+        el('div', { style: 'font-size:13.5px;max-width:400px', text: 'Nothing here is at or above ' + minLabel((dataNow() && dataNow().minBytes) || minBytes()) + '. Try a smaller threshold or a different folder.' }),
         el('button', {
           style: 'height:42px;padding:0 20px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;margin-top:4px',
           hov: 'background:var(--panel-3)',
           onclick: () => runScan(S.largeRoot)
-        }, [ic('scan', 16), 'Scan again'])
+        }, [ic('scanner', 16), 'Scan again'])
       ]);
     }
 
     // ---------- summary strip above the list ----------
     function summary(data) {
+      const sel = selSet();
       const totalBytes = data.files.reduce((a, f) => a + (f.size || 0), 0);
+      const allOn = data.files.length > 0 && data.files.every((f) => sel.has(f.path));
       return el('div', {
-        style: 'display:flex;flex-wrap:wrap;gap:10px 30px;align-items:center;justify-content:space-between;margin-bottom:14px'
+        style: 'display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;justify-content:space-between;margin-bottom:14px'
       }, [
-        el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600', text: data.files.length + (data.files.length === 1 ? ' large file' : ' large files') + ' · ' + fmt(totalBytes) }),
+        el('div', { style: 'display:flex;align-items:center;gap:18px;flex-wrap:wrap' }, [
+          el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600', text: data.files.length + (data.files.length === 1 ? ' large file' : ' large files') + ' · ' + fmt(totalBytes) }),
+          el('button', {
+            style: 'height:32px;padding:0 12px;border-radius:9px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer;font-family:inherit',
+            hov: 'background:var(--panel);color:var(--text)',
+            onclick: () => {
+              if (allOn) sel.clear(); else data.files.forEach((f) => sel.add(f.path));
+              paint();
+            }
+          }, [ic('check-circle', 15), allOn ? 'Clear all' : 'Select all'])
+        ]),
         el('div', { style: 'font-size:12.5px;color:var(--text-4);font-variant-numeric:tabular-nums', text: (data.scanned || 0).toLocaleString() + ' folders scanned' })
       ]);
     }
@@ -339,9 +383,6 @@
     // ---------- floating action bar (permanent delete) ----------
     // Only the currently-listed files count toward the selection. Deleting is
     // permanent, so this uses the red danger button and a confirm modal.
-    function currentFiles() {
-      return (S.largeFiles && Array.isArray(S.largeFiles.files)) ? S.largeFiles.files : [];
-    }
     function selectedFiles() {
       const sel = selSet();
       return currentFiles().filter((f) => sel.has(f.path));
@@ -356,7 +397,7 @@
         size: fmt(bytes),
         action: 'Delete ' + fmt(bytes),
         danger: true,
-        onClear: () => { selSet().clear(); SP.go('largefiles'); },
+        onClear: () => { selSet().clear(); paint(); },
         onClean: () => doDelete(),
       });
     }
@@ -365,6 +406,7 @@
       if (S.largeDeleting) return;
       const chosen = selectedFiles();
       if (!chosen.length) return;
+      // Permanent, irreversible deletion: always gate behind a confirm modal.
       const ok = await SP.confirm({
         title: 'Delete ' + chosen.length + ' file' + (chosen.length === 1 ? '' : 's') + '?',
         body: 'These files will be permanently deleted and cannot be restored.',
@@ -390,47 +432,50 @@
         }
       } catch (_) { /* ignore */ }
       S.largeDeleting = false;
-      if (S.route === 'largefiles') SP.go('largefiles');
+      paint();
     }
 
     // ---------- master render ----------
-    // The header always renders. During a scan the shared live banner goes
-    // above the list and the previous results (if any) stay visible below it.
+    // Cache-first (in-memory): if results exist, always show them. A rescan in
+    // progress shows a subtle strip above the list, not a blocking spinner. The
+    // full-screen animated loader is only used when there are NO results yet.
     function render() {
       host.innerHTML = '';
+      progRefs = null; // rebuilt by scanBlock() below while scanning
       host.appendChild(header());
 
-      const scanning = SP.scanActive('largefiles');
-      const banner = SP.scanBanner('largefiles');
-      if (banner) host.appendChild(banner);
+      const loading = S.largeFilesLoading;
+      const data = dataNow();
 
-      const scan = S.largeScan;
-      if (scan && scan.error && !scanning) { host.appendChild(errorState(scan.error)); SP.setActionBar(null); return; }
-
-      const data = S.largeFiles;
-      if (!data) {
-        // Nothing scanned yet. While scanning, the banner above carries the
-        // progress; otherwise invite the user to start a scan.
-        if (!scanning) { host.appendChild(startState()); SP.setActionBar(null); }
+      // We have results: keep them visible. Rescans show the shared scan card
+      // (centered) above the list.
+      if (data && data.files.length) {
+        if (loading) host.appendChild(scanBlock());
+        host.appendChild(warnBanner());
+        host.appendChild(summary(data));
+        host.appendChild(
+          el('div', { class: 'sp-stagger', style: 'display:flex;flex-direction:column;gap:9px' }, data.files.map(row))
+        );
+        syncActionBar();
         return;
       }
 
-      host.appendChild(warnBanner());
+      // No rows to show. Clear any stale action bar.
+      SP.setActionBar(null);
 
-      if (!data.files.length) {
-        if (!scanning) { host.appendChild(emptyState()); SP.setActionBar(null); }
-        return;
-      }
-
-      host.appendChild(summary(data));
-      host.appendChild(
-        el('div', { class: 'sp-stagger', style: 'display:flex;flex-direction:column;gap:9px' }, data.files.map(row))
-      );
-      syncActionBar();
+      // Scanning with no results yet: the shared scan card is the sole content.
+      if (loading) { host.appendChild(scanBlock()); return; }
+      if (S.largeError) { host.appendChild(errorState(S.largeError)); return; }
+      // Scan completed but matched nothing.
+      if (data) { host.appendChild(emptyState()); return; }
+      // Never scanned: invite a scan.
+      host.appendChild(startState());
     }
 
-    // initial paint. Results are cached on S.largeFiles, so revisiting the
-    // screen never rescans on its own; the user must press Scan.
+    // Mount: point the live render here, then paint immediately (in-memory
+    // cache-first). Results persist on S.largeFiles across mounts, so revisiting
+    // never rescans on its own; the user must press Scan.
+    latestRender = render;
     render();
   };
 })();

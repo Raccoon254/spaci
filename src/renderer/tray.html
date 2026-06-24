@@ -21,12 +21,20 @@
         margin: 0;
         overflow: hidden;
       }
+      /* Hero accent wash on the reclaimable card. Strong on dark, subtle on
+         light so the blue does not look heavy or muddy over the warm panel. */
+      #tray {
+        --hero-wash: rgba(1, 75, 170, 0.2);
+      }
+      #tray.light {
+        --hero-wash: rgba(1, 75, 170, 0.08);
+      }
     </style>
   </head>
   <body>
     <div class="sp-root" id="tray" style="position: static; inset: auto; height: 100vh; background: transparent; display: block; padding: 12px"></div>
 
-    <script src="spaci-icons.js"></script>
+    <script src="spaci-logo.js"></script>
     <script src="icon-component.js"></script>
     <script src="tray.js"></script>
   </body>

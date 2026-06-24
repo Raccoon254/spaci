@@ -1,12 +1,13 @@
 'use strict';
-/* Spaci menu bar widget. A complete, glanceable, lightly gamified panel:
+/* Spaci menu bar widget. A compact, glanceable, lightly gamified panel:
    brand + disk + Guard, a reclaimable hero with a live classification bar,
-   Fast + Deep scan, the storage classification breakdown, an all-time
-   reclaimed achievement, and quick actions. Uses the preload `api`. */
+   Fast + Deep scan, an all-time reclaimed achievement, and quick actions.
+   Uses the preload `api`. */
 
 const CAT_COLORS = {
   appdata: '#6f9be0', applications: '#d96a8a', downloads: '#e0954f', media: '#8b6bd9',
   developer: '#3b6fd0', caches: '#e6b85c', documents: '#2fb8a8', mail: '#7fb5c9',
+  browsers: '#46b58d', xcode: '#6c7ae0',
   system: '#7a8a99', other: '#8b867f'
 };
 const PALETTE = ['#6f9be0', '#d96a8a', '#e0954f', '#8b6bd9', '#3b6fd0', '#e6b85c', '#2fb8a8', '#7a8a99'];
@@ -62,7 +63,7 @@ function render() {
 
   const segs = cats.slice(0, 6).map((c, i) => el('span', { title: c.label, style: `height:100%;border-radius:2px;background:${colorFor(c, i)};flex-basis:${((Number(c.bytes) || 0) / sumCats) * 100}%;flex-grow:0;flex-shrink:0;transform-origin:left;animation:sp-segment .5s cubic-bezier(.22,.61,.36,1) backwards` }));
 
-  const panel = el('div', { style: 'border-radius:18px;border:1px solid var(--border-2);background:linear-gradient(180deg,rgba(1,75,170,.20),transparent 200px),var(--panel-2);overflow:hidden;height:100%;display:flex;flex-direction:column;box-shadow:0 26px 60px rgba(0,0,0,.42)' }, [
+  const panel = el('div', { style: 'border-radius:18px;border:1px solid var(--border-2);background:linear-gradient(180deg,var(--hero-wash),transparent 200px),var(--panel-2);overflow:hidden;height:100%;display:flex;flex-direction:column;box-shadow:0 26px 60px rgba(0,0,0,.42)' }, [
     // header
     el('div', { style: 'display:flex;align-items:center;gap:12px;padding:16px 18px 13px' }, [
       el('div', { style: 'color:var(--accent-fg)' }, [ringEl(sc ? 'spin' : 'shimmer', 34)]),
@@ -84,19 +85,8 @@ function render() {
       // scan buttons: Fast + Deep
       el('div', { style: 'display:flex;gap:9px;margin-top:14px' }, [
         el('button', { style: 'flex:1;height:44px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel);color:var(--text);font-weight:700;font-size:13.5px;display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;font-family:inherit', hov: 'background:var(--panel-3)', onclick: () => doScan('fast') }, [ic('flash', 16, { color: 'var(--accent-fg)' }), 'Fast scan']),
-        el('button', { style: 'flex:1.3;height:44px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:13.5px;display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;font-family:inherit', hov: 'background:var(--accent-hover)', onclick: () => doScan('deep') }, [sc ? ringEl('spin', 16) : ic('scan', 16), 'Deep scan'])
+        el('button', { style: 'flex:1.3;height:44px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:13.5px;display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;font-family:inherit', hov: 'background:var(--accent-hover)', onclick: () => doScan('deep') }, [sc ? ringEl('elastic', 16) : ic('scanner', 16), 'Deep scan'])
       ])
-    ]),
-
-    // classification breakdown
-    el('div', { style: 'padding:0 18px 14px' }, [
-      el('div', { style: 'font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-3);font-weight:700;margin-bottom:10px', text: 'Storage classification' }),
-      el('div', { style: 'display:flex;flex-direction:column;gap:8px' },
-        cats.slice(0, 5).map((c, i) => el('div', { style: 'display:flex;align-items:center;gap:9px' }, [
-          el('span', { style: 'width:9px;height:9px;border-radius:3px;flex:none;background:' + colorFor(c, i) }),
-          el('span', { style: 'flex:1;font-size:12.5px;font-weight:600;color:var(--text-2)', text: c.label }),
-          el('span', { style: 'font-size:12.5px;color:var(--text-3);font-variant-numeric:tabular-nums', text: fmt(c.bytes) })
-        ])))
     ]),
 
     // quick stats + gamified lifetime
@@ -110,7 +100,7 @@ function render() {
 
     // actions
     el('div', { style: 'border-top:1px solid var(--border);padding:7px 8px 9px' }, [
-      actionRow('scan', 'Open Smart Scan', '⌘S', () => openMain('dashboard')),
+      actionRow('radar', 'Open Smart Scan', '⌘S', () => openMain('dashboard')),
       actionRow('dashboard', 'Open Spaci', '⌘O', () => openMain()),
       actionRow('settings', 'Settings', '', () => openMain('settings')),
       actionRow('close', 'Quit Spaci', '⌘Q', quitApp)

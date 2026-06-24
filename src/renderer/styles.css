@@ -154,6 +154,7 @@ button {
 @keyframes sp-pulsering { 0% { transform: scale(0.55); opacity: 0; } 22% { opacity: 0.5; } 100% { transform: scale(1.28); opacity: 0; } }
 @keyframes sp-breathe { 0%, 100% { transform: scale(0.94); } 50% { transform: scale(1.04); } }
 @keyframes sp-toast { from { opacity: 0; transform: translateX(26px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes sp-toast-l { from { opacity: 0; transform: translateX(-26px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes sp-segment { from { opacity: 0; transform: scaleX(0.2); } to { opacity: 1; transform: scaleX(1); } }
 @keyframes sp-donutin { from { opacity: 0; transform: rotate(-14deg) scale(0.9); } to { opacity: 1; transform: rotate(0) scale(1); } }
 @keyframes sp-chase { 0% { opacity: 0.16; } 10% { opacity: 1; } 30% { opacity: 0.16; } 100% { opacity: 0.16; } }
@@ -162,17 +163,21 @@ button {
 @keyframes sp-explode { 0% { transform: translateY(0) scale(1); opacity: 1; } 42% { transform: translateY(-18px) scale(0.35); opacity: 0; } 58% { transform: translateY(-18px) scale(0.35); opacity: 0; } 100% { transform: translateY(0) scale(1); opacity: 1; } }
 @keyframes sp-ping { 0% { transform: scale(0.4); opacity: 0.55; } 80% { opacity: 0; } 100% { transform: scale(1.7); opacity: 0; } }
 @keyframes sp-indet { 0% { transform: translateX(-120%); } 100% { transform: translateX(330%); } }
+@keyframes sp-barflow { from { background-position: 0% 0; } to { background-position: 200% 0; } }
 
-.sp-fadeup { animation: sp-fadeup 0.42s cubic-bezier(0.22, 0.61, 0.36, 1); }
-.sp-stagger > * { animation: sp-fadeup 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) backwards; }
-.sp-stagger > *:nth-child(1) { animation-delay: 0.02s; }
-.sp-stagger > *:nth-child(2) { animation-delay: 0.06s; }
-.sp-stagger > *:nth-child(3) { animation-delay: 0.1s; }
-.sp-stagger > *:nth-child(4) { animation-delay: 0.14s; }
-.sp-stagger > *:nth-child(5) { animation-delay: 0.18s; }
-.sp-stagger > *:nth-child(6) { animation-delay: 0.22s; }
-.sp-stagger > *:nth-child(7) { animation-delay: 0.26s; }
-.sp-stagger > *:nth-child(8) { animation-delay: 0.3s; }
+/* Entrance animations only play under an .sp-anim ancestor. The shell adds it
+   on real navigation (and once on first mount), so in-place updates such as
+   selecting a row or hovering never replay them. */
+.sp-anim .sp-fadeup { animation: sp-fadeup 0.42s cubic-bezier(0.22, 0.61, 0.36, 1); }
+.sp-anim .sp-stagger > * { animation: sp-fadeup 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) backwards; }
+.sp-anim .sp-stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.sp-anim .sp-stagger > *:nth-child(2) { animation-delay: 0.06s; }
+.sp-anim .sp-stagger > *:nth-child(3) { animation-delay: 0.1s; }
+.sp-anim .sp-stagger > *:nth-child(4) { animation-delay: 0.14s; }
+.sp-anim .sp-stagger > *:nth-child(5) { animation-delay: 0.18s; }
+.sp-anim .sp-stagger > *:nth-child(6) { animation-delay: 0.22s; }
+.sp-anim .sp-stagger > *:nth-child(7) { animation-delay: 0.26s; }
+.sp-anim .sp-stagger > *:nth-child(8) { animation-delay: 0.3s; }
 
 .sp-nav-on { background: var(--panel-2); color: var(--text) !important; }
 .sp-nav-on spaci-icon { color: var(--accent-fg); }

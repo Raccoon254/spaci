@@ -31,7 +31,6 @@
     const d = S.disk || { total: 0, used: 0, free: 0 };
     const cats = (S.breakdown && S.breakdown.categories) || [];
     const recs = S.recs || [];
-    const pctUsed = d.total ? Math.round((d.used / d.total) * 100) : 0;
     const totalReclaim = recs.reduce((a, r) => a + recSize(r), 0);
 
     // header
@@ -48,28 +47,65 @@
       ])
     );
 
-    // donut
-    const svg = svgEl('svg', { viewBox: '0 0 228 228', style: 'position:absolute;inset:0;width:204px;height:204px;overflow:visible;transform-origin:center;animation:sp-donutin .75s cubic-bezier(.22,.61,.36,1)' });
+    // donut, restored to the design's 228x228 size
+    const svg = svgEl('svg', { viewBox: '0 0 228 228', style: 'position:absolute;inset:0;width:228px;height:228px;overflow:visible;transform-origin:center;animation:sp-donutin .75s cubic-bezier(.22,.61,.36,1)' });
     svg.appendChild(svgEl('circle', { cx: 114, cy: 114, r: 103, fill: 'none', stroke: 'var(--track)', 'stroke-width': 16 }));
     // Normalise: arcs fill only the used fraction of the ring, split by each
     // category's share of the breakdown (so they can never exceed 360 degrees).
     const sumCats = cats.reduce((a, c) => a + (Number(c.bytes) || 0), 0) || 1;
     const usedAngle = Math.min(1, d.total ? d.used / d.total : 0) * 360;
+
+    // Center metric: reclaimable total split into a big number + colored unit.
+    const reclaimStr = fmt(totalReclaim);
+    const reclaimSpace = reclaimStr.lastIndexOf(' ');
+    const defaultNum = totalReclaim ? reclaimStr.slice(0, reclaimSpace) : '0';
+    const defaultUnit = totalReclaim ? reclaimStr.slice(reclaimSpace + 1) : 'B';
+    const defaultSub = totalReclaim
+      ? (recs.length ? 'across ' + recs.length + ' rec' + (recs.length === 1 ? '' : 's') : 'reclaimable')
+      : "you're all clear";
+
+    const centerNum = el('span', { text: defaultNum });
+    const centerUnit = el('span', { style: 'font-size:17px;font-weight:600;letter-spacing:-.3px;color:var(--accent-fg);margin-left:3px', text: defaultUnit });
+    const centerSub = el('div', { style: 'font-size:12px;color:var(--text-3);font-weight:600;letter-spacing:.3px;margin-top:2px', text: defaultSub });
+    const center = el('div', { style: 'position:relative;text-align:center;z-index:1;pointer-events:none' }, [
+      el('div', { style: 'font-size:46px;font-weight:700;letter-spacing:-2.2px;line-height:1' }, [centerNum, centerUnit]),
+      centerSub
+    ]);
+
+    function setCenter(num, unit, sub) {
+      centerNum.textContent = num;
+      centerUnit.textContent = unit;
+      centerSub.textContent = sub;
+    }
+    function resetCenter() { setCenter(defaultNum, defaultUnit, defaultSub); }
+
+    // Interactive category arcs: hover grows the stroke and shows that category
+    // in the center; leaving restores the default reclaimable figure.
     let angle = 0;
     cats.forEach((c, i) => {
       const span = ((Number(c.bytes) || 0) / sumCats) * usedAngle;
       if (span < 0.6) { angle += span; return; }
       const gap = Math.min(2, span / 3);
-      svg.appendChild(svgEl('path', { d: arc(114, 114, 103, angle + gap / 2, angle + span - gap / 2), stroke: COLORS[i % COLORS.length], 'stroke-width': 16, 'stroke-linecap': 'round', fill: 'none' }));
+      const path = svgEl('path', { d: arc(114, 114, 103, angle + gap / 2, angle + span - gap / 2), stroke: COLORS[i % COLORS.length], 'stroke-width': 16, 'stroke-linecap': 'round', fill: 'none', style: 'cursor:pointer;transition:stroke-width .15s' });
+      const catStr = fmt(c.bytes);
+      const sp = catStr.lastIndexOf(' ');
+      path.addEventListener('mouseenter', () => {
+        path.setAttribute('stroke-width', 19);
+        setCenter(catStr.slice(0, sp), catStr.slice(sp + 1), c.label || 'category');
+      });
+      path.addEventListener('mouseleave', () => {
+        path.setAttribute('stroke-width', 16);
+        resetCenter();
+      });
+      svg.appendChild(path);
       angle += span;
     });
 
-    const center = el('div', { style: 'position:relative;text-align:center;z-index:1;pointer-events:none' }, [
-      el('div', { style: 'font-size:46px;font-weight:700;letter-spacing:-2.2px;line-height:1', text: pctUsed + '%' }),
-      el('div', { style: 'font-size:12px;color:var(--text-3);font-weight:600;letter-spacing:.3px;margin-top:2px', text: fmt(d.free) + ' free' })
-    ]);
+    // Two soft glow elements behind the donut so the hero reads luminous.
+    const glowBig = el('div', { style: 'position:absolute;top:-40%;right:-6%;width:420px;height:420px;background:radial-gradient(circle,var(--accent-soft) 0%,transparent 70%);opacity:.7;pointer-events:none;z-index:0' });
+    const glowDonut = el('div', { style: 'position:absolute;width:250px;height:250px;border-radius:50%;background:radial-gradient(circle,var(--accent-soft) 0%,transparent 70%);opacity:.6;pointer-events:none;z-index:0' });
 
-    const donutWrap = el('div', { style: 'position:relative;width:204px;height:204px;flex:none;display:grid;place-items:center' }, [center]);
+    const donutWrap = el('div', { style: 'position:relative;width:228px;height:228px;flex:none;display:grid;place-items:center' }, [glowDonut, center]);
     donutWrap.insertBefore(svg, center);
     if (S.scanning) {
       donutWrap.appendChild(el('div', { style: 'position:absolute;inset:6px;border-radius:50%;border:2px solid var(--accent-fg);animation:sp-pulsering 2.4s cubic-bezier(.22,.61,.36,1) infinite' }));
@@ -77,10 +113,13 @@
     }
 
     const scanBtn = el('button', {
-      style: 'height:54px;padding:0 30px;border-radius:14px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:16px;display:flex;align-items:center;gap:11px;cursor:pointer',
+      style: 'height:54px;padding:0 30px;border-radius:14px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:16px;display:flex;align-items:center;gap:11px;cursor:pointer;box-shadow:var(--shadow-md);transition:transform .12s',
       hov: 'background:var(--accent-hover)',
       onclick: () => window.SP_doScan && window.SP_doScan()
-    }, [S.scanning ? ic('spaci-ring', 19, { anim: 'spin' }) : ic('scan', 19), S.scanning ? 'Scanning…' : 'Smart Scan']);
+    }, [S.scanning ? ic('spaci-ring', 19, { anim: 'elastic' }) : ic('scanner', 19), S.scanning ? 'Scanning…' : 'Smart Scan']);
+    scanBtn.addEventListener('mousedown', () => { scanBtn.style.transform = 'scale(.97)'; });
+    scanBtn.addEventListener('mouseup', () => { scanBtn.style.transform = ''; });
+    scanBtn.addEventListener('mouseleave', () => { scanBtn.style.transform = ''; });
 
     const reviewBtn = el('button', {
       style: 'height:54px;padding:0 26px;border-radius:14px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:15px;display:flex;align-items:center;gap:9px;cursor:pointer',
@@ -89,9 +128,10 @@
     }, ['Review', ic('arrow-right', 16)]);
 
     host.appendChild(
-      el('div', { style: 'display:flex;align-items:center;gap:46px;padding:38px 44px;background:var(--panel);border:1px solid var(--border);border-radius:22px;position:relative;overflow:hidden' }, [
+      el('div', { style: 'display:flex;align-items:center;gap:46px;padding:38px 44px;background:var(--panel);border:1px solid var(--border);border-radius:22px;box-shadow:var(--shadow-md);position:relative;overflow:hidden' }, [
+        glowBig,
         donutWrap,
-        el('div', { style: 'flex:1;position:relative' }, [
+        el('div', { style: 'flex:1;position:relative;z-index:1' }, [
           el('div', { style: 'font-size:27px;font-weight:700;letter-spacing:-.9px;margin-bottom:9px', text: totalReclaim ? 'Reclaim ' + fmt(totalReclaim) + ' of space' : 'Run a scan to find space' }),
           el('div', { style: 'color:var(--text-2);font-size:15px;line-height:1.6;margin-bottom:24px;max-width:460px', text: 'Spaci looks across your projects and system caches for regenerable files you can safely clear.' }),
           el('div', { style: 'display:flex;gap:13px' }, [scanBtn, reviewBtn])
@@ -99,19 +139,23 @@
       ])
     );
 
-    // reclaim banner
-    if (totalReclaim) {
-      host.appendChild(
-        el('div', { style: 'display:flex;align-items:center;gap:18px;padding:20px 24px;border-radius:18px;background:var(--accent-soft);border:1px solid var(--border);margin-top:16px' }, [
-          el('div', { style: 'width:50px;height:50px;border-radius:14px;background:var(--accent);color:var(--on-accent);display:grid;place-items:center;flex:none' }, [ic('sparkles', 25)]),
-          el('div', { style: 'flex:1' }, [
-            el('div', { style: 'font-size:22px;font-weight:700;letter-spacing:-.5px' }, [el('span', { text: 'Up to ' }), el('span', { style: 'color:var(--accent-fg)', text: fmt(totalReclaim) }), el('span', { text: ' can be reclaimed' })]),
-            el('div', { style: 'color:var(--text-2);font-size:13.5px;margin-top:2px', text: 'Across ' + recs.length + ' recommendation' + (recs.length === 1 ? '' : 's') + ' from your projects and system.' })
-          ]),
-          el('button', { style: 'height:46px;padding:0 22px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer', hov: 'background:var(--accent-hover)', onclick: () => SP.go('recommendations') }, ['See how', ic('arrow-right', 15)])
-        ])
-      );
-    }
+    // reclaim banner, always shown (at-rest variant when nothing reclaimable yet)
+    const bannerHead = totalReclaim
+      ? el('div', { style: 'font-size:22px;font-weight:700;letter-spacing:-.5px' }, [el('span', { text: 'Up to ' }), el('span', { style: 'color:var(--accent-fg)', text: fmt(totalReclaim) }), el('span', { text: ' can be reclaimed' })])
+      : el('div', { style: 'font-size:22px;font-weight:700;letter-spacing:-.5px', text: 'No reclaimable space found yet' });
+    const bannerSub = totalReclaim
+      ? 'Across ' + recs.length + ' recommendation' + (recs.length === 1 ? '' : 's') + ' from your projects and system.'
+      : 'Run a scan to find regenerable files you can safely clear.';
+    host.appendChild(
+      el('div', { style: 'display:flex;align-items:center;gap:18px;padding:20px 24px;border-radius:18px;background:var(--accent-soft);border:1px solid var(--border);margin-top:16px' }, [
+        el('div', { style: 'width:50px;height:50px;border-radius:14px;background:var(--accent);color:var(--on-accent);display:grid;place-items:center;flex:none;box-shadow:var(--shadow-sm)' }, [ic('sparkles', 25)]),
+        el('div', { style: 'flex:1' }, [
+          bannerHead,
+          el('div', { style: 'color:var(--text-2);font-size:13.5px;margin-top:2px', text: bannerSub })
+        ]),
+        el('button', { style: 'height:46px;padding:0 22px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer', hov: 'background:var(--accent-hover)', onclick: () => (totalReclaim ? SP.go('recommendations') : window.SP_doScan && window.SP_doScan()) }, [totalReclaim ? 'See how' : 'Scan now', ic('arrow-right', 15)])
+      ])
+    );
 
     // storage breakdown card
     const bar = el('div', { style: 'height:16px;border-radius:6px;overflow:hidden;display:flex;gap:3px;background:var(--track)' },
@@ -124,7 +168,7 @@
       ])));
     host.appendChild(
       el('div', { style: 'margin-top:16px' }, [
-        el('div', { class: 'sp-hov', style: 'background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:22px;cursor:pointer', hov: 'border-color:var(--border-2)', onclick: () => SP.go('storage') }, [
+        el('div', { class: 'sp-hov', style: 'background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:22px;box-shadow:var(--shadow-sm);cursor:pointer', hov: 'border-color:var(--border-2)', onclick: () => SP.go('storage') }, [
           el('div', { style: 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:18px' }, [
             el('div', { style: 'font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px' }, ['Storage breakdown', ic('arrow-right', 15, { color: 'var(--text-4)' })]),
             el('div', { style: 'font-size:13px;color:var(--text-3)', text: fmt(d.used) + ' of ' + fmt(d.total) })

@@ -61,6 +61,20 @@
     } catch (_) {}
   }
 
+  // ---- appearance font: persisted choice applied to the app root ----
+  // System uses the default stack (empty = inherit from styles.css), Inter
+  // prefers the Inter family with system fallback, Mono uses a monospace stack.
+  const FONT_STACKS = {
+    System: "",
+    Inter: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+    Mono: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace",
+  };
+  function applyFont(name) {
+    const key = FONT_STACKS[name] != null ? name : 'System';
+    const root = document.getElementById('app') || document.body;
+    if (root) root.style.fontFamily = FONT_STACKS[key];
+  }
+
   function btn(label, iconName, onClick, opt) {
     opt = opt || {};
     const base =
@@ -167,6 +181,9 @@
     const p = store.prefs || {};
     const isLight = (p.theme || S.theme) === 'light';
     const scanFolder = (p.scanRoots && p.scanRoots[0]) || '~';
+    const activeFont = FONT_STACKS[p.font] != null ? p.font : 'System';
+    // Reflect the saved font on mount so the app root matches the active chip.
+    applyFont(activeFont);
 
     // ---------- preferences card ----------
     const card = el('div', {
@@ -233,54 +250,142 @@
           if (appRoot) appRoot.classList.toggle('light', light);
           patchPrefs(store, { theme }, false);
           SP.go('settings');
-        }),
-        true
+        })
       )
     );
 
+    // Appearance font (segmented chip selector: System / Inter / Mono).
+    const fontSeg = el('div', {
+      style:
+        'display:flex;gap:6px;background:var(--panel-2);padding:4px;border-radius:11px;border:1px solid var(--border)',
+    }, ['System', 'Inter', 'Mono'].map((name) => {
+      const on = name === activeFont;
+      return el('div', {
+        class: on ? 'sp-chip-on' : '',
+        style: 'padding:7px 14px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;color:var(--text-2)',
+        onclick: () => {
+          applyFont(name);
+          patchPrefs(store, { font: name }, true);
+        },
+        text: name,
+      });
+    }));
+    card.appendChild(row('Appearance font', 'Typeface used across the app.', fontSeg, true));
+
     host.appendChild(card);
 
-    // ---------- About / version + updates card ----------
+    // ---------- About Spaci card ----------
+    // Faithful to design/spaci-v2-reference.html: animated brand logo, "Spaci."
+    // wordmark + version, a one-line tagline, kentom.co.ke attribution, a row of
+    // ghost link pills, and the live Updates row (wiring preserved).
     const u = store.update || { state: 'idle' };
     const bits = updateBits(u);
-    const aboutCard = el('div', {
-      style:
-        'background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:6px 22px;box-shadow:var(--shadow-sm);margin-top:18px',
-    });
 
-    // version row
-    aboutCard.appendChild(
+    // Section label, matching the reference's uppercase "About" header.
+    host.appendChild(
       el('div', {
         style:
-          'display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 0;border-bottom:1px solid var(--border)',
-      }, [
-        el('div', { style: 'display:flex;align-items:center;gap:13px' }, [
-          el('div', {
-            style:
-              'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--accent-fg)',
-          }, [ic('spaci', 24, { kind: 'logo' })]),
-          el('div', {}, [
-            el('div', { style: 'font-weight:600;font-size:14.5px', text: 'Spaci' }),
-            el('div', {
-              class: 'mono',
-              style: 'color:var(--text-3);font-size:12px;margin-top:3px',
-              text: store.version ? 'Version ' + store.version : 'Version unknown',
-            }),
+          'font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin:30px 0 14px',
+        text: 'About',
+      })
+    );
+
+    const aboutCard = el('div', {
+      style:
+        'background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:24px;box-shadow:var(--shadow-sm)',
+    });
+
+    // Brand header: animated breathing logo + wordmark + version + tagline.
+    const versionLine = el('span', {
+      style: 'color:var(--text-3);font-weight:600;font-size:14px',
+      text: store.version ? 'Version ' + store.version : 'Version 1.2.0',
+    });
+    // If the cached version is missing, fetch it async and fill in place.
+    if (!store.version) {
+      api
+        .appVersion()
+        .then((v) => {
+          store.version = v || '1.2.0';
+          versionLine.textContent = 'Version ' + store.version;
+        })
+        .catch(() => {});
+    }
+
+    aboutCard.appendChild(
+      el('div', { style: 'display:flex;align-items:center;gap:16px' }, [
+        SP.ring('breathe', 46, 'var(--accent-fg)'),
+        el('div', { style: 'flex:1;min-width:0' }, [
+          el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.3px;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap' }, [
+            el('span', {}, ['Spaci', el('span', { style: 'color:var(--accent-fg)', text: '.' })]),
+            versionLine,
           ]),
+          el('div', {
+            style: 'color:var(--text-2);font-size:13px;margin-top:3px;line-height:1.5',
+            text: 'Reclaim disk space with confidence.',
+          }),
         ]),
       ])
     );
 
-    // updates row
+    // Meta chips row: Version, Built by, License (design lines 686-690).
+    function metaChip(iconName, label, value) {
+      return el('div', { style: 'display:flex;align-items:center;gap:9px;font-size:13px;color:var(--text-2)' }, [
+        ic(iconName, 15, { color: 'var(--text-3)' }),
+        el('span', {}, [label + ' ', el('b', { style: 'font-weight:700;color:var(--text)', text: value })]),
+      ]);
+    }
+    const metaVersion = metaChip('box', 'Version', store.version || '1.2.0');
+    if (!store.version) {
+      api
+        .appVersion()
+        .then((v) => {
+          store.version = v || '1.2.0';
+          const b = metaVersion.querySelector('b');
+          if (b) b.textContent = store.version;
+        })
+        .catch(() => {});
+    }
+    aboutCard.appendChild(
+      el('div', {
+        style:
+          'display:flex;flex-wrap:wrap;align-items:center;gap:10px 30px;padding:18px 0 4px;margin-top:18px;border-top:1px solid var(--border)',
+      }, [
+        metaVersion,
+        metaChip('heart', 'Built by', 'kentom.co.ke'),
+        metaChip('shield', 'License', 'MIT'),
+      ])
+    );
+
+    // Link pills (ghost style with hover), opened in the system browser.
+    function linkBtn(label, iconName, url) {
+      const base =
+        'height:40px;padding:0 16px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit';
+      return el('button', {
+        style: base,
+        hov: 'background:var(--panel-3)',
+        onclick: () => { try { api.openExternal(url); } catch (_) {} },
+      }, [ic(iconName, 15), label]);
+    }
+
+    aboutCard.appendChild(
+      el('div', { style: 'display:flex;flex-wrap:wrap;gap:10px;margin-top:16px' }, [
+        linkBtn('GitHub', 'github', 'https://github.com/Raccoon254/spaci'),
+        linkBtn('Website', 'external-link', 'https://spaci.kentom.co.ke'),
+        linkBtn('Donate', 'heart', 'https://www.kentom.co.ke/donate'),
+        linkBtn('Partners', 'sparkles', 'https://www.kentom.co.ke/partners'),
+      ])
+    );
+
+    // ---------- Updates row (wiring preserved) ----------
     let action;
     if (bits.action === 'install') {
-      action = btn('Restart to update', 'refresh-cw', async () => {
+      action = btn('Restart to update', 'refresh', async () => {
         try { await api.installUpdate(); } catch (_) {}
       });
     } else if (bits.action === 'busy') {
       action = el('div', { style: 'display:flex;align-items:center;gap:9px;color:var(--accent-fg)' }, [SP.ring('orbit', 18)]);
     } else {
-      action = btn('Check for updates', 'refresh-cw', async () => {
+      action = btn('Check for updates', 'refresh', async () => {
         store.update = { state: 'checking' };
         SP.go('settings');
         try {
@@ -295,7 +400,8 @@
 
     aboutCard.appendChild(
       el('div', {
-        style: 'display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 0',
+        style:
+          'display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 0 0;margin-top:18px;border-top:1px solid var(--border)',
       }, [
         el('div', { style: 'flex:1;min-width:0' }, [
           el('div', { style: 'font-weight:600;font-size:14.5px', text: 'Updates' }),
@@ -326,7 +432,10 @@
           style:
             'height:38px;padding:0 14px;border-radius:10px;border:1px solid var(--border-2);background:var(--panel);color:var(--text);font-weight:600;font-size:13px;cursor:pointer;font-family:inherit',
           hov: 'background:var(--panel-2)',
-          onclick: () => patchPrefs(store, { onboarded: false }, false),
+          onclick: () => {
+            patchPrefs(store, { onboarded: false }, false);
+            SP.go('welcome');
+          },
           text: 'Replay welcome',
         }),
       ])
