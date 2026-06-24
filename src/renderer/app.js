@@ -157,11 +157,12 @@ const S = {
 };
 
 const NAV_TOP = [
-  { key: 'dashboard', label: 'Smart Scan', icon: 'scan' },
-  { key: 'projects', label: 'Projects', icon: 'folder-2' },
-  { key: 'system', label: 'System Cleaner', icon: 'broom' },
-  { key: 'largefiles', label: 'Large Files', icon: 'chart' },
-  { key: 'storage', label: 'Storage', icon: 'database' }
+  { key: 'dashboard', label: 'Smart Scan', icon: 'dashboard' },
+  { key: 'projects', label: 'Projects', icon: 'folder-2', count: () => (S.projects || []).length },
+  { key: 'system', label: 'System Cleaner', icon: 'broom', count: () => (S.sysTargets || []).length },
+  { key: 'largefiles', label: 'Large Files', icon: 'hard-drive' },
+  { key: 'storage', label: 'Storage', icon: 'chart' },
+  { key: 'recommendations', label: 'Recommendations', icon: 'sparkles', hot: true, count: () => (S.recs || []).length }
 ];
 const NAV_SOON = [
   { label: 'Scheduled Scans', icon: 'calendar', soon: 'scheduled' },
@@ -228,12 +229,19 @@ function renderShell() {
 }
 
 function navItem(item, active) {
+  const n = typeof item.count === 'function' ? item.count() : item.count || 0;
+  const kids = [ic(item.icon, 19), el('span', { style: 'flex:1' }, [item.label])];
+  if (n) kids.push(el('span', {
+    class: item.hot ? 'sp-count-hot' : 'sp-count',
+    style: 'font-size:11.5px;font-weight:700;min-width:22px;height:20px;padding:0 7px;border-radius:99px;display:inline-flex;align-items:center;justify-content:center',
+    text: String(n)
+  }));
   return el('div', {
     class: active ? 'sp-nav-on sp-hov' : 'sp-hov',
     style: 'display:flex;align-items:center;gap:13px;padding:10px 12px;border-radius:11px;cursor:pointer;font-weight:500;font-size:14px;color:var(--text-2);user-select:none',
     hov: active ? '' : 'background:var(--panel)',
     onclick: () => go(item.key)
-  }, [ic(item.icon, 19), el('span', { style: 'flex:1' }, [item.label])]);
+  }, kids);
 }
 
 function renderSidebar() {
@@ -344,20 +352,29 @@ function normalizeDisk(d) {
 async function loadData() {
   try { S.disk = normalizeDisk(await api.diskUsage()); } catch (_) {}
   try { S.breakdown = await api.diskBreakdown(); } catch (_) {}
-  try { S.recs = (await api.recommendations()) || []; } catch (_) { S.recs = []; }
-  try { const c = await api.cacheGet(); S.lastScan = (c && c.lastScan) || S.lastScan; } catch (_) {}
+  // The cache holds the last scan's projects + system targets; recommendations
+  // are derived from them (the IPC requires them, calling it bare throws).
+  try {
+    const c = (await api.cacheGet()) || {};
+    S.projects = c.projects || [];
+    S.sysTargets = c.system || [];
+    if (c.scannedAt) S.lastScan = c.scannedAt;
+  } catch (_) {}
+  try {
+    S.recs = (await api.recommendations({ projects: S.projects || [], sysTargets: S.sysTargets || [] })) || [];
+  } catch (_) { S.recs = S.recs || []; }
 }
 
 window.SP_doScan = doScan;
 async function doScan() {
   if (S.scanning) return;
   S.scanning = true;
-  if (S.route === 'dashboard') renderRoute();
+  renderShell();
   try { await Promise.allSettled([api.scanProjects && api.scanProjects(), api.scanSystem && api.scanSystem()]); } catch (_) {}
   S.lastScan = Date.now();
   await loadData();
   S.scanning = false;
-  renderRoute();
+  renderShell();
 }
 
 // ---------- boot ----------
