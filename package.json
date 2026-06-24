@@ -51,7 +51,7 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "notarize": {
-        "teamId": "${env.APPLE_TEAM_ID}"
+        "teamId": "YAD95QLFD7"
       }
     },
     "win": {
