@@ -40,19 +40,25 @@ jobs:
         # fail the strict lock check on every runner.
         run: npm install --no-audit --no-fund
 
-      - name: Build and package
+      # macOS: build + code-sign + notarize. The signing env (CSC_LINK etc.) is
+      # ONLY set here; passing an empty CSC_LINK to Windows/Linux makes
+      # electron-builder treat it as a bad cert path, so they get their own step.
+      - name: Build and package (macOS, signed + notarized)
+        if: matrix.os == 'macos-latest'
         run: npx electron-builder ${{ matrix.args }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS code signing + notarization. The Developer ID cert is scoped to
-          # the mac runner so Windows does not try to sign with it. Every value is
-          # a no-op until the matching repo secret is set, so unsigned builds keep
-          # working until you add the secrets below.
-          CSC_LINK: ${{ matrix.os == 'macos-latest' && secrets.MAC_CERTS || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.MAC_CERTS_PASSWORD || '' }}
+          CSC_LINK: ${{ secrets.MAC_CERTS }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Build and package (Windows / Linux)
+        if: matrix.os != 'macos-latest'
+        run: npx electron-builder ${{ matrix.args }} --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish installers to the GitHub Release
         uses: softprops/action-gh-release@v2
