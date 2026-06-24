@@ -44,6 +44,15 @@ jobs:
         run: npx electron-builder ${{ matrix.args }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS code signing + notarization. The Developer ID cert is scoped to
+          # the mac runner so Windows does not try to sign with it. Every value is
+          # a no-op until the matching repo secret is set, so unsigned builds keep
+          # working until you add the secrets below.
+          CSC_LINK: ${{ matrix.os == 'macos-latest' && secrets.MAC_CERTS || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.MAC_CERTS_PASSWORD || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Publish installers to the GitHub Release
         uses: softprops/action-gh-release@v2

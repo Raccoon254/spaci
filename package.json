@@ -45,7 +45,14 @@
         "dmg",
         "zip"
       ],
-      "icon": "assets/branding/icon.icns"
+      "icon": "assets/branding/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": {
+        "teamId": "${env.APPLE_TEAM_ID}"
+      }
     },
     "win": {
       "target": [
