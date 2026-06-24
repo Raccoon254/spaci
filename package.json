@@ -1,7 +1,7 @@
 {
   "name": "spaci",
   "productName": "Spaci",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "Spaci: a complete dev + Mac cleaner. Reclaim disk space from build artifacts (node_modules, target, .next…) and developer/system caches, with previews, recommendations and a polished UI. Built by kentom.co.ke.",
   "main": "src/main.js",
   "author": "kentom.co.ke",
@@ -25,8 +25,13 @@
   "build": {
     "appId": "ke.co.kentom.spaci",
     "productName": "Spaci",
-    "directories": { "output": "release" },
-    "files": ["src/**/*", "assets/**/*"],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*"
+    ],
     "publish": [
       {
         "provider": "generic",
@@ -36,14 +41,24 @@
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "icon": "assets/branding/icon.icns"
     },
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "icon": "assets/branding/icon.ico",
       "artifactName": "Spaci-Setup-${version}.${ext}"
     },
-    "linux": { "target": ["AppImage"], "category": "Development" }
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development"
+    }
   }
 }

@@ -1,8 +1,36 @@
 [
   {
+    "version": "2.0.0",
+    "date": "2026-06-24",
+    "tag": "Latest",
+    "major": true,
+    "summary": "A complete redesign: a calmer, faster Spaci with a unified scanning experience and a richer storage breakdown.",
+    "added": [
+      "A redesigned interface across every screen, matched to the new Spaci motion brand.",
+      "Storage drill-down: open any category to see its biggest folders and files, and reveal them in Finder.",
+      "A guided 3-step onboarding that starts indexing your Mac in the background while you set up.",
+      "Cross-platform browser cache cleaning across Chrome, Safari, Firefox, Edge, Arc and more.",
+      "A consistent live scanning card, with the animated logo, running counts and progress, on every screen."
+    ],
+    "improved": [
+      "Cache-first screens: your last results show instantly, then refresh quietly in the background.",
+      "A new file-based icon system with crisp brand and category icons everywhere.",
+      "Storage classification is more accurate and now splits out App Data, Browsers, Xcode and Developer.",
+      "Cleaning shows an instant loader, a celebratory summary and a toast confirmation.",
+      "Settings gains an About section with version, license and links, plus a font selector."
+    ],
+    "fixed": [
+      "System Cleaner no longer gets stuck on the measuring screen.",
+      "Filtering projects while a scan is running is smooth and no longer flickers.",
+      "Browser cache icons, including Safari, now render correctly.",
+      "App Data is now sized accurately instead of being wildly over-counted.",
+      "Selecting items and navigating no longer replays the entrance animations."
+    ]
+  },
+  {
     "version": "1.2.0",
     "date": "2026-06-20",
-    "tag": "Latest",
+    "tag": "Feature",
     "major": true,
     "summary": "Disk breakdown, background scans and a calmer cleanup flow.",
     "added": [
