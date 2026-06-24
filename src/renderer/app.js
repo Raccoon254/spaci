@@ -67,23 +67,83 @@ function ago(ms) {
 
 const CAT_COLORS = ['#5e93dd', '#4fcb93', '#e8a14f', '#c77dff', '#e8836f', '#7fb5c9', '#8b867f'];
 
-// Toast notifications. Appended inside .sp-root so the theme tokens resolve.
-function toast(msg, kind) {
+// Toast notifications (design style: ring + title + sub). toast('Title','sub')
+// or toast({ title, sub }).
+function toast(a, sub) {
+  const title = typeof a === 'string' ? a : (a && a.title) || '';
+  const subt = typeof a === 'string' ? sub : (a && a.sub) || '';
   const host = document.getElementById('app');
   if (!host) return;
   let stack = document.getElementById('sp-toasts');
   if (!stack) {
-    stack = el('div', { id: 'sp-toasts', style: 'position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:10px;z-index:200' });
+    stack = el('div', { id: 'sp-toasts', style: 'position:absolute;bottom:40px;right:40px;display:flex;flex-direction:column;gap:10px;z-index:90' });
     host.appendChild(stack);
   }
-  const color = kind === 'danger' ? 'var(--danger)' : kind === 'success' ? 'var(--success-fg)' : 'var(--accent-fg)';
-  const t = el('div', {
-    style: `background:var(--panel);border:1px solid var(--border);border-left:3px solid ${color};color:var(--text);padding:13px 16px;border-radius:12px;font-size:13.5px;font-weight:500;min-width:220px;max-width:340px;animation:sp-toast .3s cubic-bezier(.22,.61,.36,1)`,
-    text: msg
-  });
+  const t = el('div', { style: 'display:flex;align-items:center;gap:12px;padding:14px 18px;border-radius:14px;background:var(--panel-2);border:1px solid var(--border-2);min-width:280px;animation:sp-toast .3s cubic-bezier(.22,.61,.36,1)' }, [
+    el('spaci-icon', { name: 'spaci-ring', anim: 'assemble', style: 'width:30px;height:30px;color:var(--success-fg);flex:none' }),
+    el('div', {}, [el('div', { style: 'font-size:14px;font-weight:600', text: title }), subt ? el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:1px', text: subt }) : null])
+  ]);
   stack.appendChild(t);
-  setTimeout(() => { t.style.transition = 'opacity .3s,transform .3s'; t.style.opacity = '0'; t.style.transform = 'translateX(20px)'; setTimeout(() => t.remove(), 320); }, 2600);
+  setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 320); }, 2800);
 }
+
+// ---------- overlays: floating action bar, confirm modal, success burst ----------
+function overlayHost() {
+  let h = document.getElementById('sp-overlays');
+  if (!h) { h = el('div', { id: 'sp-overlays' }); (document.getElementById('app') || document.body).appendChild(h); }
+  return h;
+}
+function renderOverlays() {
+  const h = overlayHost();
+  h.innerHTML = '';
+  const ab = S.actionBar;
+  if (ab) {
+    h.appendChild(el('div', { style: 'position:absolute;left:248px;right:0;bottom:24px;display:flex;justify-content:center;pointer-events:none;z-index:40' }, [
+      el('div', { style: 'display:flex;align-items:center;gap:16px;padding:14px 18px;border-radius:16px;background:var(--panel-2);border:1px solid var(--border-2);min-width:440px;pointer-events:auto;animation:sp-rise .3s cubic-bezier(.22,.61,.36,1)' }, [
+        el('div', { style: 'font-weight:700;font-size:14.5px' }, [el('span', { text: ab.count + ' · ' }), el('span', { style: 'color:var(--accent-fg)', text: ab.size })]),
+        el('div', { style: 'flex:1' }),
+        el('button', { style: 'height:40px;padding:0 16px;border-radius:11px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13.5px;cursor:pointer', hov: 'background:var(--panel-3);color:var(--text)', onclick: () => ab.onClear && ab.onClear() }, ['Clear']),
+        el('button', { class: ab.danger ? 'sp-ab-danger' : 'sp-ab-accent', style: 'height:40px;padding:0 18px;border-radius:11px;border:none;color:#fff;font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:8px;cursor:pointer', onclick: () => ab.onClean && ab.onClean() }, [ic('trash', 15), ab.action])
+      ])
+    ]));
+  }
+  const cm = S.confirmCfg;
+  if (cm) {
+    const close = (val) => { S.confirmCfg = null; renderOverlays(); if (cm.resolve) cm.resolve(val); };
+    h.appendChild(el('div', { style: 'position:absolute;inset:0;z-index:80;background:rgba(0,0,0,.5);display:grid;place-items:center;animation:sp-fadein .2s', onclick: () => close(false) }, [
+      el('div', { style: 'width:440px;max-width:90%;background:var(--panel);border:1px solid var(--border-2);border-radius:18px;padding:26px;animation:sp-pop .26s cubic-bezier(.22,.61,.36,1)', onclick: (e) => e.stopPropagation() }, [
+        el('div', { style: 'display:flex;align-items:center;gap:13px;margin-bottom:14px' }, [
+          el('div', { class: cm.danger ? 'sp-cm-danger' : 'sp-cm-accent', style: 'width:44px;height:44px;border-radius:12px;display:grid;place-items:center;flex:none' }, [ic(cm.icon || (cm.danger ? 'trash' : 'broom'), 23)]),
+          el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.3px', text: cm.title })
+        ]),
+        el('div', { style: 'color:var(--text-2);font-size:13.5px;line-height:1.6;margin-bottom:22px', text: cm.body }),
+        el('div', { style: 'display:flex;gap:10px;justify-content:flex-end' }, [
+          el('button', { style: 'height:42px;padding:0 18px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:14px;cursor:pointer', hov: 'background:var(--panel-3)', onclick: () => close(false) }, ['Cancel']),
+          el('button', { class: cm.danger ? 'sp-ab-danger' : 'sp-ab-accent', style: 'height:42px;padding:0 20px;border-radius:11px;border:none;color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer', onclick: () => close(true) }, [ic(cm.icon || (cm.danger ? 'trash' : 'broom'), 15), cm.confirmLabel || 'Confirm'])
+        ])
+      ])
+    ]));
+  }
+  const bu = S.burstCfg;
+  if (bu) {
+    h.appendChild(el('div', { style: 'position:absolute;inset:0;z-index:85;display:grid;place-items:center;background:rgba(10,12,10,.42);backdrop-filter:blur(3px);animation:sp-fadein .2s;pointer-events:none' }, [
+      el('div', { style: 'display:flex;flex-direction:column;align-items:center;text-align:center;gap:20px;animation:sp-pop .34s cubic-bezier(.22,.61,.36,1)' }, [
+        el('div', { style: 'position:relative;width:128px;height:128px;display:grid;place-items:center;color:var(--success-fg)' }, [
+          el('div', { style: 'position:absolute;inset:14px;border-radius:50%;border:2px solid var(--success-fg);animation:sp-ping 1.5s ease-out infinite' }),
+          el('spaci-icon', { name: 'spaci-ring', anim: 'elastic', style: 'width:104px;height:104px' })
+        ]),
+        el('div', {}, [
+          el('div', { style: 'font-size:15px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--success-fg)', text: 'Reclaimed' }),
+          el('div', { style: 'font-size:48px;font-weight:700;letter-spacing:-2px;line-height:1.05;margin-top:4px', text: bu.size }),
+          el('div', { style: 'color:var(--text-2);font-size:14px;margin-top:6px', text: bu.label || '' })
+        ])
+      ])
+    ]));
+  }
+}
+function setActionBar(cfg) { S.actionBar = cfg || null; renderOverlays(); }
+function confirmDialog(opts) { return new Promise((resolve) => { S.confirmCfg = Object.assign({ resolve }, opts || {}); renderOverlays(); }); }
+function burst(size, label) { S.burstCfg = { size, label }; renderOverlays(); setTimeout(() => { S.burstCfg = null; renderOverlays(); }, 1800); }
 
 // ---------- app state ----------
 const S = {
@@ -104,17 +164,19 @@ const NAV_TOP = [
   { key: 'storage', label: 'Storage', icon: 'database' }
 ];
 const NAV_SOON = [
-  { key: 'duplicates', label: 'Duplicate Finder', icon: 'copy' },
-  { key: 'uninstaller', label: 'App Uninstaller', icon: 'trash' }
+  { label: 'Scheduled Scans', icon: 'calendar', soon: 'scheduled' },
+  { label: 'Duplicate Finder', icon: 'copy', soon: 'duplicate' },
+  { label: 'Spaci Guard', icon: 'shield', soon: 'guard' },
+  { label: 'Menu-bar Widget', icon: 'activity', route: 'menubar' }
 ];
 const NAV_BOTTOM = [
-  { key: 'history', label: 'History', icon: 'clock' },
+  { key: 'history', label: 'History', icon: 'log' },
   { key: 'settings', label: 'Settings', icon: 'settings' }
 ];
 
 SP_REGISTRY();
 function SP_REGISTRY() {
-  window.SP = { screens: {}, go, state: S, el, ic, ring, fmt, toast };
+  window.SP = { screens: {}, go, state: S, el, ic, ring, fmt, toast, setActionBar, confirm: confirmDialog, burst };
 }
 
 // ---------- shell ----------
@@ -179,12 +241,15 @@ function renderSidebar() {
     NAV_TOP.map((n) => navItem(n, S.route === n.key)));
 
   const soon = el('div', { style: 'display:flex;flex-direction:column;gap:3px' },
-    NAV_SOON.map((n) => el('div', {
-      class: 'sp-hov',
-      style: 'display:flex;align-items:center;gap:13px;padding:9px 12px;border-radius:11px;cursor:pointer;font-weight:500;font-size:13.5px;color:var(--text-3);user-select:none',
-      hov: 'background:var(--panel);color:var(--text-2)',
-      onclick: () => go('comingsoon')
-    }, [ic(n.icon, 18, { color: 'var(--text-3)' }), el('span', { style: 'flex:1' }, [n.label]), ic('lock', 13, { color: 'var(--text-4)' })])));
+    NAV_SOON.map((n) => {
+      const active = n.route ? S.route === n.route : (S.route === 'soon' && (S.activeSoon || 'duplicate') === n.soon);
+      return el('div', {
+        class: active ? 'sp-nav-on sp-hov' : 'sp-hov',
+        style: 'display:flex;align-items:center;gap:13px;padding:10px 12px;border-radius:11px;cursor:pointer;font-weight:500;font-size:14px;color:var(--text-2);user-select:none',
+        hov: active ? '' : 'background:var(--panel)',
+        onclick: () => { if (n.route) go(n.route); else { S.activeSoon = n.soon; go('soon'); } }
+      }, [ic(n.icon, 19), el('span', { style: 'flex:1' }, [n.label])]);
+    }));
 
   const bottom = el('div', { style: 'display:flex;flex-direction:column;gap:3px' },
     NAV_BOTTOM.map((n) => navItem(n, S.route === n.key)));
@@ -198,7 +263,7 @@ function renderSidebar() {
     ]),
     top,
     el('div', { style: 'flex:1' }),
-    el('div', { style: 'font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-4);font-weight:700;padding:0 10px;margin:14px 0 8px' }, ['Coming soon']),
+    el('div', { style: 'font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-4);font-weight:700;padding:0 10px;margin:14px 0 8px' }, ['Tools']),
     soon,
     diskMini(),
     bottom
@@ -231,10 +296,12 @@ function diskMini() {
 function renderRoute() {
   if (!contentHost) return;
   contentHost.innerHTML = '';
+  S.actionBar = null; // each screen sets its own selection bar
   const page = el('div', { class: 'sp-fadeup', style: 'padding:34px 40px 120px' });
   contentHost.appendChild(page);
   const screen = (window.SP.screens && window.SP.screens[S.route]) || screenPlaceholder;
   try { screen(page); } catch (e) { page.appendChild(el('div', { style: 'color:var(--danger-fg)', text: 'Failed to render: ' + e.message })); }
+  renderOverlays();
 }
 
 function go(route) {

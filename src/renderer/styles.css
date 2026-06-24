@@ -32,6 +32,9 @@
   --danger: #d65a45;
   --danger-soft: rgba(214, 90, 69, 0.16);
   --danger-fg: #e8836f;
+  --warn: #d9a441;
+  --warn-soft: rgba(217, 164, 65, 0.16);
+  --warn-fg: #e6b85c;
   --track: rgba(140, 140, 140, 0.16);
   --track-bright: rgba(150, 150, 150, 0.3);
   --shadow-sm: none;
@@ -66,6 +69,9 @@
   --danger: #c5503a;
   --danger-soft: rgba(197, 80, 58, 0.12);
   --danger-fg: #c5503a;
+  --warn: #b8862a;
+  --warn-soft: rgba(184, 134, 42, 0.13);
+  --warn-fg: #a9781f;
   --track: rgba(120, 110, 100, 0.16);
   --track-bright: rgba(120, 110, 100, 0.3);
   --desk: #e9e2d9;
@@ -176,7 +182,10 @@ button {
 .sp-row-sel { border-color: var(--accent-fg) !important; background: var(--accent-soft) !important; }
 .sp-badge-safe { background: var(--success-soft); color: var(--success-fg); }
 .sp-badge-warn { background: var(--danger-soft); color: var(--danger-fg); }
+.sp-badge-caution { background: var(--warn-soft); color: var(--warn-fg); }
 .sp-badge-accent { background: var(--accent-soft-2); color: var(--accent-fg); }
+.sp-wd { background: var(--track); }
+.sp-wd-on { background: var(--accent-fg); }
 .sp-chip-on { background: var(--accent) !important; color: var(--on-accent) !important; border-color: transparent !important; }
 .sp-tog-on { background: var(--accent) !important; border-color: transparent !important; }
 .sp-tog-on .sp-knob { transform: translateX(20px); background: var(--on-accent); }

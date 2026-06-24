@@ -21,6 +21,7 @@
     --accent-soft:rgba(1,75,170,0.18);--accent-soft-2:rgba(1,75,170,0.30);--on-accent:#f8f3f0;
     --success:#34b27b;--success-soft:rgba(52,178,123,0.16);--success-fg:#4fcb93;
     --danger:#d65a45;--danger-soft:rgba(214,90,69,0.16);--danger-fg:#e8836f;
+    --warn:#d9a441;--warn-soft:rgba(217,164,65,0.16);--warn-fg:#e6b85c;
     --track:rgba(140,140,140,0.16);--track-bright:rgba(150,150,150,0.30);
     --shadow-sm:none;
     --shadow-md:none;
@@ -38,6 +39,7 @@
     --accent-soft:rgba(1,75,170,0.08);--accent-soft-2:rgba(1,75,170,0.15);--on-accent:#ffffff;
     --success:#1f8a5b;--success-soft:rgba(31,138,91,0.12);--success-fg:#1f8a5b;
     --danger:#c5503a;--danger-soft:rgba(197,80,58,0.12);--danger-fg:#c5503a;
+    --warn:#b8862a;--warn-soft:rgba(184,134,42,0.13);--warn-fg:#a9781f;
     --track:rgba(120,110,100,0.16);--track-bright:rgba(120,110,100,0.30);
     --shadow-sm:none;
     --shadow-md:none;
@@ -74,6 +76,7 @@
   @keyframes sp-assemble{0%{opacity:0;transform:translateY(-16px) scale(.5)}28%{opacity:1;transform:translateY(0) scale(1)}82%{opacity:1;transform:translateY(0) scale(1)}100%{opacity:0;transform:translateY(-16px) scale(.5)}}
   @keyframes sp-explode{0%{transform:translateY(0) scale(1);opacity:1}42%{transform:translateY(-18px) scale(.35);opacity:0}58%{transform:translateY(-18px) scale(.35);opacity:0}100%{transform:translateY(0) scale(1);opacity:1}}
   @keyframes sp-ping{0%{transform:scale(.4);opacity:.55}80%{opacity:0}100%{transform:scale(1.7);opacity:0}}
+  @keyframes sp-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
   .sp-fadeup{animation:sp-fadeup .42s cubic-bezier(.22,.61,.36,1)}
   .sp-stagger>*{animation:sp-fadeup .5s cubic-bezier(.22,.61,.36,1) backwards}
   .sp-stagger>*:nth-child(1){animation-delay:.02s}
@@ -93,6 +96,7 @@
   .sp-row-sel{border-color:var(--accent-fg)!important;background:var(--accent-soft)!important}
   .sp-badge-safe{background:var(--success-soft);color:var(--success-fg)}
   .sp-badge-warn{background:var(--danger-soft);color:var(--danger-fg)}
+  .sp-badge-caution{background:var(--warn-soft);color:var(--warn-fg)}
   .sp-badge-accent{background:var(--accent-soft-2);color:var(--accent-fg)}
   .sp-chip-on{background:var(--accent)!important;color:var(--on-accent)!important;border-color:transparent!important}
   .sp-tog-on{background:var(--accent)!important;border-color:transparent!important}
@@ -101,41 +105,12 @@
   .sp-ab-accent{background:var(--accent)}.sp-ab-accent:hover{background:var(--accent-hover)}
   .sp-ab-danger{background:var(--danger)}.sp-ab-danger:hover{background:#c24e3b}
   .sp-dot{width:20px}.sp-dot-on{background:var(--accent-fg)!important;width:32px}
+  .sp-wd{background:var(--track)}.sp-wd-on{background:var(--accent-fg)}
   .sp-cm-danger{background:var(--danger-soft);color:var(--danger-fg)}
   .sp-cm-accent{background:var(--accent-soft);color:var(--accent-fg)}
 </style>
 <script src="spaci-icons.js"></script>
-<script>
-  if(!customElements.get('spaci-icon')){
-    customElements.define('spaci-icon', class extends HTMLElement{
-      static get observedAttributes(){return ['name','kind','anim'];}
-      connectedCallback(){ if(!this._root){ this._root=this.attachShadow({mode:'open'}); } this._r(); }
-      attributeChangedCallback(){ this._r(); }
-      _r(){
-        if(!this._root) return;
-        var name=this.getAttribute('name')||'box';
-        if(name==='spaci-ring'){
-          var anim=this.getAttribute('anim')||'';
-          var svgA='', segA=function(){return '';};
-          if(anim==='orbit'){ svgA='animation:sp-spin 9s linear infinite'; segA=function(){return 'animation:sp-counter 4.5s linear infinite';}; }
-          else if(anim==='spin'){ svgA='animation:sp-spin 1.15s linear infinite'; segA=function(i){return 'opacity:'+(0.28+i*0.13);}; }
-          else if(anim==='breathe'){ svgA='animation:sp-breathe 3.4s ease-in-out infinite'; }
-          else if(anim==='chase'){ segA=function(i){return 'animation:sp-chase 1.9s '+(i*0.31).toFixed(2)+'s ease-in-out infinite';}; }
-          else if(anim==='assemble'){ segA=function(i){return 'animation:sp-assemble 3s '+(i*0.11).toFixed(2)+'s ease-in-out infinite';}; }
-          else if(anim==='clearing'){ segA=function(i){return 'animation:sp-explode 2.7s '+(i*0.05).toFixed(2)+'s ease-in-out infinite';}; }
-          else if(anim==='wave'){ segA=function(i){return 'animation:sp-wave 1.7s '+(i*0.2).toFixed(2)+'s ease-in-out infinite';}; }
-          var s='';for(var k=0;k<6;k++){ s+='<g transform="rotate('+(k*60)+' 50 50)"><ellipse cx="50" cy="22" rx="12" ry="5.5" fill="currentColor" style="transform-box:fill-box;transform-origin:center;'+segA(k)+'"></ellipse></g>'; }
-          this._root.innerHTML='<svg viewBox="15 15 70 70" style="width:100%;height:100%;display:block;overflow:visible;transform-origin:center;'+svgA+'">'+s+'</svg>'; return;
-        }
-        var kind=this.getAttribute('kind')||'icon';
-        var map=kind==='logo'?(window.SPACI_LOGOS||{}):(window.SPACI_ICONS||{});
-        var d=map[name]||(window.SPACI_ICONS||{})['box'];
-        var body = d ? (d.p||'').replace(/opacity="(?:0?\.[0-5]\d*)"/g,'opacity="0.72"') : '';
-        this._root.innerHTML = d ? '<svg viewBox="'+d.v+'" fill="none" style="width:100%;height:100%;display:block">'+body+'</svg>' : '';
-      }
-    });
-  }
-</script>
+<script src="spaci-ring.js"></script>
 </helmet>
 
 <div class="sp-root" ref="{{ rootRef }}" style="position:relative">
@@ -150,7 +125,7 @@
         <span style="width:13px;height:13px;border-radius:50%;background:#febc2e"></span>
         <span style="width:13px;height:13px;border-radius:50%;background:#28c840"></span>
       </div>
-      <div style="flex:1;text-align:center;font-size:13px;font-weight:600;color:var(--text-3);letter-spacing:.2px">Spaci — Smart Cleaner</div>
+      <div style="flex:1;text-align:center;font-size:13px;font-weight:600;color:var(--text-3);letter-spacing:.2px">Spaci - Smart Cleaner</div>
       <div style="display:flex;gap:8px;align-items:center">
         <button onClick="{{ onToggleTheme }}" title="Toggle theme" style="width:34px;height:34px;border-radius:50%;border:1px solid var(--border);background:var(--panel);color:var(--text-2);display:grid;place-items:center;cursor:pointer" style-hover="background:var(--panel-2);color:var(--text)">
           <spaci-icon name="{{ themeIcon }}" style="width:16px;height:16px"></spaci-icon>
@@ -182,13 +157,12 @@
         <div style="flex:1"></div>
 
         <!-- coming soon teases -->
-        <div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-4);font-weight:700;padding:0 10px;margin:14px 0 8px">Coming soon</div>
+        <div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-4);font-weight:700;padding:0 10px;margin:14px 0 8px">Tools</div>
         <div style="display:flex;flex-direction:column;gap:3px">
-          <sc-for list="{{ navSoon }}" as="n" hint-placeholder-count="2">
-            <div onClick="{{ n.onClick }}" style="display:flex;align-items:center;gap:13px;padding:9px 12px;border-radius:11px;cursor:pointer;font-weight:500;font-size:13.5px;color:var(--text-3);user-select:none" style-hover="background:var(--panel);color:var(--text-2)">
-              <spaci-icon name="{{ n.icon }}" style="width:18px;height:18px;opacity:.7"></spaci-icon>
+          <sc-for list="{{ navSoon }}" as="n" hint-placeholder-count="3">
+            <div onClick="{{ n.onClick }}" class="{{ n.cls }}" style="display:flex;align-items:center;gap:13px;padding:10px 12px;border-radius:11px;cursor:pointer;font-weight:500;font-size:14px;color:var(--text-2);user-select:none" style-hover="background:var(--panel)">
+              <spaci-icon name="{{ n.icon }}" style="width:19px;height:19px"></spaci-icon>
               <span style="flex:1">{{ n.label }}</span>
-              <spaci-icon name="lock" style="width:13px;height:13px;color:var(--text-4)"></spaci-icon>
             </div>
           </sc-for>
         </div>
@@ -224,7 +198,7 @@
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:26px">
               <div>
                 <div style="font-size:31px;font-weight:700;letter-spacing:-1.1px;line-height:1.05">Smart Scan</div>
-                <div style="color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:520px">One scan across your projects and system caches. Review, then reclaim — safely.</div>
+                <div style="color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:520px">One scan across your projects and system caches. Review, then reclaim - safely.</div>
               </div>
               <div style="text-align:right;flex:none">
                 <div style="color:var(--text-3);font-size:12px;display:flex;align-items:center;gap:6px;justify-content:flex-end"><spaci-icon name="clock" style="width:14px;height:14px"></spaci-icon>Last scanned</div>
@@ -248,7 +222,7 @@
                   <div style="position:absolute;inset:6px;border-radius:50%;border:2px solid var(--accent-fg);animation:sp-pulsering 2.4s cubic-bezier(.22,.61,.36,1) infinite 1.2s"></div>
                 </sc-if>
                 <div style="position:relative;text-align:center;z-index:1;pointer-events:none">
-                  <div style="font-size:46px;font-weight:700;letter-spacing:-2.2px;line-height:1">{{ centerTop }}</div>
+                  <div style="font-size:46px;font-weight:700;letter-spacing:-2.2px;line-height:1">{{ centerTopNum }}<span style="font-size:17px;font-weight:600;letter-spacing:-.3px;color:var(--accent-fg);margin-left:3px">{{ centerTopUnit }}</span></div>
                   <div style="font-size:12px;color:var(--text-3);font-weight:600;letter-spacing:.3px;margin-top:2px">{{ centerSub }}</div>
                 </div>
               </div>
@@ -329,6 +303,16 @@
               <div style="display:flex;gap:10px;flex:none">
                 <button style="height:44px;padding:0 18px;border-radius:11px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit" style-hover="background:var(--panel-2)"><spaci-icon name="folder-open" style="width:17px;height:17px"></spaci-icon>Choose folder</button>
                 <button onClick="{{ onScan }}" style="height:44px;padding:0 20px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit" style-hover="background:var(--accent-hover)"><spaci-icon name="scan" style="width:17px;height:17px"></spaci-icon>Scan</button>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:16px;padding:40px 24px 32px;margin-bottom:8px">
+              <div style="color:var(--accent-fg)"><spaci-icon name="spaci-ring" anim="chase" style="width:48px;height:48px;display:block"></spaci-icon></div>
+              <div>
+                <div style="font-size:18px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:center;gap:10px;justify-content:center">Scanning ~/dev<span class="sp-badge-accent" style="display:inline-flex;padding:3px 10px;border-radius:7px;font-size:11px;font-weight:700">running</span></div>
+                <div style="color:var(--text-3);font-size:13.5px;margin-top:7px">1,204 folders · 18,902 files indexed · 62%</div>
+              </div>
+              <div style="width:100%;max-width:420px">
+                <div style="height:8px;border-radius:99px;background:var(--track);overflow:hidden"><span style="display:block;height:100%;width:62%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent-fg),var(--accent));background-size:200% 100%;animation:sp-shimmer 1.6s linear infinite"></span></div>
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
@@ -424,9 +408,19 @@
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:24px">
               <div>
                 <div style="font-size:31px;font-weight:700;letter-spacing:-1.1px">System Cleaner</div>
-                <div style="color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px">Developer and system caches. Everything here is regenerable — clearing it is safe and reversible.</div>
+                <div style="color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px">Developer and system caches. Everything here is regenerable - clearing it is safe and reversible.</div>
               </div>
               <button onClick="{{ onScan }}" style="height:44px;padding:0 20px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none" style-hover="background:var(--accent-hover)"><spaci-icon name="scan" style="width:17px;height:17px"></spaci-icon>Scan caches</button>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:16px;padding:40px 24px 32px">
+              <div style="color:var(--accent-fg)"><spaci-icon name="spaci-ring" anim="wave" style="width:48px;height:48px;display:block"></spaci-icon></div>
+              <div>
+                <div style="font-size:18px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:center;gap:10px;justify-content:center">Measuring caches<span class="sp-badge-accent" style="display:inline-flex;padding:3px 10px;border-radius:7px;font-size:11px;font-weight:700">running</span></div>
+                <div style="color:var(--text-3);font-size:13.5px;margin-top:7px">14 of 22 locations sized · 64%</div>
+              </div>
+              <div style="width:100%;max-width:420px">
+                <div style="height:8px;border-radius:99px;background:var(--track);overflow:hidden"><span style="display:block;height:100%;width:64%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent-fg),var(--accent));background-size:200% 100%;animation:sp-shimmer 1.6s linear infinite"></span></div>
+              </div>
             </div>
             <sc-for list="{{ sysGroups }}" as="grp" hint-placeholder-count="4">
               <div style="display:flex;align-items:center;justify-content:space-between;margin:24px 0 12px">
@@ -456,7 +450,7 @@
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:24px">
               <div>
                 <div style="font-size:31px;font-weight:700;letter-spacing:-1.1px">Large Files</div>
-                <div style="color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px">Big files hogging space. Deleting here is permanent and not reversible — review carefully.</div>
+                <div style="color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px">Big files hogging space. Deleting here is permanent and not reversible - review carefully.</div>
               </div>
               <div style="display:flex;gap:10px;align-items:center;flex:none">
                 <div style="height:44px;padding:0 14px;border-radius:11px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-weight:600;font-size:13.5px;display:flex;align-items:center;gap:8px">≥ 500 MB<spaci-icon name="chevron-down" style="width:15px;height:15px;color:var(--text-3)"></spaci-icon></div>
@@ -464,6 +458,16 @@
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:10px;padding:13px 16px;border-radius:12px;background:var(--danger-soft);color:var(--danger-fg);font-size:13px;font-weight:600;margin-bottom:16px"><spaci-icon name="warning" style="width:17px;height:17px"></spaci-icon>Files removed here are permanently deleted and cannot be restored.</div>
+            <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:16px;padding:40px 24px 32px;margin-bottom:8px">
+              <div style="color:var(--accent-fg)"><spaci-icon name="spaci-ring" anim="chase" style="width:48px;height:48px;display:block"></spaci-icon></div>
+              <div>
+                <div style="font-size:18px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:center;gap:10px;justify-content:center">Scanning for large files<span class="sp-badge-accent" style="display:inline-flex;padding:3px 10px;border-radius:7px;font-size:11px;font-weight:700">running</span></div>
+                <div style="color:var(--text-3);font-size:13.5px;margin-top:7px">Checking files over 100 MB across ~/ · 62%</div>
+              </div>
+              <div style="width:100%;max-width:420px">
+                <div style="height:8px;border-radius:99px;background:var(--track);overflow:hidden"><span style="display:block;height:100%;width:62%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent-fg),var(--accent));background-size:200% 100%;animation:sp-shimmer 1.6s linear infinite"></span></div>
+              </div>
+            </div>
             <div class="sp-stagger" style="display:flex;flex-direction:column;gap:9px">
               <sc-for list="{{ largeFiles }}" as="f" hint-placeholder-count="6">
                 <div onClick="{{ f.onToggle }}" class="{{ f.rowCls }}" style="display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border);cursor:pointer;box-shadow:var(--shadow-sm)">
@@ -534,7 +538,7 @@
             </div>
             <div style="display:flex;align-items:center;gap:16px;padding:18px 22px;border-radius:16px;background:var(--accent-soft);border:1px solid var(--border);margin-top:18px">
               <div style="width:46px;height:46px;border-radius:13px;background:var(--accent);color:var(--on-accent);display:grid;place-items:center;flex:none;box-shadow:var(--shadow-sm)"><spaci-icon name="sparkles" style="width:24px;height:24px"></spaci-icon></div>
-              <div style="flex:1"><div style="font-weight:700;font-size:15px">{{ reclaimTotal }} of this is reclaimable</div><div style="color:var(--text-2);font-size:13px;margin-top:2px">Mostly inside Code — build artifacts and developer caches that regenerate on demand.</div></div>
+              <div style="flex:1"><div style="font-weight:700;font-size:15px">{{ reclaimTotal }} of this is reclaimable</div><div style="color:var(--text-2);font-size:13px;margin-top:2px">Mostly inside Code - build artifacts and developer caches that regenerate on demand.</div></div>
               <button onClick="{{ goRecs }}" style="height:44px;padding:0 20px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit" style-hover="background:var(--accent-hover)">Review<spaci-icon name="arrow-right" style="width:15px;height:15px"></spaci-icon></button>
             </div>
           </div>
@@ -546,7 +550,7 @@
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:24px">
               <div>
                 <div style="font-size:31px;font-weight:700;letter-spacing:-1.1px">Recommendations</div>
-                <div style="color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:540px">The biggest, safest wins — surfaced automatically.</div>
+                <div style="color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:540px">The biggest, safest wins - surfaced automatically.</div>
               </div>
               <button onClick="{{ onScan }}" style="height:44px;padding:0 18px;border-radius:11px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none" style-hover="background:var(--panel-2)"><spaci-icon name="refresh" style="width:16px;height:16px"></spaci-icon>Re-scan</button>
             </div>
@@ -598,9 +602,21 @@
                 <div style="color:var(--text-3);font-size:13.5px;margin-top:7px">Removing Gradle caches · 6 of 9 locations cleared</div>
               </div>
               <div style="width:100%;max-width:440px">
-                <div style="height:8px;border-radius:99px;background:var(--track);overflow:hidden"><span style="display:block;height:100%;width:62%;border-radius:99px;background:var(--accent)"></span></div>
+                <div style="height:8px;border-radius:99px;background:var(--track);overflow:hidden"><span style="display:block;height:100%;width:62%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent-fg),var(--accent));background-size:200% 100%;animation:sp-shimmer 1.6s linear infinite"></span></div>
                 <div style="display:flex;justify-content:space-between;margin-top:10px;font-size:12.5px;color:var(--text-3)"><span>62% complete</span><span><b style="color:var(--accent-fg);font-weight:700">5.1 GB</b> freed so far</span></div>
               </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:9px;margin-bottom:24px">
+              <sc-for list="{{ ongoingOps }}" as="op" hint-placeholder-count="3">
+                <div style="display:flex;align-items:center;gap:14px;padding:15px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border)">
+                  <div style="color:{{ op.color }}"><spaci-icon name="spaci-ring" anim="{{ op.anim }}" style="width:32px;height:32px;display:block"></spaci-icon></div>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px">{{ op.title }}<span class="{{ op.badgeCls }}" style="display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700">{{ op.tag }}</span></div>
+                    <div style="color:var(--text-3);font-size:12.5px;margin-top:2px">{{ op.sub }}</div>
+                  </div>
+                  <div style="font-weight:700;font-size:14px;color:var(--accent-fg);flex:none">{{ op.meta }}</div>
+                </div>
+              </sc-for>
             </div>
             <div style="font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600;margin-bottom:12px">Completed</div>
             <div style="display:flex;flex-direction:column;gap:9px">
@@ -654,32 +670,138 @@
 
             <div style="display:flex;align-items:center;gap:14px;padding:18px 20px;border-radius:16px;background:var(--accent-soft);border:1px solid var(--border);margin-top:18px">
               <spaci-icon name="shield" style="width:26px;height:26px;color:var(--accent-fg)"></spaci-icon>
-              <div style="flex:1"><div style="font-weight:600;font-size:14px">Safe by design</div><div style="color:var(--text-2);font-size:12.5px;margin-top:2px">Spaci only ever targets regenerable caches and build output — never your source code or files.</div></div>
+              <div style="flex:1"><div style="font-weight:600;font-size:14px">Safe by design</div><div style="color:var(--text-2);font-size:12.5px;margin-top:2px">Spaci only ever targets regenerable caches and build output - never your source code or files.</div></div>
               <button onClick="{{ goOnboarding }}" style="height:38px;padding:0 14px;border-radius:10px;border:1px solid var(--border-2);background:var(--panel);color:var(--text);font-weight:600;font-size:13px;cursor:pointer;font-family:inherit" style-hover="background:var(--panel-2)">Replay welcome</button>
+            </div>
+
+            <div style="font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin:30px 0 14px">About</div>
+            <div style="background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:24px">
+              <div style="display:flex;align-items:center;gap:16px">
+                <spaci-icon name="spaci-ring" anim="breathe" style="width:52px;height:52px;color:var(--accent-fg);flex:none"></spaci-icon>
+                <div style="flex:1">
+                  <div style="font-size:18px;font-weight:700;letter-spacing:-.3px">Spaci<span style="color:var(--accent-fg)">.</span> <span style="color:var(--text-3);font-weight:600;font-size:14px">2.0</span></div>
+                  <div style="color:var(--text-2);font-size:13px;margin-top:3px;max-width:460px;line-height:1.5">A complete developer and Mac cleaner that reclaims disk space from build artifacts and developer caches, with live previews and smart recommendations.</div>
+                </div>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:10px 30px;padding:18px 0 4px;margin-top:18px;border-top:1px solid var(--border)">
+                <div style="display:flex;align-items:center;gap:9px;font-size:13px;color:var(--text-2)"><spaci-icon name="box" style="width:15px;height:15px;color:var(--text-3)"></spaci-icon>Version<b style="font-weight:700">2.0.0</b></div>
+                <div style="display:flex;align-items:center;gap:9px;font-size:13px;color:var(--text-2)"><spaci-icon name="heart" style="width:15px;height:15px;color:var(--text-3)"></spaci-icon>Built by<b style="font-weight:700">kentom.co.ke</b></div>
+                <div style="display:flex;align-items:center;gap:9px;font-size:13px;color:var(--text-2)"><spaci-icon name="shield" style="width:15px;height:15px;color:var(--text-3)"></spaci-icon>License<b style="font-weight:700">MIT</b></div>
+              </div>
+              <div style="display:flex;gap:10px;margin-top:18px">
+                <button style="height:40px;padding:0 16px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit" style-hover="background:var(--panel-3)"><spaci-icon name="external-link" style="width:15px;height:15px"></spaci-icon>spaci.kentom.co.ke</button>
+                <button style="height:40px;padding:0 16px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit" style-hover="background:var(--panel-3)"><spaci-icon name="github" style="width:15px;height:15px"></spaci-icon>GitHub</button>
+                <div style="flex:1"></div>
+                <button style="height:40px;padding:0 16px;border-radius:11px;border:1px solid var(--border);background:transparent;color:var(--text-3);font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit" style-hover="color:var(--text)"><spaci-icon name="refresh" style="width:15px;height:15px"></spaci-icon>Check for updates</button>
+              </div>
             </div>
 
           </div>
           </sc-if>
-
-          <!-- ========== COMING SOON ========== -->
           <sc-if value="{{ isSoon }}" hint-placeholder-val="{{ false }}">
-          <div data-screen-label="Coming Soon">
-            <div style="display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:99px;background:var(--accent-soft-2);color:var(--accent-fg);font-size:12px;font-weight:700;margin-bottom:16px"><spaci-icon name="sparkles" style="width:14px;height:14px"></spaci-icon>On the roadmap</div>
-            <div style="font-size:31px;font-weight:700;letter-spacing:-1.1px">Coming soon to Spaci</div>
-            <div style="color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px;margin-bottom:28px">A preview of what we're building next. Turn on notifications and we'll let you know the moment each one lands.</div>
-            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px">
-              <sc-for list="{{ soonCards }}" as="s" hint-placeholder-count="4">
-                <div style="background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:24px;box-shadow:var(--shadow-sm);position:relative;overflow:hidden">
-                  <div style="position:absolute;top:-30%;right:-10%;width:200px;height:200px;background:var(--glow);pointer-events:none"></div>
-                  <div style="display:flex;align-items:center;gap:13px;margin-bottom:14px">
-                    <div style="width:48px;height:48px;border-radius:13px;background:var(--accent-soft);display:grid;place-items:center;color:var(--accent-fg);flex:none"><spaci-icon name="{{ s.icon }}" style="width:26px;height:26px"></spaci-icon></div>
-                    <div style="font-size:17px;font-weight:700;letter-spacing:-.3px">{{ s.title }}</div>
-                  </div>
-                  <div style="color:var(--text-2);font-size:13.5px;line-height:1.6;margin-bottom:18px">{{ s.body }}</div>
-                  <button style="height:40px;padding:0 16px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit" style-hover="background:var(--panel-3)"><spaci-icon name="bell" style="width:15px;height:15px"></spaci-icon>Notify me</button>
-                </div>
+          <div data-screen-label="{{ soonName }}">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:22px">
+              <div>
+                <div style="font-size:31px;font-weight:700;letter-spacing:-1.1px">{{ soonName }}</div>
+                <div style="color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px">{{ soonPitch }}</div>
+              </div>
+              <button style="height:46px;padding:0 22px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer;font-family:inherit;flex:none" style-hover="background:var(--accent-hover)"><spaci-icon name="{{ soonActionIcon }}" style="width:17px;height:17px"></spaci-icon>{{ soonActionLabel }}</button>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:24px;flex-wrap:wrap">
+              <sc-for list="{{ soonTabs }}" as="t" hint-placeholder-count="3">
+                <div onClick="{{ t.onClick }}" class="{{ t.cls }}" style="display:flex;align-items:center;gap:8px;padding:0 16px;height:40px;border-radius:99px;background:var(--panel);border:1px solid var(--border);font-size:13.5px;font-weight:600;color:var(--text-2);cursor:pointer" style-hover="border-color:var(--border-2);color:var(--text)"><spaci-icon name="{{ t.icon }}" style="width:16px;height:16px"></spaci-icon>{{ t.label }}</div>
               </sc-for>
             </div>
+
+            <!-- ===== Duplicate Finder preview ===== -->
+            <sc-if value="{{ soonIsDup }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;align-items:center;gap:28px;padding:30px 32px;border-radius:20px;background:var(--panel);border:1px solid var(--border);overflow:hidden;position:relative;margin-bottom:18px">
+                <div style="position:absolute;top:-40%;left:90px;width:280px;height:280px;background:var(--glow);pointer-events:none"></div>
+                <div style="color:var(--accent-fg);flex:none"><spaci-icon name="spaci-ring" anim="clearing" style="width:94px;height:94px;display:block"></spaci-icon></div>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:40px;font-weight:700;letter-spacing:-1.6px;line-height:1">8.2 GB<span style="font-size:17px;color:var(--text-3);font-weight:600;letter-spacing:-.2px;margin-left:10px">recoverable</span></div>
+                  <div style="color:var(--text-2);font-size:14px;margin-top:7px">1,284 duplicate files found across 312 groups</div>
+                </div>
+                <button style="height:48px;padding:0 24px;border-radius:13px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14.5px;display:flex;align-items:center;gap:9px;cursor:pointer;font-family:inherit;flex:none" style-hover="background:var(--accent-hover)"><spaci-icon name="check-circle" style="width:17px;height:17px"></spaci-icon>Review &amp; clean</button>
+              </div>
+              <div style="font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600;margin-bottom:13px">Duplicate groups</div>
+              <div class="sp-stagger" style="display:flex;flex-direction:column;gap:9px">
+                <sc-for list="{{ dupGroups }}" as="g" hint-placeholder-count="4">
+                  <div style="display:flex;align-items:center;gap:16px;padding:15px 17px;border-radius:14px;background:var(--panel);border:1px solid var(--border);transition:border-color .16s,transform .16s" style-hover="border-color:var(--border-2);transform:translateX(2px)">
+                    <div style="position:relative;width:52px;height:44px;flex:none">
+                      <div style="position:absolute;top:0;left:12px;width:40px;height:40px;border-radius:11px;background:var(--panel-3);opacity:.45"></div>
+                      <div style="position:absolute;top:2px;left:6px;width:40px;height:40px;border-radius:11px;background:var(--panel-2);opacity:.8"></div>
+                      <div style="position:absolute;top:4px;left:0;width:40px;height:40px;border-radius:11px;background:var(--panel-2);border:1px solid var(--border-2);display:grid;place-items:center;color:var(--text-2)"><spaci-icon name="{{ g.icon }}" style="width:22px;height:22px"></spaci-icon></div>
+                    </div>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-weight:600;font-size:14.5px;display:flex;align-items:center;gap:9px;min-width:0"><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ g.name }}</span><span style="display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700;background:var(--accent-soft-2);color:var(--accent-fg);white-space:nowrap;flex:none">{{ g.meta }}</span></div>
+                      <div class="mono" style="color:var(--text-3);font-size:12px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ g.paths }}</div>
+                    </div>
+                    <div style="font-weight:700;font-size:15px;color:var(--accent-fg);flex:none">{{ g.size }}</div>
+                    <button style="height:36px;padding:0 13px;border-radius:9px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:12.5px;cursor:pointer;font-family:inherit;flex:none" style-hover="background:var(--panel-3)">Keep newest</button>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <!-- ===== Scheduled Scans ===== -->
+            <sc-if value="{{ soonIsSched }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;align-items:center;gap:24px;padding:26px 30px;border-radius:20px;background:var(--accent-soft);border:1px solid var(--border);margin-bottom:16px;position:relative;overflow:hidden">
+                <div style="position:absolute;top:-50%;left:60px;width:260px;height:260px;background:var(--glow);pointer-events:none"></div>
+                <div style="color:var(--accent-fg);flex:none"><spaci-icon name="spaci-ring" anim="cascade" style="width:84px;height:84px;display:block"></spaci-icon></div>
+                <div style="flex:1;min-width:0"><div style="font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-3);font-weight:700">Next scheduled run</div><div style="font-size:25px;font-weight:700;letter-spacing:-.7px;margin-top:4px">Nightly cleanup</div><div style="color:var(--text-2);font-size:13.5px;margin-top:3px">{{ schedNextLabel }}</div></div>
+                <button style="height:46px;padding:0 22px;border-radius:12px;border:1px solid var(--border-2);background:var(--panel);color:var(--text);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none" style-hover="background:var(--panel-2)"><spaci-icon name="play" style="width:16px;height:16px"></spaci-icon>Run now</button>
+              </div>
+              <div style="display:flex;gap:8px;margin-bottom:18px">
+                <sc-for list="{{ weekDays }}" as="d" hint-placeholder-count="7">
+                  <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:9px;padding:13px 0;border-radius:12px;background:var(--panel);border:1px solid var(--border)"><span style="font-size:12px;font-weight:700;color:var(--text-3)">{{ d.d }}</span><span class="{{ d.cls }}" style="width:7px;height:7px;border-radius:50%"></span></div>
+                </sc-for>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:11px">
+                <sc-for list="{{ schedules }}" as="s" hint-placeholder-count="3">
+                  <div style="display:flex;align-items:center;gap:15px;padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid var(--border)">
+                    <div style="width:46px;height:46px;border-radius:12px;background:var(--accent-soft);display:grid;place-items:center;flex:none;color:var(--accent-fg)"><spaci-icon name="{{ s.icon }}" style="width:24px;height:24px"></spaci-icon></div>
+                    <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:15px">{{ s.title }}</div><div style="color:var(--text-3);font-size:12.5px;margin-top:2px">{{ s.sub }}</div></div>
+                    <div class="{{ s.togCls }}" style="width:46px;height:26px;border-radius:99px;position:relative;flex:none;border:1px solid var(--border);background:var(--panel-3)"><span class="sp-knob" style="position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:var(--text-2);transition:transform .2s,background .2s"></span></div>
+                  </div>
+                </sc-for>
+                <div style="display:flex;align-items:center;justify-content:center;gap:9px;padding:16px;border-radius:16px;border:1.5px dashed var(--border-2);color:var(--text-3);font-weight:600;font-size:13.5px;cursor:pointer" style-hover="border-color:var(--accent-fg);color:var(--text-2)"><spaci-icon name="plus" style="width:16px;height:16px"></spaci-icon>Add a schedule</div>
+              </div>
+            </sc-if>
+
+            <!-- ===== Spaci Guard ===== -->
+            <sc-if value="{{ soonIsGuard }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;align-items:center;gap:24px;padding:28px 30px;border-radius:20px;background:var(--panel);border:1px solid var(--border);margin-bottom:16px;position:relative;overflow:hidden">
+                <div style="position:absolute;inset:0;background:radial-gradient(circle at 86px 50%, var(--success-soft), transparent 58%);pointer-events:none"></div>
+                <div style="position:relative;width:96px;height:96px;flex:none;display:grid;place-items:center;color:var(--success-fg)">
+                  <div style="position:absolute;inset:8px;border-radius:50%;border:2px solid var(--success-fg);animation:sp-ping 2.6s ease-out infinite"></div>
+                  <spaci-icon name="spaci-ring" anim="heartbeat" style="width:78px;height:78px"></spaci-icon>
+                </div>
+                <div style="flex:1;min-width:0"><div style="font-size:26px;font-weight:700;letter-spacing:-.7px;display:flex;align-items:center;gap:11px">Protected<span style="width:9px;height:9px;border-radius:50%;background:var(--success-fg)"></span></div><div style="color:var(--text-2);font-size:13.5px;margin-top:4px">Real-time monitoring active across 12 locations</div></div>
+                <div style="text-align:right;flex:none"><div style="font-size:22px;font-weight:700;letter-spacing:-.7px;color:var(--success-fg)">Live</div><div style="color:var(--text-3);font-size:12px;margin-top:2px">real-time</div></div>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:10px 34px;padding:16px 2px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:18px">
+                <sc-for list="{{ guardStats }}" as="s" hint-placeholder-count="3">
+                  <div style="display:flex;align-items:center;gap:9px;font-size:14px;color:var(--text-2)"><spaci-icon name="shield" style="width:16px;height:16px;color:var(--text-3)"></spaci-icon>{{ s.label }}<b style="color:var(--text);font-weight:700">{{ s.value }}</b></div>
+                </sc-for>
+              </div>
+              <div style="font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600;margin-bottom:12px">Watched locations</div>
+              <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:22px">
+                <sc-for list="{{ guardLocations }}" as="loc" hint-placeholder-count="8">
+                  <div class="mono" style="display:flex;align-items:center;gap:7px;padding:7px 12px;border-radius:99px;background:var(--panel);border:1px solid var(--border);font-size:12px;color:var(--text-2)"><span style="width:6px;height:6px;border-radius:50%;background:var(--success-fg)"></span>{{ loc }}</div>
+                </sc-for>
+              </div>
+              <div style="font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600;margin-bottom:12px">Recent activity</div>
+              <div class="sp-stagger" style="display:flex;flex-direction:column;gap:9px">
+                <sc-for list="{{ guardEvents }}" as="e" hint-placeholder-count="4">
+                  <div style="display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border)">
+                    <div style="width:38px;height:38px;border-radius:10px;background:var(--success-soft);display:grid;place-items:center;flex:none;color:var(--success-fg)"><spaci-icon name="{{ e.icon }}" style="width:20px;height:20px"></spaci-icon></div>
+                    <div style="flex:1;min-width:0;font-size:13.5px;font-weight:500">{{ e.title }}</div>
+                    <div style="color:var(--text-3);font-size:12px;flex:none">{{ e.when }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
           </div>
           </sc-if>
 
@@ -698,10 +820,11 @@
                 <div style="color:var(--text-3);font-size:12.5px;margin-top:2px">{{ scd.pctText }}</div>
               </div>
             </div>
-            <div style="font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin:8px 0 14px">Top 5 memory hogs</div>
+            <div style="font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin:8px 0 14px">Largest files</div>
             <div style="display:flex;flex-direction:column;gap:9px">
               <sc-for list="{{ scd.items }}" as="it" hint-placeholder-count="4">
-                <div style="display:flex;align-items:center;gap:15px;padding:15px 17px;border-radius:14px;background:var(--panel);border:1px solid var(--border)">
+                <div onClick="{{ it.onToggle }}" class="{{ it.rowCls }}" style="display:flex;align-items:center;gap:15px;padding:15px 17px;border-radius:14px;background:var(--panel);border:1px solid var(--border);cursor:pointer">
+                  <div class="{{ it.checkCls }}" style="width:24px;height:24px;border-radius:50%;border:1.5px solid var(--border-2);flex:none;display:grid;place-items:center;color:transparent;transition:.14s"><spaci-icon name="check" style="width:14px;height:14px"></spaci-icon></div>
                   <div style="width:44px;height:44px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:{{ scd.color }}"><spaci-icon name="{{ it.icon }}" style="width:23px;height:23px"></spaci-icon></div>
                   <div style="flex:1;min-width:0">
                     <div style="font-weight:600;font-size:14.5px">{{ it.name }}</div>
@@ -709,7 +832,6 @@
                   </div>
                   <div style="width:120px;flex:none"><div style="height:6px;border-radius:99px;background:var(--track);overflow:hidden"><span style="display:block;height:100%;border-radius:99px;background:{{ scd.color }};width:{{ it.barPct }}%"></span></div></div>
                   <div style="font-weight:700;font-size:15px;font-variant-numeric:tabular-nums;min-width:70px;text-align:right">{{ it.sizeText }}</div>
-                  <button style="height:36px;padding:0 13px;border-radius:9px;border:1px solid var(--border);background:var(--panel-2);color:var(--text);font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:6px;cursor:pointer;font-family:inherit;flex:none" style-hover="background:var(--panel-3)"><spaci-icon name="external-link" style="width:14px;height:14px"></spaci-icon>Reveal</button>
                 </div>
               </sc-for>
             </div>
@@ -752,6 +874,123 @@
           </div>
           </sc-if>
 
+          <!-- ========== MENU-BAR WIDGET ========== -->
+          <sc-if value="{{ isMenubar }}" hint-placeholder-val="{{ false }}">
+          <div data-screen-label="Menu-bar Widget">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:24px">
+              <div>
+                <div style="font-size:31px;font-weight:700;letter-spacing:-1.1px">Menu-bar Widget</div>
+                <div style="color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px">A redesign of the menu-bar drop-down. From a bare list of links to a live, glanceable panel you can act on without opening the app.</div>
+              </div>
+              <div style="display:flex;gap:6px;background:var(--panel-2);padding:4px;border-radius:11px;border:1px solid var(--border);flex:none">
+                <sc-for list="{{ mbModes }}" as="m" hint-placeholder-count="2">
+                  <div onClick="{{ m.onClick }}" class="{{ m.cls }}" style="padding:7px 15px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;color:var(--text-2)">{{ m.label }}</div>
+                </sc-for>
+              </div>
+            </div>
+
+            <!-- macOS desktop stage -->
+            <div style="position:relative;border-radius:20px;overflow:hidden;border:1px solid var(--border);background:linear-gradient(160deg,#3a4763,#222a3d 60%,#1a1f2e);box-shadow:var(--shadow-md);min-height:520px">
+              <!-- wallpaper glow -->
+              <div style="position:absolute;top:-80px;right:60px;width:380px;height:380px;border-radius:50%;background:radial-gradient(circle,rgba(120,150,220,.4),transparent 70%);pointer-events:none"></div>
+              <div style="position:absolute;bottom:-120px;left:-40px;width:420px;height:420px;border-radius:50%;background:radial-gradient(circle,rgba(1,75,170,.34),transparent 70%);pointer-events:none"></div>
+
+              <!-- menu bar -->
+              <div style="position:relative;height:38px;display:flex;align-items:center;gap:20px;padding:0 18px;background:rgba(20,22,30,.55);backdrop-filter:blur(20px);border-bottom:1px solid rgba(255,255,255,.08);color:rgba(255,255,255,.92);font-size:13px;font-weight:600;z-index:5">
+                <spaci-icon name="apple" style="width:15px;height:15px"></spaci-icon>
+                <span style="font-weight:700">Finder</span>
+                <span style="opacity:.8">File</span><span style="opacity:.8">Edit</span><span style="opacity:.8">View</span>
+                <div style="flex:1"></div>
+                <spaci-icon name="branch" style="width:15px;height:15px;opacity:.8"></spaci-icon>
+                <spaci-icon name="search" style="width:15px;height:15px;opacity:.8"></spaci-icon>
+                <!-- active Spaci icon -->
+                <div style="width:26px;height:26px;border-radius:7px;background:rgba(255,255,255,.16);display:grid;place-items:center;color:#fff;position:relative">
+                  <spaci-icon name="spaci-ring" anim="swing" style="width:17px;height:17px"></spaci-icon>
+                </div>
+                <span style="opacity:.92">100%</span>
+                <span style="opacity:.92">Tue 9:41</span>
+              </div>
+
+              <!-- the popover -->
+              <sc-if value="{{ mbIsAfter }}" hint-placeholder-val="{{ true }}">
+              <div style="position:absolute;top:50px;right:22px;width:340px;z-index:6;animation:sp-rise .34s cubic-bezier(.22,.61,.36,1)">
+                <!-- little arrow -->
+                <div style="position:absolute;top:-7px;right:42px;width:14px;height:14px;background:linear-gradient(135deg,#28324a,#222a3d);border-left:1px solid var(--border-2);border-top:1px solid var(--border-2);transform:rotate(45deg)"></div>
+                <div class="sp-stagger" style="position:relative;border-radius:18px;border:none;border-top:1px solid var(--border-2);border-bottom:1px solid var(--border-2);background:linear-gradient(180deg,rgba(1,75,170,.26),transparent 240px),var(--panel-2);overflow:hidden;box-shadow:0 40px 90px rgba(0,0,0,.5)">
+                  <!-- header -->
+                  <div style="display:flex;align-items:center;gap:12px;padding:16px 18px 14px">
+                    <div style="color:var(--accent-fg)"><spaci-icon name="spaci-ring" anim="shimmer" style="width:34px;height:34px;display:block"></spaci-icon></div>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-size:15px;font-weight:700;letter-spacing:-.3px">Spaci<span style="color:var(--accent-fg)">.</span></div>
+                      <div style="color:var(--text-3);font-size:11.5px;margin-top:1px">Macintosh HD · {{ diskFree }} free</div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:5px;padding:4px 9px;border-radius:7px;background:var(--success-soft);color:var(--success-fg);font-size:10.5px;font-weight:700"><span style="width:6px;height:6px;border-radius:50%;background:var(--success-fg)"></span>Guard on</div>
+                  </div>
+
+                  <!-- reclaim block -->
+                  <div style="padding:8px 18px 18px">
+                    <div style="font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-3);font-weight:700">Reclaimable now</div>
+                    <div style="display:flex;align-items:flex-end;gap:10px;margin-top:6px">
+                      <div style="font-size:27px;font-weight:700;letter-spacing:-1px;line-height:1">{{ reclaimTotal }}</div>
+                      <div style="color:var(--text-3);font-size:11.5px;padding-bottom:3px">ready across caches &amp; builds</div>
+                    </div>
+                    <div style="height:7px;border-radius:99px;background:var(--track);margin-top:13px;overflow:hidden;display:flex;gap:2px">
+                      <sc-for list="{{ mbSegs }}" as="s" hint-placeholder-count="4">
+                        <span style="height:100%;border-radius:2px;background:{{ s.color }};flex-basis:{{ s.pct }}%;flex-grow:0;flex-shrink:0;transform-origin:left;animation:sp-segment .55s cubic-bezier(.22,.61,.36,1) backwards"></span>
+                      </sc-for>
+                    </div>
+                    <button style="margin-top:14px;width:100%;height:42px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;justify-content:center;gap:9px;cursor:pointer;font-family:inherit" style-hover="background:var(--accent-hover)"><spaci-icon name="flash" style="width:16px;height:16px"></spaci-icon>Clean {{ reclaimTotal }}</button>
+                  </div>
+
+                  <!-- quick stats (borderless, divider only) -->
+                  <div style="display:flex;padding:13px 18px;border-top:1px solid var(--border);border-bottom:1px solid var(--border)">
+                    <sc-for list="{{ mbQuick }}" as="q" hint-placeholder-count="2">
+                      <div style="flex:1;display:flex;flex-direction:column;gap:5px">
+                        <div style="display:flex;align-items:center;gap:7px;color:var(--text-3);font-size:11px;font-weight:600"><spaci-icon name="{{ q.icon }}" style="width:14px;height:14px;color:var(--accent-fg)"></spaci-icon>{{ q.label }}</div>
+                        <div style="font-size:15px;font-weight:700;letter-spacing:-.4px;color:var(--text-2)">{{ q.value }}</div>
+                      </div>
+                    </sc-for>
+                  </div>
+
+                  <!-- actions -->
+                  <div style="border-top:1px solid var(--border);padding:7px 8px">
+                    <sc-for list="{{ mbActions }}" as="a" hint-placeholder-count="3">
+                      <div style="display:flex;align-items:center;gap:12px;padding:10px 11px;border-radius:10px;cursor:pointer" style-hover="background:var(--panel)">
+                        <spaci-icon name="{{ a.icon }}" style="width:17px;height:17px;color:var(--text-2)"></spaci-icon>
+                        <span style="flex:1;font-size:13.5px;font-weight:500">{{ a.label }}</span>
+                        <span style="color:var(--text-4);font-size:11.5px">{{ a.hint }}</span>
+                      </div>
+                    </sc-for>
+                  </div>
+                </div>
+              </div>
+              </sc-if>
+
+              <!-- the bare "today" dropdown -->
+              <sc-if value="{{ mbIsBefore }}" hint-placeholder-val="{{ false }}">
+              <div style="position:absolute;top:46px;right:34px;width:182px;z-index:6;animation:sp-rise .26s cubic-bezier(.22,.61,.36,1)">
+                <div style="border-radius:7px;background:rgba(54,54,56,.86);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,.12);box-shadow:0 30px 70px rgba(0,0,0,.5);padding:5px;color:rgba(255,255,255,.95)">
+                  <div style="padding:6px 12px;border-radius:5px;font-size:14px;font-weight:500" style-hover="background:var(--accent);color:#fff">Open Spaci</div>
+                  <div style="padding:6px 12px;border-radius:5px;font-size:14px;font-weight:500" style-hover="background:var(--accent);color:#fff">Smart Scan</div>
+                  <div style="height:1px;background:rgba(255,255,255,.14);margin:5px 8px"></div>
+                  <div style="padding:6px 12px;border-radius:5px;font-size:14px;font-weight:500" style-hover="background:var(--accent);color:#fff">Quit Spaci</div>
+                </div>
+              </div>
+              </sc-if>
+            </div>
+            <div style="font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin:28px 0 14px">What changed</div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
+              <sc-for list="{{ mbChanges }}" as="c" hint-placeholder-count="3">
+                <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:20px">
+                  <div style="width:40px;height:40px;border-radius:11px;background:var(--accent-soft);display:grid;place-items:center;color:var(--accent-fg);margin-bottom:13px"><spaci-icon name="{{ c.icon }}" style="width:21px;height:21px"></spaci-icon></div>
+                  <div style="font-weight:700;font-size:14.5px">{{ c.title }}</div>
+                  <div style="color:var(--text-2);font-size:12.5px;margin-top:5px;line-height:1.55">{{ c.body }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+          </sc-if>
+
         </div>
 
       </main>
@@ -772,12 +1011,13 @@
       <sc-if value="{{ isOnboarding }}" hint-placeholder-val="{{ false }}">
         <div class="sp-scroll" style="position:absolute;inset:0;z-index:55;background:var(--bg);overflow-y:auto;display:flex;justify-content:center;animation:sp-fadein .3s">
           <div style="width:100%;max-width:520px;padding:40px 32px;display:flex;flex-direction:column;align-items:center;text-align:center;margin:auto 0">
-            <spaci-icon name="spaci-ring" anim="orbit" style="width:108px;height:108px;display:block;margin:0 auto 22px;color:var(--accent-fg)"></spaci-icon>
+            <div style="color:{{ onbAnimColor }}"><spaci-icon name="spaci-ring" anim="{{ onbAnim }}" style="width:108px;height:108px;display:block;margin:0 auto 22px"></spaci-icon></div>
             <div style="font-size:17px;font-weight:700;letter-spacing:-.4px;margin-bottom:26px">Spaci<span style="color:var(--accent-fg)">.</span></div>
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:26px">
               <sc-for list="{{ onbDots }}" as="d" hint-placeholder-count="3"><i class="{{ d.cls }}" style="height:4px;border-radius:99px;background:var(--border);transition:all .3s"></i></sc-for>
               <span style="font-size:12px;color:var(--text-3);margin-left:8px;font-weight:500">{{ onbStepLabel }}</span>
             </div>
+            <div key="{{ onbStepIndex }}" style="width:100%;display:flex;flex-direction:column;align-items:center;animation:sp-fadeup .42s cubic-bezier(.22,.61,.36,1)">
             <div style="font-size:40px;font-weight:700;letter-spacing:-1.4px;line-height:1.08;margin-bottom:14px">{{ onbTitle }}</div>
             <div style="font-size:16px;line-height:1.6;color:var(--text-2);margin-bottom:34px;max-width:430px">{{ onbBody }}</div>
             <sc-if value="{{ onbShowOptions }}" hint-placeholder-val="{{ false }}">
@@ -801,6 +1041,7 @@
                 </sc-for>
               </div>
             </sc-if>
+            </div>
             <div style="display:flex;gap:12px;align-items:center">
               <sc-if value="{{ onbShowBack }}" hint-placeholder-val="{{ false }}">
                 <button onClick="{{ onbBack }}" style="height:54px;padding:0 22px;border-radius:14px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:15px;cursor:pointer;font-family:inherit" style-hover="background:var(--panel-3)">Back</button>
@@ -811,6 +1052,23 @@
         </div>
       </sc-if>
     </div>
+
+    <!-- ===== SUCCESS BURST ===== -->
+    <sc-if value="{{ burstOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;z-index:85;display:grid;place-items:center;background:rgba(10,12,10,.42);backdrop-filter:blur(3px);animation:sp-fadein .2s;pointer-events:none">
+        <div style="display:flex;flex-direction:column;align-items:center;text-align:center;gap:20px;animation:sp-pop .34s cubic-bezier(.22,.61,.36,1)">
+          <div style="position:relative;width:128px;height:128px;display:grid;place-items:center;color:var(--success-fg)">
+            <div style="position:absolute;inset:14px;border-radius:50%;border:2px solid var(--success-fg);animation:sp-ping 1.5s ease-out infinite"></div>
+            <spaci-icon name="spaci-ring" anim="elastic" style="width:104px;height:104px"></spaci-icon>
+          </div>
+          <div>
+            <div style="font-size:15px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--success-fg)">Reclaimed</div>
+            <div style="font-size:48px;font-weight:700;letter-spacing:-2px;line-height:1.05;margin-top:4px">{{ burstSize }}</div>
+            <div style="color:var(--text-2);font-size:14px;margin-top:6px">{{ burstLabel }}</div>
+          </div>
+        </div>
+      </div>
+    </sc-if>
 
     <!-- ===== CONFIRM MODAL ===== -->
     <sc-if value="{{ confirmOpen }}" hint-placeholder-val="{{ false }}">
@@ -831,7 +1089,7 @@
   </div>
 
   <!-- ===== TOASTS ===== -->
-  <div style="position:absolute;bottom:40px;right:40px;display:flex;flex-direction:column;gap:10px;z-index:70">
+  <div style="position:absolute;bottom:40px;right:40px;display:flex;flex-direction:column;gap:10px;z-index:90">
     <sc-for list="{{ toasts }}" as="t" hint-placeholder-count="0">
       <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;border-radius:14px;background:var(--panel-2);border:1px solid var(--border-2);box-shadow:var(--shadow-lg);min-width:280px;animation:sp-toast .3s cubic-bezier(.22,.61,.36,1)">
         <spaci-icon name="spaci-ring" anim="assemble" style="width:30px;height:30px;color:var(--success-fg);flex:none"></spaci-icon>
@@ -865,14 +1123,16 @@ class Component extends DCLogic {
       documents:{icon:'document-text',desc:'Documents & desktop files'},
       downloads:{icon:'download',desc:'Your downloads folder'},
       system:{icon:'cpu',desc:'System, library & uncategorized'},
+      largefiles:{icon:'hard-drive',desc:'Biggest individual files on disk'},
     };
     this.catItems = {
-      media:[{name:'Movies',path:'~/Movies',bytes:GB(88),icon:'play'},{name:'Photos Library',path:'~/Pictures/Photos Library.photoslibrary',bytes:GB(52),icon:'image'},{name:'Final_Render_v3.mov',path:'~/Movies/Projects',bytes:GB(24),icon:'play'},{name:'Music',path:'~/Music',bytes:GB(24),icon:'flash'},{name:'iMovie Library',path:'~/Movies/iMovie Library.imovielibrary',bytes:GB(22),icon:'image'}],
-      coding:[{name:'Source & repositories',path:'~/dev',bytes:GB(60),icon:'code'},{name:'node_modules · 42 projects',path:'~/dev',bytes:GB(58),icon:'node'},{name:'Build caches · .gradle, .m2, .cargo',path:'~',bytes:GB(28),icon:'gradle'},{name:'rustverse/target',path:'~/dev/rustverse/target',bytes:GB(18),icon:'rust'},{name:'Xcode DerivedData',path:'~/Library/Developer/Xcode/DerivedData',bytes:GB(16),icon:'apple'}],
+      media:[{name:'Final_Render_v3.mov',path:'~/Movies/Projects',bytes:GB(24),icon:'play'},{name:'Wedding_4K.mov',path:'~/Movies',bytes:GB(18),icon:'play'},{name:'Vacation_2024.mp4',path:'~/Movies',bytes:GB(14),icon:'play'},{name:'Album_Masters.zip',path:'~/Music',bytes:GB(11),icon:'box'},{name:'Drone_Footage.mov',path:'~/Movies/Projects',bytes:GB(9),icon:'play'}],
+      coding:[{name:'rustverse · target',path:'~/dev/rustverse/target',bytes:GB(18),icon:'rust'},{name:'libLLVM.dylib',path:'~/Library/Developer/Xcode',bytes:GB(13),icon:'apple'},{name:'android-sdk.zip',path:'~/Library/Android',bytes:GB(11),icon:'android'},{name:'docker-base.tar',path:'~/dev/images',bytes:GB(9),icon:'docker'},{name:'dataset-train.parquet',path:'~/dev/ml-pipeline/data',bytes:GB(7),icon:'database'}],
       apps:[{name:'Xcode',path:'/Applications/Xcode.app',bytes:GB(38),icon:'apple'},{name:'Final Cut Pro',path:'/Applications/Final Cut Pro.app',bytes:GB(24),icon:'play'},{name:'Docker Desktop',path:'/Applications/Docker.app',bytes:GB(22),icon:'docker'},{name:'Adobe Photoshop',path:'/Applications/Adobe Photoshop',bytes:GB(18),icon:'image'},{name:'Other applications',path:'/Applications',bytes:GB(18),icon:'grid'}],
-      documents:[{name:'Documents',path:'~/Documents',bytes:GB(28),icon:'document-text'},{name:'Desktop',path:'~/Desktop',bytes:GB(22),icon:'document'},{name:'iCloud · local copies',path:'~/Library/Mobile Documents',bytes:GB(14),icon:'folder-cloud'},{name:'Q3-Report.key',path:'~/Documents/Decks',bytes:GB(8),icon:'document'},{name:'Old_Docs.zip',path:'~/Documents/Archive',bytes:GB(6),icon:'box'}],
+      documents:[{name:'Q3-Report.key',path:'~/Documents/Decks',bytes:GB(8),icon:'document'},{name:'Old_Docs.zip',path:'~/Documents/Archive',bytes:GB(6),icon:'box'},{name:'Thesis_Final.pdf',path:'~/Documents',bytes:GB(4),icon:'document-text'},{name:'Scans_2023.zip',path:'~/Documents/Archive',bytes:GB(3.4),icon:'box'},{name:'Budget_2025.xlsx',path:'~/Documents/Finance',bytes:GB(2),icon:'document'}],
       downloads:[{name:'ubuntu-24.04.iso',path:'~/Downloads',bytes:GB(12),icon:'box'},{name:'DemoArchive.zip',path:'~/Downloads',bytes:GB(10),icon:'box'},{name:'Installers & disk images',path:'~/Downloads',bytes:GB(9),icon:'box'},{name:'backup-2025.tar.gz',path:'~/Downloads',bytes:GB(8),icon:'box'},{name:'Everything else',path:'~/Downloads',bytes:GB(7),icon:'file'}],
       system:[{name:'System data',path:'/System',bytes:GB(24),icon:'cpu'},{name:'User caches',path:'~/Library/Caches',bytes:GB(22),icon:'database'},{name:'Logs & diagnostics',path:'/private/var/log',bytes:GB(13),icon:'log'},{name:'Saved application state',path:'~/Library/Saved Application State',bytes:GB(11),icon:'document'},{name:'Other & uncategorized',path:'/',bytes:GB(8),icon:'hard-drive'}],
+      largefiles:[{name:'Final_Render_v3.mov',path:'~/Movies/Projects',bytes:GB(4.2),icon:'play'},{name:'ubuntu-24.04.iso',path:'~/Downloads',bytes:GB(3.6),icon:'box'},{name:'backup-2025.tar.gz',path:'~/Desktop',bytes:GB(2.9),icon:'box'},{name:'DemoArchive.zip',path:'~/Downloads',bytes:GB(1.7),icon:'box'},{name:'dataset-train.parquet',path:'~/dev/ml-pipeline/data',bytes:GB(1.4),icon:'database'}],
     };
 
     this.projects = [
@@ -939,20 +1199,20 @@ class Component extends DCLogic {
     ];
 
     this.soon = [
-      {icon:'calendar',title:'Scheduled Scans',body:'Set Spaci to scan and reclaim space automatically — nightly, weekly, or when your disk gets low. Wake up to a clean Mac.'},
+      {icon:'calendar',title:'Scheduled Scans',body:'Set Spaci to scan and reclaim space automatically - nightly, weekly, or when your disk gets low. Wake up to a clean Mac.'},
       {icon:'activity',title:'Menu-bar Widget',body:'A live readout of reclaimable space right in your menu bar. One click to clean the biggest wins without opening the app.'},
-      {icon:'copy',title:'Duplicate Finder',body:'Pinpoint duplicate files and folders across your disk — even renamed copies — and clear the redundant ones in one pass.'},
+      {icon:'copy',title:'Duplicate Finder',body:'Pinpoint duplicate files and folders across your disk - even renamed copies - and clear the redundant ones in one pass.'},
       {icon:'shield',title:'Spaci Guard',body:'Real-time monitoring that flags caches and build artifacts the moment they balloon, so clutter never sneaks back.'},
     ];
 
     this.state = {
       route:'dashboard', theme:'dark',
       scanning:false, scanProgress:0,
-      selProj:new Set(), selSys:new Set(['s_gradle','s_pnpm','x_derived']), selLarge:new Set(),
+      selProj:new Set(), selSys:new Set(['s_gradle','s_pnpm','x_derived']), selLarge:new Set(), selStorage:new Set(),
       projQuery:'', projSort:'size',
       activeProject:null, selPdItems:new Set(),
       confirm:true, notify:true,
-      donutHover:null, activeCat:null, activeAction:null, confirmModal:null,
+      donutHover:null, activeCat:null, activeAction:null, confirmModal:null, cleanBurst:null,
       onbStep:0, onbTargets:{projects:true,devcaches:true,system:true},
       toasts:[],
     };
@@ -970,6 +1230,7 @@ class Component extends DCLogic {
     this.centerRef = React.createRef();
     this.centerSubRef = React.createRef();
     this._toastN = 0;
+    this._burstN = 0;
   }
 
   fmt(b){ if(!b||b<0) return '0 B'; if(b<1024) return b+' B'; const u=['KB','MB','GB','TB']; let i=-1; do{b/=1024;i++;}while(b>=1024&&i<u.length-1); return b.toFixed(b<10?1:b<100?1:0)+' '+u[i]; }
@@ -1019,6 +1280,7 @@ class Component extends DCLogic {
   }
   askConfirm(opts){ this.setState({confirmModal:opts}); }
   closeConfirm(){ this.setState({confirmModal:null}); }
+  burst(bytes,label){ var id=++this._burstN; this.setState({cleanBurst:{size:this.fmt(bytes),label:label}}); setTimeout(()=>{ if(this._burstN===id) this.setState({cleanBurst:null}); },2300); }
 
   scan(){
     if(this.state.scanning) return;
@@ -1050,21 +1312,64 @@ class Component extends DCLogic {
   togglePd(it){ const s=new Set(this.state.selPdItems); s.has(it.id)?s.delete(it.id):s.add(it.id); this.setState({selPdItems:s}); }
   toggleSys(t){ const s=new Set(this.state.selSys); s.has(t.id)?s.delete(t.id):s.add(t.id); this.setState({selSys:s}); }
   toggleLarge(f){ const s=new Set(this.state.selLarge); s.has(f.id)?s.delete(f.id):s.add(f.id); this.setState({selLarge:s}); }
+  toggleStorage(key){ const s=new Set(this.state.selStorage); s.has(key)?s.delete(key):s.add(key); this.setState({selStorage:s}); }
 
   cleanSelection(scope){
     let bytes=0, label='';
     if(scope==='projects'){ bytes=this.selProjBytes(); label='project artifacts'; this.setState({selProj:new Set()}); }
     else if(scope==='system'){ const sel=this.sysGroups.flatMap(g=>g.items).filter(i=>this.state.selSys.has(i.id)); bytes=sel.reduce((a,i)=>a+i.bytes,0); label='system caches'; this.setState({selSys:new Set()}); }
     else if(scope==='large'){ const sel=this.largeFiles.filter(f=>this.state.selLarge.has(f.id)); bytes=sel.reduce((a,i)=>a+i.bytes,0); label='large files'; this.setState({selLarge:new Set()}); }
-    this.toast('Cleaned '+this.fmt(bytes), 'Freed from '+label);
+    else if(scope==='pd'){ const p=this.state.activeProject; const sel=p?p.items.filter(i=>this.state.selPdItems.has(i.id)):[]; bytes=sel.reduce((a,i)=>a+i.bytes,0); label=p?p.name:'project'; this.setState({selPdItems:new Set()}); }
+    else if(scope==='storage'){ const key=this.state.activeCat; const its=this.catItems[key]||[]; const sel=its.filter(i=>this.state.selStorage.has(key+':'+i.name)); bytes=sel.reduce((a,i)=>a+i.bytes,0); label=(this.catMeta[key]&&this.breakdownRaw.find(x=>x.key===key)?this.breakdownRaw.find(x=>x.key===key).label:'storage'); this.setState({selStorage:new Set()}); }
+    this.toast(scope==='large'||scope==='storage'?'Deleted '+this.fmt(bytes):'Cleaned '+this.fmt(bytes), (scope==='large'||scope==='storage'?'Removed from ':'Freed from ')+label);
+    this.burst(bytes, (scope==='large'||scope==='storage'?'Removed from ':'Freed from ')+label);
+  }
+
+  soonView(){
+    const k=this.state.activeSoon||'duplicate';
+    const meta={
+      duplicate:{icon:'copy',name:'Duplicate Finder',pitch:'Find duplicate files and folders across your disk - even renamed copies - and clear the redundant ones in a single pass.'},
+      scheduled:{icon:'calendar',name:'Scheduled Scans',pitch:'Let Spaci scan and reclaim space automatically - nightly, weekly, or whenever your disk runs low.'},
+      guard:{icon:'shield',name:'Spaci Guard',pitch:'Real-time monitoring that clears caches and build artifacts the moment they balloon, so clutter never builds back up.'},
+    };
+    const m=meta[k];
+    const act=({duplicate:{label:'Scan for duplicates',icon:'scan'},scheduled:{label:'Add schedule',icon:'plus'},guard:{label:'Pause Guard',icon:'pause'}})[k];
+    const tab=(key,label,icon)=>({label:label,icon:icon,cls:k===key?'sp-chip-on':'',onClick:()=>this.setState({activeSoon:key})});
+    return {
+      soonIcon:m.icon, soonName:m.name, soonPitch:m.pitch, soonActionLabel:act.label, soonActionIcon:act.icon,
+      soonIsDup:k==='duplicate', soonIsSched:k==='scheduled', soonIsGuard:k==='guard',
+      soonTabs:[tab('duplicate','Duplicate Finder','copy'),tab('scheduled','Scheduled Scans','calendar'),tab('guard','Spaci Guard','shield')],
+      dupStats:[{label:'Duplicates',value:'1,284'},{label:'Recoverable',value:'8.2 GB'},{label:'Groups',value:'312'}],
+      dupGroups:[
+        {name:'IMG_4821.HEIC',icon:'image',meta:'4 copies',size:'182 MB',paths:'~/Pictures · ~/Desktop · ~/Downloads/old'},
+        {name:'Keynote-Master.key',icon:'document',meta:'5 copies',size:'4.9 GB',paths:'~/Documents/Decks + 4 more'},
+        {name:'project-assets.zip',icon:'box',meta:'3 copies',size:'1.2 GB',paths:'~/Downloads · ~/Desktop · ~/dev/archive'},
+        {name:'node-v20.pkg',icon:'box',meta:'2 copies',size:'168 MB',paths:'~/Downloads · ~/Downloads/installers'},
+      ],
+      schedules:[
+        {icon:'broom',title:'Nightly cleanup',sub:'Every day at 2:00 AM · caches & build artifacts',togCls:'sp-tog-on'},
+        {icon:'scan',title:'Weekly deep scan',sub:'Sundays · projects, caches, large files',togCls:'sp-tog-on'},
+        {icon:'hard-drive',title:'When disk is low',sub:'Auto-clean when free space drops below 10%',togCls:''},
+      ],
+      schedNextLabel:'Runs in 6h 12m · tonight at 2:00 AM',
+      weekDays:[{d:'M',cls:'sp-wd-on'},{d:'T',cls:'sp-wd-on'},{d:'W',cls:'sp-wd-on'},{d:'T',cls:'sp-wd-on'},{d:'F',cls:'sp-wd-on'},{d:'S',cls:'sp-wd'},{d:'S',cls:'sp-wd-on'}],
+      guardLocations:['Xcode DerivedData','~/Library/Caches','~/.gradle/caches','npm cache','pnpm store','~/.cargo','Simulators','Trash'],
+      guardStats:[{label:'Auto-cleared',value:'4.6 GB'},{label:'This week',value:'18 sweeps'},{label:'Locations',value:'12'}],
+      guardEvents:[
+        {icon:'apple',title:'Cleared 240 MB from Xcode DerivedData',when:'2m ago'},
+        {icon:'node',title:'Pruned 88 MB of stale npm cache',when:'1h ago'},
+        {icon:'trash',title:'Emptied 1.1 GB from Trash on schedule',when:'today, 09:14'},
+        {icon:'gradle',title:'Cleared 320 MB of Gradle build cache',when:'yesterday'},
+      ],
+    };
   }
 
   onbView(){
     const step=this.state.onbStep||0;
     const steps=[
-      {title:'A cleaner Mac, the safe way', body:'Spaci reclaims gigabytes from regenerable caches and build artifacts — never your code or real files.', anim:'orbit', color:'var(--accent-fg)', btn:'Get started'},
-      {title:'What should Spaci clean?', body:'Pick what Spaci targets. Everything here is regenerable, so it is always safe to remove.', anim:'clearing', color:'var(--accent-fg)', btn:'Continue'},
-      {title:"You're all set.", body:'A quick reminder of how Spaci keeps you safe before your first scan.', anim:'assemble', color:'var(--success-fg)', btn:'Start scanning'},
+      {title:'A cleaner Mac, the safe way', body:'Spaci reclaims gigabytes from regenerable caches and build artifacts - never your code or real files.', anim:'spiral', color:'var(--accent-fg)', btn:'Get started'},
+      {title:'What should Spaci clean?', body:'Pick what Spaci targets. Everything here is regenerable, so it is always safe to remove.', anim:'aperture', color:'var(--accent-fg)', btn:'Continue'},
+      {title:"You're all set.", body:'A quick reminder of how Spaci keeps you safe before your first scan.', anim:'elastic', color:'var(--success-fg)', btn:'Start scanning'},
     ];
     const c=steps[step], T=this.state.onbTargets;
     const tog=(k)=>()=>{const n=Object.assign({},this.state.onbTargets);n[k]=!n[k];this.setState({onbTargets:n});};
@@ -1082,7 +1387,7 @@ class Component extends DCLogic {
       ],
       onbFeatures:[
         {icon:'document-text',title:'Preview first',sub:'See exactly what will be deleted before anything happens.'},
-        {icon:'check-circle',title:'Regenerable only',sub:'Only caches and build output — never your code or files.'},
+        {icon:'check-circle',title:'Regenerable only',sub:'Only caches and build output - never your code or files.'},
         {icon:'clock',title:'Stale detection',sub:'Old, untouched projects are flagged so you clean with confidence.'},
       ],
     };
@@ -1121,10 +1426,10 @@ class Component extends DCLogic {
 
     // recommendations
     const recDefs = [
-      {icon:'apple',title:'Xcode DerivedData is huge',body:'6.3 GB of build intermediates across all your projects — safe to clear and rebuilds on demand.',bytes:this.GB(6.3),high:true,onClean:()=>this.cleanRec('Xcode DerivedData',this.GB(6.3))},
+      {icon:'apple',title:'Xcode DerivedData is huge',body:'6.3 GB of build intermediates across all your projects - safe to clear and rebuilds on demand.',bytes:this.GB(6.3),high:true,onClean:()=>this.cleanRec('Xcode DerivedData',this.GB(6.3))},
       {icon:'trash',title:'Your Trash is filling up',body:'4.8 GB sitting in the Bin. Empty it to reclaim the space instantly.',bytes:this.GB(4.8),high:true,onClean:()=>this.cleanRec('Trash',this.GB(4.8))},
       {icon:'package',title:'pnpm store can be pruned',body:'2.4 GB of unreferenced packages in your global pnpm store.',bytes:this.GB(2.4),high:false,onClean:()=>this.cleanRec('pnpm store',this.GB(2.4))},
-      {icon:'rust',title:'rustverse looks stale',body:"Not modified in 21 days — its 2.1 GB target/ directory is reclaimable.",bytes:this.GB(2.1),high:false,onClean:()=>this.cleanRec('rustverse target',this.GB(2.1))},
+      {icon:'rust',title:'rustverse looks stale',body:"Not modified in 21 days - its 2.1 GB target/ directory is reclaimable.",bytes:this.GB(2.1),high:false,onClean:()=>this.cleanRec('rustverse target',this.GB(2.1))},
     ];
 
     // projects filtered + sorted
@@ -1164,7 +1469,7 @@ class Component extends DCLogic {
         ] : [ {icon:'info',k:'Version control',v:'Not a git repository',color:'var(--text-3)'} ],
         items: p.items.map(it=>{ const sel=S.selPdItems.has(it.id); return {
           name:it.name, icon:it.kind, size:this.fmt(it.bytes), note:it.note,
-          badge: it.safe?'safe':'caution', badgeCls: it.safe?'sp-badge-safe':'sp-badge-warn',
+          badge: it.safe?'safe':'caution', badgeCls: it.safe?'sp-badge-safe':'sp-badge-caution',
           rowCls: sel?'sp-row-sel':'', checkCls: sel?'sp-check-on':'',
           onToggle:()=>this.togglePd(it) }; }),
       };
@@ -1176,7 +1481,7 @@ class Component extends DCLogic {
       items:g.items.map(t=>{ const sel=S.selSys.has(t.id); return {
         name:t.name, icon:t.icon, desc:t.desc, size:this.fmt(t.bytes),
         sizeColor: t.bytes>this.GB(1)?'var(--accent-fg)':'var(--text)',
-        badge: t.safe?'safe':'review', badgeCls: t.safe?'sp-badge-safe':'sp-badge-warn',
+        badge: t.safe?'safe':'review', badgeCls: t.safe?'sp-badge-safe':'sp-badge-caution',
         rowCls: sel?'sp-row-sel':'', checkCls: sel?'sp-check-on':'',
         onToggle:()=>this.toggleSys(t) }; }),
     }));
@@ -1188,9 +1493,11 @@ class Component extends DCLogic {
 
     // action bar
     let ab=null;
-    if(route==='projects'||route==='project'){ const n=this.selProjCount(); if(n) ab={count:n+' item'+(n>1?'s':''), size:this.fmt(this.selProjBytes()), clean:()=>this.cleanSelection('projects'), clear:()=>this.setState({selProj:new Set()}), action:'Clean '+this.fmt(this.selProjBytes()), danger:false}; }
+    if(route==='projects'){ const n=this.selProjCount(); if(n) ab={count:n+' item'+(n>1?'s':''), size:this.fmt(this.selProjBytes()), clean:()=>this.cleanSelection('projects'), clear:()=>this.setState({selProj:new Set()}), action:'Clean '+this.fmt(this.selProjBytes()), danger:false}; }
+    else if(route==='project'&&S.activeProject){ const sel=S.activeProject.items.filter(i=>S.selPdItems.has(i.id)); if(sel.length){ const b=sel.reduce((a,i)=>a+i.bytes,0); ab={count:sel.length+' item'+(sel.length>1?'s':''), size:this.fmt(b), clean:()=>this.cleanSelection('pd'), clear:()=>this.setState({selPdItems:new Set()}), action:'Clean '+this.fmt(b), danger:false}; } }
     else if(route==='system'){ const sel=this.sysGroups.flatMap(g=>g.items).filter(i=>S.selSys.has(i.id)); if(sel.length){ const b=sel.reduce((a,i)=>a+i.bytes,0); ab={count:sel.length+' cache'+(sel.length>1?'s':''), size:this.fmt(b), clean:()=>this.cleanSelection('system'), clear:()=>this.setState({selSys:new Set()}), action:'Clean '+this.fmt(b), danger:false}; } }
     else if(route==='largefiles'){ const sel=this.largeFiles.filter(f=>S.selLarge.has(f.id)); if(sel.length){ const b=sel.reduce((a,i)=>a+i.bytes,0); ab={count:sel.length+' file'+(sel.length>1?'s':''), size:this.fmt(b), clean:()=>this.cleanSelection('large'), clear:()=>this.setState({selLarge:new Set()}), action:'Delete '+this.fmt(b), danger:true}; } }
+    else if(route==='storagecat'&&S.activeCat){ const its=this.catItems[S.activeCat]||[]; const sel=its.filter(i=>S.selStorage.has(S.activeCat+':'+i.name)); if(sel.length){ const b=sel.reduce((a,i)=>a+i.bytes,0); ab={count:sel.length+' file'+(sel.length>1?'s':''), size:this.fmt(b), clean:()=>this.cleanSelection('storage'), clear:()=>this.setState({selStorage:new Set()}), action:'Delete '+this.fmt(b), danger:true}; } }
 
     const fontChips = ['DM Sans','Google Sans'].map(f=>({ label:f, cls:(this.props.font||'DM Sans')===f?'sp-fchip-on':'', onClick:()=>this.setTweak&&this.setTweak('font',f) }));
 
@@ -1204,16 +1511,24 @@ class Component extends DCLogic {
       navTop: navMeta.map(mkNav),
       navBottom: [ {label:'History',icon:'log',onClick:()=>this.go('history'),cls:route==='history'?'sp-nav-on':''},
                    {label:'Settings',icon:'settings',onClick:()=>this.go('settings'),cls:route==='settings'?'sp-nav-on':''} ],
-      navSoon: [ {label:'Scheduled Scans',icon:'calendar',onClick:()=>this.go('soon')},
-                 {label:'Duplicate Finder',icon:'copy',onClick:()=>this.go('soon')},
-                 {label:'Spaci Guard',icon:'shield',onClick:()=>this.go('soon')} ],
+      navSoon: [ {label:'Scheduled Scans',icon:'calendar',k:'scheduled'},{label:'Duplicate Finder',icon:'copy',k:'duplicate'},{label:'Spaci Guard',icon:'shield',k:'guard'} ].map(n=>({label:n.label,icon:n.icon,onClick:()=>this.setState({route:'soon',activeSoon:n.k}),cls:(route==='soon'&&(S.activeSoon||'duplicate')===n.k)?'sp-nav-on':''})).concat([{label:'Menu-bar Widget',icon:'activity',onClick:()=>this.go('menubar'),cls:route==='menubar'?'sp-nav-on':''}]),
 
       diskSegs, diskFree:this.fmt(this.disk.avail), diskPctText:this.diskPct()+'%', diskTotal:this.fmt(this.disk.total), diskUsedText:this.fmt(this.disk.used),
 
       // route flags
       isDashboard:route==='dashboard', isProjects:route==='projects', isProjectDetail:route==='project',
       isSystem:route==='system', isLarge:route==='largefiles', isRecs:route==='recommendations', isStorage:route==='storage',
-      isHistory:route==='history', isSettings:route==='settings', isSoon:route==='soon', isOnboarding:route==='onboarding',
+      isHistory:route==='history', isSettings:route==='settings', isSoon:route==='soon', isOnboarding:route==='onboarding', isMenubar:route==='menubar',
+      mbModes:[{label:'Redesign',k:'after'},{label:'Today',k:'before'}].map(m=>({label:m.label,cls:(S.mbMode||'after')===m.k?'sp-fchip-on':'',onClick:()=>this.setState({mbMode:m.k})})),
+      mbIsAfter:(S.mbMode||'after')==='after', mbIsBefore:(S.mbMode||'after')==='before',
+      mbSegs:[{color:'#3b6fd0',pct:38},{color:'#8b6bd9',pct:26},{color:'#2fb8a8',pct:21},{color:'#e0954f',pct:15}],
+      mbQuick:[{icon:'broom',label:'Caches',value:this.fmt(this.reclaimSys())},{icon:'folder-2',label:'Projects',value:this.fmt(this.reclaimProj())}],
+      mbActions:[{icon:'scan',label:'Run Smart Scan',hint:'⌘S'},{icon:'dashboard',label:'Open Spaci',hint:'⌘O'},{icon:'pause',label:'Pause Guard',hint:''}],
+      mbChanges:[
+        {icon:'flash',title:'Act, don\u2019t just open',body:'Reclaim space straight from the menu bar - no need to launch the full app first.'},
+        {icon:'chart',title:'Glanceable status',body:'Live free space, reclaimable total and a storage bar replace three plain text links.'},
+        {icon:'shield',title:'Guard at a glance',body:'See protection status and pause it inline, with recent activity one tap away.'},
+      ],
       goStorage:()=>this.go('storage'),
       donutArcs:this.arcSegments(228,16), donutArcsLg:this.arcSegments(256,20),
       storageStats:[
@@ -1223,13 +1538,14 @@ class Component extends DCLogic {
       ],
       storageCats:[...this.breakdownRaw.map(b=>({label:b.label,color:b.color,sizeText:this.fmt(b.bytes),pctText:(b.bytes/this.disk.total*100).toFixed(1)+'%',barPct:(b.bytes/this.disk.total*100).toFixed(2),onEnter:()=>this.setState({donutHover:{label:b.label,size:this.fmt(b.bytes)}}),onLeave:()=>this.setState({donutHover:null})})),
         {label:'Free space',color:'var(--track-bright)',sizeText:this.fmt(this.disk.avail),pctText:(this.disk.avail/this.disk.total*100).toFixed(1)+'%',barPct:(this.disk.avail/this.disk.total*100).toFixed(2),onEnter:()=>this.setState({donutHover:{label:'Free space',size:this.fmt(this.disk.avail)}}),onLeave:()=>this.setState({donutHover:null})}],
-      storageDetail:this.breakdownRaw.map(b=>({label:b.label,color:b.color,
+      storageDetail:(()=>{ const lf=this.catItems.largefiles||[]; const lfSum=lf.reduce((a,i)=>a+i.bytes,0); const base=this.breakdownRaw.map(b=>({label:b.label,color:b.color,
         icon:(this.catMeta[b.key]||{}).icon||'folder', desc:(this.catMeta[b.key]||{}).desc||'',
         sizeText:this.fmt(b.bytes),pctText:(b.bytes/this.disk.used*100).toFixed(0)+'% of used',barPct:(b.bytes/this.disk.used*100).toFixed(2),
         onEnter:()=>this.setState({donutHover:{label:b.label,size:this.fmt(b.bytes)}}),onLeave:()=>this.setState({donutHover:null}),
-        onOpen:()=>this.setState({activeCat:b.key,route:'storagecat'})})),
+        onOpen:()=>this.setState({activeCat:b.key,route:'storagecat'})}));
+        return base; })(),
       isStorageCat:route==='storagecat',
-      scd:(route==='storagecat'&&S.activeCat)?(()=>{const b=this.breakdownRaw.find(x=>x.key===S.activeCat);const m=this.catMeta[b.key]||{};const its=this.catItems[b.key]||[];const mx=Math.max.apply(null,its.map(i=>i.bytes));return {label:b.label,color:b.color,icon:m.icon||'folder',desc:m.desc||'',sizeText:this.fmt(b.bytes),pctText:(b.bytes/this.disk.total*100).toFixed(1)+'% of disk',usedPctText:(b.bytes/this.disk.used*100).toFixed(0)+'% of used space',items:its.map(it=>({name:it.name,path:it.path,icon:it.icon,sizeText:this.fmt(it.bytes),barPct:(it.bytes/mx*100).toFixed(1)}))};})():null,
+      scd:(route==='storagecat'&&S.activeCat)?(()=>{var key=S.activeCat;var b=this.breakdownRaw.find(x=>x.key===key);var m=this.catMeta[key]||{};var its=this.catItems[key]||[];if(!b){var sum=its.reduce((a,i)=>a+i.bytes,0);b={label:'Large Files',color:'var(--accent-fg)',bytes:sum};}var mx=Math.max.apply(null,its.map(i=>i.bytes));return {label:b.label,color:b.color,icon:m.icon||'folder',desc:m.desc||'',sizeText:this.fmt(b.bytes),pctText:(b.bytes/this.disk.total*100).toFixed(1)+'% of disk',usedPctText:(b.bytes/this.disk.used*100).toFixed(0)+'% of used space',items:its.map(it=>{var sel=S.selStorage.has(key+':'+it.name);return {name:it.name,path:it.path,icon:it.icon,sizeText:this.fmt(it.bytes),barPct:(it.bytes/mx*100).toFixed(1),checkCls:sel?'sp-check-on':'',rowCls:sel?'sp-row-sel':'',onToggle:()=>this.toggleStorage(key+':'+it.name)};})};})():null,
       centerTopLg: S.donutHover ? S.donutHover.size : this.fmt(this.disk.used),
       centerSubLg: S.donutHover ? S.donutHover.label : 'used of '+this.fmt(this.disk.total),
 
@@ -1237,6 +1553,8 @@ class Component extends DCLogic {
       scanning:S.scanning, idle:!S.scanning,
       centerTop: S.donutHover ? S.donutHover.size : (S.scanning ? Math.round(S.scanProgress)+'%' : this.diskPct()+'%'),
       centerSub: S.donutHover ? S.donutHover.label : (S.scanning ? 'scanning…' : 'disk used'),
+      centerTopNum: (()=>{ var v=S.donutHover ? S.donutHover.size : (S.scanning ? Math.round(S.scanProgress)+'%' : this.diskPct()+'%'); var m=String(v).match(/^([\d.,]+)\s*(.*)$/); return m?m[1]:v; })(),
+      centerTopUnit: (()=>{ var v=S.donutHover ? S.donutHover.size : (S.scanning ? Math.round(S.scanProgress)+'%' : this.diskPct()+'%'); var m=String(v).match(/^([\d.,]+)\s*(.*)$/); return m?m[2]:''; })(),
       lastScan: S.scanning ? 'scanning now' : '4 minutes ago',
       scanBtnLabel: S.scanning ? 'Scanning…' : 'Smart Scan',
       reclaimHeadline: this.fmt(rTotal)+' ready to reclaim',
@@ -1248,7 +1566,7 @@ class Component extends DCLogic {
         {icon:'folder-2',label:'Project artifacts',value:this.fmt(rProj),sub:this.projects.length+' projects',onClick:()=>this.go('projects')},
         {icon:'broom',label:'System caches',value:this.fmt(rSys),sub:this.sysGroups.reduce((n,g)=>n+g.items.length,0)+' locations',onClick:()=>this.go('system')},
       ],
-      topRecs: recDefs.slice(0,3).map(r=>({ icon:r.icon, title:r.title, body:r.body, size:this.fmt(r.bytes), color:r.high?'var(--danger-fg)':'var(--accent-fg)', onClick:()=>this.go('recommendations') })),
+      topRecs: recDefs.slice(0,3).map(r=>({ icon:r.icon, title:r.title, body:r.body, size:this.fmt(r.bytes), color:r.high?'var(--warn-fg)':'var(--accent-fg)', onClick:()=>this.go('recommendations') })),
 
       // projects
       projQuery:S.projQuery, onProjSearch:(e)=>this.setState({projQuery:e.target.value}),
@@ -1258,16 +1576,21 @@ class Component extends DCLogic {
 
       sysGroups, largeFiles,
       recsFull: recDefs.map(r=>({ icon:r.icon, title:r.title, body:r.body, size:this.fmt(r.bytes),
-        color:r.high?'var(--danger-fg)':'var(--accent-fg)', iconBg:r.high?'var(--danger-soft)':'var(--accent-soft)',
-        borderColor:r.high?'var(--danger-soft)':'var(--border)',
-        tag:r.high?'high impact':'suggested', tagCls:r.high?'sp-badge-warn':'sp-badge-accent',
+        color:r.high?'var(--warn-fg)':'var(--accent-fg)', iconBg:r.high?'var(--warn-soft)':'var(--accent-soft)',
+        borderColor:r.high?'var(--warn-soft)':'var(--border)',
+        tag:r.high?'high impact':'suggested', tagCls:r.high?'sp-badge-caution':'sp-badge-accent',
         onClean:()=>this.askConfirm({title:'Clean '+this.fmt(r.bytes)+'?',body:r.body+' This is regenerable and rebuilds on demand.',confirmLabel:'Clean '+this.fmt(r.bytes),danger:false,onConfirm:r.onClean}) })),
 
       histStats:[ {icon:'hard-drive',label:'Total freed',value:'15.8 GB',color:'var(--accent-fg)'},{icon:'box',label:'Clean-ups',value:'12',color:'var(--text)'},{icon:'clock',label:'Last clean',value:'Today',color:'var(--text)'} ],
+      ongoingOps:[
+        {title:'Pausing Spaci Guard',tag:'pausing',badgeCls:'sp-badge-accent',anim:'clearing',sub:'Finishing the current sweep before going idle',meta:'',color:'var(--accent-fg)'},
+        {title:'Scheduled deep scan',tag:'running',badgeCls:'sp-badge-accent',anim:'chase',sub:'Indexing ~/dev · 18,902 files',meta:'62%',color:'var(--accent-fg)'},
+        {title:'Emptying Trash',tag:'cleaning',badgeCls:'sp-badge-accent',anim:'clearing',sub:'4.8 GB · 312 items',meta:'',color:'var(--accent-fg)'},
+      ],
       history:this.historyData.map(h=>({icon:h.icon,name:h.name,badge:h.reversible?'reversible':'permanent',badgeCls:h.reversible?'sp-badge-safe':'sp-badge-warn',meta:h.count+(h.scope==='system'?' caches':h.scope==='largefiles'?(' file'+(h.count>1?'s':'')):' items')+' · '+h.when,freed:this.fmt(h.freed),lockIcon:h.reversible?'undo':'lock',onOpen:()=>this.setState({activeAction:h.id,route:'actiondetail'})})),
       isActionDetail:route==='actiondetail', goHistory:()=>this.go('history'),
       onRevert:()=>{this.toast('Restoring…','Re-running install / build to bring artifacts back');this.go('history');},
-      actionDetail:(route==='actiondetail'&&S.activeAction)?(()=>{const h=this.historyData.find(x=>x.id===S.activeAction);return {icon:h.icon,name:h.name,reversible:h.reversible,when:h.when,freed:this.fmt(h.freed),count:String(h.count),badge:h.reversible?'reversible':'permanent',badgeCls:h.reversible?'sp-badge-safe':'sp-badge-warn',restoreIcon:h.reversible?'undo':'lock',restoreTitle:h.reversible?'How to restore':'Permanent deletion',restoreText:h.reversible?(h.scope==='system'?'These caches regenerate automatically the next time the apps run — nothing to do.':'These are build artifacts and dependencies, so this is fully reversible. Restore them by re-running your install or build (npm install, pod install, cargo build, and so on).'):'This was a permanent deletion of files on disk and cannot be undone.',items:h.items.map(p=>({path:p,icon:h.scope==='largefiles'?'file':'folder'}))};})():null,
+      actionDetail:(route==='actiondetail'&&S.activeAction)?(()=>{const h=this.historyData.find(x=>x.id===S.activeAction);return {icon:h.icon,name:h.name,reversible:h.reversible,when:h.when,freed:this.fmt(h.freed),count:String(h.count),badge:h.reversible?'reversible':'permanent',badgeCls:h.reversible?'sp-badge-safe':'sp-badge-warn',restoreIcon:h.reversible?'undo':'lock',restoreTitle:h.reversible?'How to restore':'Permanent deletion',restoreText:h.reversible?(h.scope==='system'?'These caches regenerate automatically the next time the apps run - nothing to do.':'These are build artifacts and dependencies, so this is fully reversible. Restore them by re-running your install or build (npm install, pod install, cargo build, and so on).'):'This was a permanent deletion of files on disk and cannot be undone.',items:h.items.map(p=>({path:p,icon:h.scope==='largefiles'?'file':'folder'}))};})():null,
 
       // settings
       scanFolder:'~/dev',
@@ -1275,7 +1598,7 @@ class Component extends DCLogic {
       onToggleConfirm:()=>this.setState(s=>({confirm:!s.confirm})), onToggleNotify:()=>this.setState(s=>({notify:!s.notify})),
       fontChips, goOnboarding:()=>this.setState({route:'onboarding',onbStep:0}), goDashboard:()=>this.go('dashboard'),
 
-      soonCards:this.soon,
+      ...this.soonView(),
 
       // onboarding
       ...this.onbView(),
@@ -1283,9 +1606,10 @@ class Component extends DCLogic {
       // action bar
       showActionBar:!!ab, abCount:ab&&ab.count, abSize:ab&&ab.size, abAction:ab&&ab.action,
       abClear:ab&&ab.clear, abBtnCls: ab&&ab.danger?'sp-ab-danger':'sp-ab-accent',
-      abClean: ab ? (()=>this.askConfirm({title: ab.danger?'Delete these files permanently?':'Clean selected items?', body: ab.danger?('This permanently deletes '+ab.size+' from disk and cannot be undone.'):('This frees '+ab.size+' of regenerable caches and build output — everything here can be rebuilt on demand.'), confirmLabel: ab.action, danger: ab.danger, onConfirm: ab.clean})) : null,
+      abClean: ab ? (()=>this.askConfirm({title: ab.danger?'Delete these files permanently?':'Clean selected items?', body: ab.danger?('This permanently deletes '+ab.size+' from disk and cannot be undone.'):('This frees '+ab.size+' of regenerable caches and build output - everything here can be rebuilt on demand.'), confirmLabel: ab.action, danger: ab.danger, onConfirm: ab.clean})) : null,
       onClearLog:()=>this.askConfirm({title:'Clear history log?',body:'This empties the record of past clean-ups. It does not touch or restore any files on disk.',confirmLabel:'Clear log',danger:true,onConfirm:()=>this.toast('History cleared','The clean-up log is now empty')}),
       confirmOpen:!!S.confirmModal,
+      burstOpen:!!S.cleanBurst, burstSize:S.cleanBurst&&S.cleanBurst.size, burstLabel:S.cleanBurst&&S.cleanBurst.label,
       cmTitle:S.confirmModal&&S.confirmModal.title, cmBody:S.confirmModal&&S.confirmModal.body,
       cmConfirmLabel:S.confirmModal&&S.confirmModal.confirmLabel,
       cmBtnCls:(S.confirmModal&&S.confirmModal.danger)?'sp-ab-danger':'sp-ab-accent',
@@ -1299,7 +1623,7 @@ class Component extends DCLogic {
   }
 
   cleanable(p){ return p.items.filter(i=>i.safe).reduce((a,i)=>a+i.bytes,0); }
-  cleanRec(label,bytes){ this.toast('Cleaned '+this.fmt(bytes), label+' cleared'); }
+  cleanRec(label,bytes){ this.toast('Cleaned '+this.fmt(bytes), label+' cleared'); this.burst(bytes, label+' cleared'); }
 }
 </script>
 </body>
