@@ -67,6 +67,24 @@ function ago(ms) {
 
 const CAT_COLORS = ['#5e93dd', '#4fcb93', '#e8a14f', '#c77dff', '#e8836f', '#7fb5c9', '#8b867f'];
 
+// Toast notifications. Appended inside .sp-root so the theme tokens resolve.
+function toast(msg, kind) {
+  const host = document.getElementById('app');
+  if (!host) return;
+  let stack = document.getElementById('sp-toasts');
+  if (!stack) {
+    stack = el('div', { id: 'sp-toasts', style: 'position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:10px;z-index:200' });
+    host.appendChild(stack);
+  }
+  const color = kind === 'danger' ? 'var(--danger)' : kind === 'success' ? 'var(--success-fg)' : 'var(--accent-fg)';
+  const t = el('div', {
+    style: `background:var(--panel);border:1px solid var(--border);border-left:3px solid ${color};color:var(--text);padding:13px 16px;border-radius:12px;font-size:13.5px;font-weight:500;min-width:220px;max-width:340px;animation:sp-toast .3s cubic-bezier(.22,.61,.36,1)`,
+    text: msg
+  });
+  stack.appendChild(t);
+  setTimeout(() => { t.style.transition = 'opacity .3s,transform .3s'; t.style.opacity = '0'; t.style.transform = 'translateX(20px)'; setTimeout(() => t.remove(), 320); }, 2600);
+}
+
 // ---------- app state ----------
 const S = {
   route: 'dashboard',
@@ -96,7 +114,7 @@ const NAV_BOTTOM = [
 
 SP_REGISTRY();
 function SP_REGISTRY() {
-  window.SP = { screens: {}, go, state: S, el, ic, ring, fmt };
+  window.SP = { screens: {}, go, state: S, el, ic, ring, fmt, toast };
 }
 
 // ---------- shell ----------
@@ -106,6 +124,16 @@ let contentHost;
 function renderShell() {
   // clear (keep grain)
   [...root.children].forEach((c) => { if (!c.classList.contains('sp-grain')) c.remove(); });
+
+  // Welcome is full-screen (no sidebar / titlebar chrome).
+  if (S.route === 'welcome') {
+    const host = el('main', { class: 'sp-scroll', style: 'flex:1;overflow-y:auto;position:relative;background:var(--bg);-webkit-app-region:drag' });
+    const page = el('div', { class: 'sp-fadeup', style: 'min-height:100%;display:flex;align-items:center;justify-content:center;padding:48px;-webkit-app-region:no-drag' });
+    host.appendChild(page);
+    root.appendChild(host);
+    try { ((window.SP.screens && window.SP.screens.welcome) || screenPlaceholder)(page); } catch (e) {}
+    return;
+  }
 
   // titlebar
   const titlebar = el('div', {
@@ -270,6 +298,7 @@ async function boot() {
   try {
     const prefs = await api.getPrefs();
     if (prefs && prefs.theme) S.theme = prefs.theme;
+    if (prefs && !prefs.onboarded) S.route = 'welcome';
   } catch (_) {}
   applyTheme();
   renderShell();
@@ -279,6 +308,7 @@ async function boot() {
   if (api.onBreakdownUpdated) api.onBreakdownUpdated((bd) => { S.breakdown = bd; if (S.route === 'dashboard' || S.route === 'storage') renderShell(); });
   if (api.onCacheUpdated) api.onCacheUpdated(() => loadData().then(() => { if (S.route === 'dashboard') renderRoute(); }));
   if (api.onTrayScan) api.onTrayScan(() => { go('dashboard'); doScan(); });
+  if (api.onNavGo) api.onNavGo((route) => { if (route) go(route); });
 }
 
 // boot after all body scripts (including screen modules) have registered.

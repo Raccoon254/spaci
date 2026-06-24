@@ -14,16 +14,24 @@
   // Per-category presentation (icon + one-line description). Falls back to a
   // generic folder icon for any unexpected key.
   const META = {
-    coding: { icon: 'code', desc: 'Projects, package caches and toolchains.' },
-    documents: { icon: 'file-text', desc: 'Documents and files on your Desktop.' },
-    media: { icon: 'image', desc: 'Photos, videos and music libraries.' },
+    developer: { icon: 'code', desc: 'Code, build caches and SDKs.' },
+    applications: { icon: 'grid', desc: 'Installed applications.' },
+    appdata: { icon: 'database', desc: 'Per-app data and containers.' },
+    caches: { icon: 'broom', desc: 'Regenerable cache and log files.' },
+    media: { icon: 'image', desc: 'Photos, video and music.' },
+    documents: { icon: 'document-text', desc: 'Files on your Desktop and in Documents.' },
     downloads: { icon: 'download', desc: 'Everything saved from the web.' },
-    apps: { icon: 'package', desc: 'Installed applications.' },
-    library: { icon: 'database', desc: 'System support files and caches.' },
+    mail: { icon: 'bell', desc: 'Mail and Messages storage.' },
+    system: { icon: 'cpu', desc: 'macOS and other system files.' },
     other: { icon: 'folder', desc: 'Everything else on this disk.' }
   };
-  function metaFor(key) {
-    return META[key] || { icon: 'folder', desc: 'Files on this disk.' };
+  // Prefer the icon/hint the backend now sends with each category, falling
+  // back to the static map for any older key.
+  function metaFor(c) {
+    const key = c && c.key;
+    const base = META[key] || { icon: 'folder', desc: 'Files on this disk.' };
+    if (c && (c.icon || c.hint)) return { icon: c.icon || base.icon, desc: c.hint || base.desc };
+    return base;
   }
 
   // ---------- data loading ----------
@@ -105,7 +113,7 @@
     // stat strip
     const stats = [
       { icon: 'hard-drive', label: 'Total', value: fmt(total), color: 'var(--text)' },
-      { icon: 'pie-chart', label: 'Used', value: fmt(used), color: 'var(--accent-fg)' },
+      { icon: 'chart', label: 'Used', value: fmt(used), color: 'var(--accent-fg)' },
       { icon: 'check-circle', label: 'Free', value: fmt(free), color: '#4fcb93' }
     ];
     host.appendChild(
@@ -163,7 +171,7 @@
     host.appendChild(
       el('div', { style: 'display:flex;flex-direction:column;gap:9px' },
         cats.map((c, i) => {
-          const m = metaFor(c.key);
+          const m = metaFor(c);
           const color = COLORS[i % COLORS.length];
           const pctOfDisk = total ? Math.round((c.bytes / total) * 100) : 0;
           const barPct = (c.bytes / maxCat) * 100;
@@ -222,7 +230,7 @@
     const bytes = live ? live.bytes : sel.bytes;
     const colorIndex = idx >= 0 ? idx : (sel.colorIndex || 0);
     const color = COLORS[colorIndex % COLORS.length];
-    const m = metaFor(sel.key);
+    const m = metaFor(sel);
     const pctOfDisk = total ? Math.round((bytes / total) * 100) : 0;
 
     // category header

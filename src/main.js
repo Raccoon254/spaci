@@ -138,6 +138,52 @@ function createWindow() {
 
 function showWin() { if (!win || win.isDestroyed()) createWindow(); else { win.show(); win.focus(); } }
 
+// ---------- menu bar widget (tray popover) ----------
+let trayWin = null;
+const TRAY_W = 360;
+const TRAY_H = 430;
+
+function createTrayWindow() {
+  trayWin = new BrowserWindow({
+    width: TRAY_W,
+    height: TRAY_H,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    skipTaskbar: true,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    hasShadow: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  trayWin.loadFile(path.join(__dirname, 'renderer', 'tray.html'));
+  trayWin.on('blur', () => { if (trayWin && !trayWin.isDestroyed()) trayWin.hide(); });
+  trayWin.on('close', (e) => { e.preventDefault(); trayWin.hide(); });
+}
+
+function toggleTrayPopover() {
+  if (!trayWin || trayWin.isDestroyed()) createTrayWindow();
+  if (trayWin.isVisible()) { trayWin.hide(); return; }
+  // Position the popover under the tray icon, kept on screen.
+  try {
+    const tb = tray.getBounds();
+    const screen = require('electron').screen;
+    const area = screen.getDisplayNearestPoint({ x: tb.x, y: tb.y }).workArea;
+    let x = Math.round(tb.x + tb.width / 2 - TRAY_W / 2);
+    x = Math.max(area.x + 6, Math.min(x, area.x + area.width - TRAY_W - 6));
+    const y = process.platform === 'darwin' ? Math.round(tb.y + tb.height + 2) : Math.round(area.y + 6);
+    trayWin.setPosition(x, y, false);
+  } catch (_) {}
+  trayWin.show();
+  trayWin.focus();
+}
+
 function createTray() {
   let image = nativeImage.createEmpty();
   try {
@@ -149,14 +195,17 @@ function createTray() {
     try { image = nativeImage.createFromNamedImage('NSActionTemplate'); } catch (e2) { /* keep empty */ }
   }
   tray = new Tray(image);
-  tray.setToolTip('Spaci, running in the background');
-  tray.setContextMenu(Menu.buildFromTemplate([
+  tray.setToolTip('Spaci');
+  const menu = Menu.buildFromTemplate([
     { label: 'Open Spaci', click: showWin },
     { label: 'Smart Scan', click: () => { showWin(); win && win.webContents.send('tray:scan'); } },
     { type: 'separator' },
     { label: 'Quit Spaci', click: () => { isQuitting = true; app.quit(); } },
-  ]));
-  tray.on('click', showWin);
+  ]);
+  // Left click opens the popover widget; right click shows the classic menu.
+  tray.on('click', toggleTrayPopover);
+  tray.on('right-click', () => tray.popUpContextMenu(menu));
+  createTrayWindow();
 }
 
 app.whenReady().then(() => {
@@ -263,6 +312,12 @@ function fmt(b) {
 ipcMain.handle('prefs:get', () => loadPrefs());
 ipcMain.handle('prefs:set', (_e, patch) => { const p = { ...loadPrefs(), ...patch }; savePrefs(p); scheduleBackground(); return p; });
 ipcMain.handle('app:home', () => os.homedir());
+ipcMain.handle('win:show', (_e, route) => {
+  showWin();
+  if (route && win && !win.isDestroyed()) win.webContents.send('nav:go', route);
+  if (trayWin && !trayWin.isDestroyed()) trayWin.hide();
+});
+ipcMain.handle('app:quit', () => { isQuitting = true; app.quit(); });
 ipcMain.handle('disk:usage', (_e, p) => diskUsage(p));
 ipcMain.handle('disk:breakdown', async () => {
   if (cache.diskBreakdown) { refreshBreakdown(); return cache.diskBreakdown; }

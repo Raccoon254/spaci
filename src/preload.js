@@ -36,6 +36,11 @@ contextBridge.exposeInMainWorld('api', {
   // cleaning
   clean: (jobs, meta) => ipcRenderer.invoke('clean', jobs, meta),
 
+  // menu bar widget
+  openMain: (route) => ipcRenderer.invoke('win:show', route),
+  quitApp: () => ipcRenderer.invoke('app:quit'),
+  onNavGo: (cb) => sub('nav:go', cb),
+
   // auto-update
   appVersion: () => ipcRenderer.invoke('app:version'),
   updateStatus: () => ipcRenderer.invoke('update:status'),

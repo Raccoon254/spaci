@@ -14,24 +14,20 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="styles.css" />
+    <style>
+      html,
+      body {
+        background: transparent;
+        margin: 0;
+        overflow: hidden;
+      }
+    </style>
   </head>
   <body>
-    <div class="sp-root" id="app">
-      <div class="sp-grain"></div>
-    </div>
+    <div class="sp-root" id="tray" style="position: static; inset: auto; height: 100vh; background: transparent; display: block; padding: 12px"></div>
 
     <script src="spaci-icons.js"></script>
     <script src="icon-component.js"></script>
-    <script src="app.js"></script>
-    <script src="screens/dashboard.js"></script>
-    <script src="screens/projects.js"></script>
-    <script src="screens/system.js"></script>
-    <script src="screens/storage.js"></script>
-    <script src="screens/recommendations.js"></script>
-    <script src="screens/largefiles.js"></script>
-    <script src="screens/history.js"></script>
-    <script src="screens/settings.js"></script>
-    <script src="screens/welcome.js"></script>
-    <script src="screens/comingsoon.js"></script>
+    <script src="tray.js"></script>
   </body>
 </html>
