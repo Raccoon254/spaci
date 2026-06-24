@@ -161,6 +161,7 @@ button {
 @keyframes sp-assemble { 0% { opacity: 0; transform: translateY(-16px) scale(0.5); } 28% { opacity: 1; transform: translateY(0) scale(1); } 82% { opacity: 1; transform: translateY(0) scale(1); } 100% { opacity: 0; transform: translateY(-16px) scale(0.5); } }
 @keyframes sp-explode { 0% { transform: translateY(0) scale(1); opacity: 1; } 42% { transform: translateY(-18px) scale(0.35); opacity: 0; } 58% { transform: translateY(-18px) scale(0.35); opacity: 0; } 100% { transform: translateY(0) scale(1); opacity: 1; } }
 @keyframes sp-ping { 0% { transform: scale(0.4); opacity: 0.55; } 80% { opacity: 0; } 100% { transform: scale(1.7); opacity: 0; } }
+@keyframes sp-indet { 0% { transform: translateX(-120%); } 100% { transform: translateX(330%); } }
 
 .sp-fadeup { animation: sp-fadeup 0.42s cubic-bezier(0.22, 0.61, 0.36, 1); }
 .sp-stagger > * { animation: sp-fadeup 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) backwards; }

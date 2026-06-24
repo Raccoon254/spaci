@@ -35,9 +35,12 @@
 
   SP.screens.system = function (host) {
     // ---- async scan, cached on S.system; (re)render into the same host ----
+    // Uses the shared live scan banner instead of a full-screen spinner, so the
+    // header + any existing list stay visible while caches are measured.
     async function ensureScan() {
       if (S.system && Array.isArray(S.system.targets)) return;
-      S.system = { loading: true, error: null, targets: null };
+      S.system = Object.assign({}, S.system, { loading: true, error: null });
+      SP.beginScan('system', 'system caches');
       try {
         const res = await api.scanSystem();
         if (res && res.ok) {
@@ -45,17 +48,21 @@
           S.system = { loading: false, error: null, targets };
           preselect(targets);
         } else {
-          S.system = { loading: false, error: (res && res.error) || 'Scan failed', targets: null };
+          S.system = { loading: false, error: (res && res.error) || 'Scan failed', targets: S.system && S.system.targets || null };
         }
       } catch (err) {
-        S.system = { loading: false, error: (err && err.message) || 'Scan failed', targets: null };
+        S.system = { loading: false, error: (err && err.message) || 'Scan failed', targets: S.system && S.system.targets || null };
+      } finally {
+        SP.endScan();
       }
-      render();
+      if (S.route === 'system') render();
     }
 
-    // Force a fresh scan (Scan caches button / retry / empty state).
+    // Force a fresh scan (Scan caches button / retry / empty state). Keeps the
+    // current list visible with the live banner above it (no blanking).
     async function rescan() {
-      S.system = { loading: true, error: null, targets: null };
+      S.system = Object.assign({}, S.system, { loading: true, error: null });
+      SP.beginScan('system', 'system caches');
       render();
       try {
         const res = await api.scanSystem();
@@ -64,12 +71,14 @@
           S.system = { loading: false, error: null, targets };
           preselect(targets);
         } else {
-          S.system = { loading: false, error: (res && res.error) || 'Scan failed', targets: null };
+          S.system = { loading: false, error: (res && res.error) || 'Scan failed', targets: S.system && S.system.targets || null };
         }
       } catch (err) {
-        S.system = { loading: false, error: (err && err.message) || 'Scan failed', targets: null };
+        S.system = { loading: false, error: (err && err.message) || 'Scan failed', targets: S.system && S.system.targets || null };
+      } finally {
+        SP.endScan();
       }
-      render();
+      if (S.route === 'system') render();
     }
 
     // ---- clean selected targets ----
@@ -174,28 +183,6 @@
       ]);
     }
 
-    // ---- sticky clean bar summarising the current selection ----
-    function cleanBar(targets) {
-      const sel = selSet();
-      const chosen = targets.filter((t) => sel.has(t.id));
-      const count = chosen.length;
-      const total = chosen.reduce((a, t) => a + (t.size || 0), 0);
-      const cleaning = S.system && S.system.cleaning;
-      return el('div', {
-        style: 'position:sticky;bottom:0;display:flex;align-items:center;gap:16px;margin-top:26px;padding:16px 20px;border-radius:16px;background:var(--panel);border:1px solid var(--border);box-shadow:var(--shadow-md)'
-      }, [
-        el('div', { style: 'flex:1;min-width:0' }, [
-          el('div', { style: 'font-weight:700;font-size:15px', text: count ? 'Reclaim ' + fmt(total) : 'Nothing selected' }),
-          el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:2px', text: count ? count + (count === 1 ? ' cache selected, safe to clear' : ' caches selected, safe to clear') : 'Pick the caches you want to clear.' })
-        ]),
-        el('button', {
-          style: 'height:44px;padding:0 22px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none' + ((!count || cleaning) ? ';opacity:.5;pointer-events:none' : ''),
-          hov: 'background:var(--accent-hover)',
-          onclick: () => cleanSelected()
-        }, [cleaning ? ring('spin', 17) : ic('broom-2', 17), cleaning ? 'Cleaning…' : 'Clean selected'])
-      ]);
-    }
-
     // ---- select-all / clear-all toggle in the section heading area ----
     function selectAllRow(targets) {
       const sel = selSet();
@@ -221,7 +208,7 @@
 
     function errorState(msg) {
       return el('div', { style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:46vh;gap:16px;color:var(--text-3)' }, [
-        el('div', { style: 'width:56px;height:56px;border-radius:16px;background:var(--danger-soft);color:var(--danger-fg);display:grid;place-items:center' }, [ic('warning', 28)]),
+        el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
         el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'Could not scan caches' }),
         el('div', { style: 'font-size:13.5px;max-width:380px', text: msg || 'Something went wrong while scanning.' }),
         el('button', {
@@ -234,7 +221,7 @@
 
     function emptyState() {
       return el('div', { style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:46vh;gap:16px;color:var(--text-3)' }, [
-        el('div', { style: 'width:56px;height:56px;border-radius:16px;background:var(--success-soft);color:var(--success-fg);display:grid;place-items:center' }, [ic('check-circle', 28)]),
+        el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
         el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'All clean' }),
         el('div', { style: 'font-size:13.5px;max-width:380px', text: 'No reclaimable caches were found on this machine right now.' }),
         el('button', {
@@ -246,19 +233,31 @@
     }
 
     // ---- master render: rebuild the screen body into host ----
+    // The header always renders. During a scan the shared live banner goes
+    // above the list and the previous results (if any) stay visible below it.
     function render() {
       host.innerHTML = '';
       host.appendChild(header());
 
       const st = S.system;
-      if (!st || st.loading) { host.appendChild(loadingState()); return; }
-      if (st.error && !st.targets) { host.appendChild(errorState(st.error)); return; }
+      const scanning = SP.scanActive('system');
+      const banner = SP.scanBanner('system');
+      if (banner) host.appendChild(banner);
 
-      const targets = st.targets || [];
-      if (!targets.length) { host.appendChild(emptyState()); return; }
+      // Error with no prior results: show the error placeholder (unless a scan
+      // is currently running, in which case the banner already covers it).
+      if (st && st.error && !st.targets && !scanning) { host.appendChild(errorState(st.error)); SP.setActionBar(null); return; }
+
+      const targets = (st && st.targets) || [];
+      if (!targets.length) {
+        // Nothing to show yet. While scanning, the banner above carries the
+        // progress; otherwise fall back to the empty state.
+        if (!scanning) { host.appendChild(emptyState()); SP.setActionBar(null); }
+        return;
+      }
 
       // non-blocking error notice (e.g. partial clean failure) above the list
-      if (st.error) {
+      if (st && st.error) {
         host.appendChild(el('div', {
           style: 'display:flex;align-items:center;gap:10px;padding:13px 16px;border-radius:12px;background:var(--danger-soft);color:var(--danger-fg);font-size:13px;font-weight:600;margin-bottom:4px'
         }, [ic('warning', 17), st.error]));
@@ -266,7 +265,6 @@
 
       host.appendChild(selectAllRow(targets));
       groupByCategory(targets).forEach((grp) => host.appendChild(group(grp)));
-      host.appendChild(cleanBar(targets));
       syncActionBar(targets);
     }
 

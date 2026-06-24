@@ -143,7 +143,7 @@
       const recs = S.recs || [];
       if (!recs.length) {
         body.appendChild(centerState([
-          el('div', { style: 'width:72px;height:72px;border-radius:20px;background:var(--success-soft);display:grid;place-items:center;color:var(--success-fg)' }, [ic('check', 34)]),
+          el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
           el('div', { style: 'font-size:22px;font-weight:700;letter-spacing:-.5px;color:var(--text)', text: 'Nothing to recommend' }),
           el('div', { style: 'font-size:14px;color:var(--text-3);max-width:380px', text: 'You are all clean. Run a scan to look for new build artifacts and developer caches you can safely reclaim.' }),
           el('button', {
@@ -214,7 +214,7 @@
 
     if (!a) {
       host.appendChild(centerState([
-        el('div', { style: 'color:var(--text-3)' }, [ic('broom', 40)]),
+        el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
         el('div', { style: 'font-size:18px;font-weight:700;color:var(--text)', text: 'No action selected' }),
         el('div', { style: 'font-size:14px;color:var(--text-3)', text: 'Pick a recommendation to see what it will remove.' }),
       ]));
@@ -273,10 +273,10 @@
     // what will be removed
     host.appendChild(el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin-bottom:12px', text: a.count ? 'What will be removed' : 'Nothing to remove' }));
 
-    if (a.items.length) {
+    if ((a.items || []).length) {
       host.appendChild(
         el('div', { style: 'display:flex;flex-direction:column;gap:7px;margin-bottom:24px' },
-          a.items.slice(0, 80).map((it) => el('div', {
+          (a.items || []).slice(0, 80).map((it) => el('div', {
             style: 'display:flex;align-items:center;gap:13px;padding:12px 15px;border-radius:12px;background:var(--panel);border:1px solid var(--border)',
           }, [
             ic(it.icon || 'folder-2', 18, { color: 'var(--text-3)' }),

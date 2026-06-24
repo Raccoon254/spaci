@@ -115,7 +115,7 @@
   function emptyState(host) {
     host.appendChild(
       el('div', { style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:16px;padding:64px 24px;min-height:300px' }, [
-        el('div', { style: 'width:74px;height:74px;border-radius:20px;background:var(--panel-2);display:grid;place-items:center;color:var(--text-3)' }, [ic('clock', 34)]),
+        el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
         el('div', {}, [
           el('div', { style: 'font-size:19px;font-weight:700;letter-spacing:-.4px', text: 'Nothing cleaned yet' }),
           el('div', { style: 'color:var(--text-3);font-size:13.5px;margin-top:7px;max-width:380px', text: 'Once you reclaim space with Spaci, every cleanup will show up here with what was freed and whether it can be undone.' })

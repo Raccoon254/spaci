@@ -79,25 +79,16 @@
     }
 
     // Kick off a scan. `root` null => backend defaults to the home directory.
+    // Uses the shared live scan banner (app.js listens to onLargeFilesProgress
+    // and updates it in place) so the header + any previous list stay visible.
     async function runScan(root) {
       detach();
       S.largeRoot = root || S.largeRoot || null;
       S.largeScan = { loading: true, error: null, progress: null, root: S.largeRoot };
-      // Streamed progress: { scanned, found, current } then { phase:'done', ... }.
-      if (api.onLargeFilesProgress) {
-        S.largeUnsub = api.onLargeFilesProgress((p) => {
-          const st = S.largeScan;
-          if (!st || !st.loading) return;
-          if (p && p.phase === 'done') return;
-          st.progress = p;
-          // Only repaint the live progress line, cheaply, while on this screen.
-          if (S.route === 'largefiles') paintProgress();
-        });
-      }
+      SP.beginScan('largefiles', S.largeRoot || 'your home folder');
       render();
       try {
         const res = await api.scanLargeFiles(S.largeRoot, minBytes());
-        detach();
         if (res && res.ok) {
           const files = (res.files || []).slice().sort((a, b) => (b.size || 0) - (a.size || 0));
           S.largeFiles = { files, scanned: res.scanned || 0, root: S.largeRoot, minBytes: minBytes(), at: Date.now() };
@@ -106,8 +97,10 @@
           S.largeScan = { loading: false, error: (res && res.error) || 'Scan failed', progress: null, root: S.largeRoot };
         }
       } catch (err) {
-        detach();
         S.largeScan = { loading: false, error: (err && err.message) || 'Scan failed', progress: null, root: S.largeRoot };
+      } finally {
+        detach();
+        SP.endScan();
       }
       if (S.route === 'largefiles') render();
     }
@@ -282,7 +275,7 @@
       return el('div', {
         style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:46vh;gap:16px;color:var(--text-3)'
       }, [
-        el('div', { style: 'width:56px;height:56px;border-radius:16px;background:var(--danger-soft);color:var(--danger-fg);display:grid;place-items:center' }, [ic('warning', 28)]),
+        el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
         el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'Could not scan for large files' }),
         el('div', { style: 'font-size:13.5px;max-width:380px', text: msg || 'Something went wrong while scanning.' }),
         el('button', {
@@ -298,7 +291,7 @@
       return el('div', {
         style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:42vh;gap:16px;color:var(--text-3)'
       }, [
-        el('div', { style: 'width:56px;height:56px;border-radius:16px;background:var(--panel-2);color:var(--text-3);display:grid;place-items:center' }, [ic('chart', 28)]),
+        el('spaci-icon', { name: 'spaci-ring', anim: 'wave', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
         el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'Find your biggest files' }),
         el('div', { style: 'font-size:13.5px;max-width:400px', text: 'Scan your home folder for files at or above ' + minLabel(minBytes()) + ', or pick a specific folder to search.' }),
         el('div', { style: 'display:flex;gap:10px;margin-top:6px' }, [
@@ -321,7 +314,7 @@
       return el('div', {
         style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:42vh;gap:16px;color:var(--text-3)'
       }, [
-        el('div', { style: 'width:56px;height:56px;border-radius:16px;background:var(--success-soft);color:var(--success-fg);display:grid;place-items:center' }, [ic('check-circle', 28)]),
+        el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
         el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'No large files found' }),
         el('div', { style: 'font-size:13.5px;max-width:400px', text: 'Nothing here is at or above ' + minLabel((S.largeFiles && S.largeFiles.minBytes) || minBytes()) + '. Try a smaller threshold or a different folder.' }),
         el('button', {
@@ -401,25 +394,33 @@
     }
 
     // ---------- master render ----------
+    // The header always renders. During a scan the shared live banner goes
+    // above the list and the previous results (if any) stay visible below it.
     function render() {
       host.innerHTML = '';
       host.appendChild(header());
 
+      const scanning = SP.scanActive('largefiles');
+      const banner = SP.scanBanner('largefiles');
+      if (banner) host.appendChild(banner);
+
       const scan = S.largeScan;
-      if (scan && scan.loading) {
-        host.appendChild(loadingState());
-        paintProgress();
-        SP.setActionBar(null);
-        return;
-      }
-      if (scan && scan.error) { host.appendChild(errorState(scan.error)); SP.setActionBar(null); return; }
+      if (scan && scan.error && !scanning) { host.appendChild(errorState(scan.error)); SP.setActionBar(null); return; }
 
       const data = S.largeFiles;
-      if (!data) { host.appendChild(startState()); SP.setActionBar(null); return; }
+      if (!data) {
+        // Nothing scanned yet. While scanning, the banner above carries the
+        // progress; otherwise invite the user to start a scan.
+        if (!scanning) { host.appendChild(startState()); SP.setActionBar(null); }
+        return;
+      }
 
       host.appendChild(warnBanner());
 
-      if (!data.files.length) { host.appendChild(emptyState()); SP.setActionBar(null); return; }
+      if (!data.files.length) {
+        if (!scanning) { host.appendChild(emptyState()); SP.setActionBar(null); }
+        return;
+      }
 
       host.appendChild(summary(data));
       host.appendChild(

@@ -140,8 +140,8 @@ function showWin() { if (!win || win.isDestroyed()) createWindow(); else { win.s
 
 // ---------- menu bar widget (tray popover) ----------
 let trayWin = null;
-const TRAY_W = 360;
-const TRAY_H = 430;
+const TRAY_W = 372;
+const TRAY_H = 624;
 
 function createTrayWindow() {
   trayWin = new BrowserWindow({

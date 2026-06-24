@@ -48,27 +48,20 @@
   // =====================================================================
   SP.screens.projects = function (host) {
     // Seed from the main-process cache the first time, so navigating in does
-    // not always rescan. cacheGet returns { projects, enrich, ... }.
+    // not always rescan. cacheGet returns { projects, enrich, ... }. On the
+    // first visit with no cache we kick off a scan; the screen still renders
+    // its header + the live scan banner + an empty list (no blank spinner).
     if (!S.projects) {
-      ensureProjects(host);
-      if (!S.projects) { renderLoading(host); return; }
+      ensureProjects();
+      if (!S.projects) S.projects = [];
     }
     renderList(host);
   };
 
-  function renderLoading(host) {
-    host.appendChild(el('div', {
-      style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:58vh;gap:18px;color:var(--text-3)',
-    }, [
-      el('div', { style: 'color:var(--accent-fg)' }, [ring('orbit', 56)]),
-      el('div', { style: 'font-size:20px;font-weight:700;letter-spacing:-.5px;color:var(--text)', text: 'Scanning for projects' }),
-      el('div', { style: 'font-size:14px;max-width:380px', text: 'Looking for node_modules, target, .next, __pycache__ and other regenerable build artifacts.' }),
-    ]));
-  }
-
   // Loads cached projects synchronously if available; otherwise kicks off a
-  // scan and re-renders the projects screen when it lands.
-  function ensureProjects(host) {
+  // scan and re-renders the projects screen when it lands. Uses the shared
+  // scan banner instead of a full-screen spinner so progress stays visible.
+  function ensureProjects() {
     if (S.projectsLoading) return;
     S.projectsLoading = true;
     (async () => {
@@ -79,25 +72,32 @@
           S.enrich = c.enrich || {};
         }
       } catch (_) { /* ignore */ }
-      if (!S.projects) {
+      if (!S.projects || !S.projects.length) {
+        SP.beginScan('projects', 'your home folder');
         try {
           const r = await api.scanProjects();
-          S.projects = (r && r.projects) ? r.projects : [];
-        } catch (_) { S.projects = S.projects || []; }
+          S.projects = (r && r.projects) ? r.projects : (S.projects || []);
+        } catch (_) { S.projects = S.projects || []; } finally {
+          SP.endScan();
+        }
       }
       S.projectsLoading = false;
       if (S.route === 'projects') SP.go('projects');
     })();
   }
 
+  // Rescan keeps the current list visible and shows the live banner above it
+  // (no list blanking). `folder` null => backend defaults to the home dir.
   async function rescan(folder) {
-    S.projects = null;
+    if (S.projectsLoading) return;
     S.projectsLoading = true;
-    SP.go('projects'); // shows the loading state
+    SP.beginScan('projects', folder || 'your home folder');
     try {
       const r = await api.scanProjects(folder);
       S.projects = (r && r.projects) ? r.projects : [];
-    } catch (_) { S.projects = S.projects || []; }
+    } catch (_) { S.projects = S.projects || []; } finally {
+      SP.endScan();
+    }
     S.projectsLoading = false;
     if (S.route === 'projects') SP.go('projects');
   }
@@ -155,13 +155,18 @@
 
     host.appendChild(el('div', { style: 'display:flex;align-items:center;gap:10px;margin-bottom:18px' }, [searchBox, ...chips]));
 
+    // ----- live scan banner (above the list, when a scan is running) -----
+    const banner = SP.scanBanner('projects');
+    if (banner) host.appendChild(banner);
+
     // ----- rows -----
     const listWrap = el('div', { class: 'sp-stagger', style: 'display:flex;flex-direction:column;gap:9px' });
     host.appendChild(listWrap);
 
-    // Empty (no projects found at all)
+    // Empty list. While a scan is running we leave it blank (the banner above
+    // carries the progress); otherwise show the "no projects found" state.
     if (!all.length) {
-      listWrap.appendChild(emptyState());
+      if (!SP.scanActive('projects')) listWrap.appendChild(emptyState());
       return;
     }
 
@@ -309,7 +314,7 @@
     return el('div', {
       style: 'display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:42vh;gap:16px;color:var(--text-3)',
     }, [
-      el('div', { style: 'width:64px;height:64px;border-radius:18px;background:var(--panel);border:1px solid var(--border);display:grid;place-items:center;color:var(--text-3)' }, [ic('folder-2', 30)]),
+      el('spaci-icon', { name: 'spaci-ring', anim: 'breathe', style: 'width:64px;height:64px;color:var(--text-4);display:block' }),
       el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'No projects found' }),
       el('div', { style: 'font-size:14px;max-width:360px', text: 'Nothing with regenerable build artifacts turned up here. Try Scan again or choose a different folder.' }),
     ]);
@@ -455,42 +460,14 @@
       updateAfterToggle();
     });
 
-    // ----- clean action footer -----
-    const cleanBtn = el('button', {
-      class: 'sp-ab-accent',
-      style: 'height:48px;padding:0 24px;border-radius:13px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:15px;display:flex;align-items:center;gap:10px;cursor:pointer;font-family:inherit',
-      onclick: () => doClean(),
-    }, []);
-    const footer = el('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:22px;padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid var(--border)' }, [
-      el('div', { style: 'flex:1;min-width:0' }, [
-        el('div', { style: 'font-size:15px;font-weight:700', text: 'Clean selected artifacts' }),
-        el('div', { class: 'sp-clean-note', style: 'color:var(--text-2);font-size:13px;margin-top:2px' }),
-      ]),
-      cleanBtn,
-    ]);
-    if (items.length) host.appendChild(footer);
-    const cleanNote = footer.querySelector('.sp-clean-note');
-
+    // The in-page clean footer was removed; the shared floating action bar
+    // (driven by syncDetailActionBar below) is the only clean trigger now.
     function selectedItems() { return items.filter((it) => chosen.has(it.path)); }
-    function renderCleanBtn() {
-      const chosenItems = selectedItems();
-      const freed = chosenItems.reduce((s, i) => s + (i.size || 0), 0);
-      cleanBtn.innerHTML = '';
-      cleanBtn.appendChild(S.cleaning ? ic('spaci-ring', 18, { anim: 'spin' }) : ic('broom', 18));
-      cleanBtn.appendChild(document.createTextNode(
-        S.cleaning ? 'Cleaning…' : (chosenItems.length ? 'Clean ' + fmt(freed) : 'Nothing selected')));
-      cleanBtn.disabled = !chosenItems.length || S.cleaning;
-      cleanBtn.style.opacity = (!chosenItems.length || S.cleaning) ? '0.55' : '1';
-      cleanBtn.style.cursor = (!chosenItems.length || S.cleaning) ? 'default' : 'pointer';
-      if (cleanNote) cleanNote.textContent = chosenItems.length
-        ? chosenItems.length + ' of ' + items.length + ' item' + (items.length === 1 ? '' : 's') + ' · regenerable, safe to remove'
-        : 'Select items above to reclaim space.';
-    }
 
-    function updateAfterToggle() { renderSelectAllLabel(); renderCleanBtn(); syncDetailActionBar(); }
+    function updateAfterToggle() { renderSelectAllLabel(); syncDetailActionBar(); }
 
-    // Floating action bar mirrors the in-page clean footer for this project.
-    // Safe / reversible, so no confirm modal (matches "safe by design").
+    // Floating action bar drives cleaning for this project. It is the only
+    // clean trigger. Safe / reversible, so no confirm modal ("safe by design").
     function syncDetailActionBar() {
       const chosenItems = selectedItems();
       const n = chosenItems.length;
@@ -511,7 +488,6 @@
       const chosenItems = selectedItems();
       if (!chosenItems.length) return;
       S.cleaning = true;
-      renderCleanBtn();
       try {
         const jobs = chosenItems.map((it) => ({ path: it.path, isDir: it.isDir, size: it.size }));
         const res = await api.clean(jobs, { scope: 'projects', label: p.name, reversible: true });
@@ -535,7 +511,6 @@
     }
 
     renderSelectAllLabel();
-    renderCleanBtn();
     syncDetailActionBar();
   };
 

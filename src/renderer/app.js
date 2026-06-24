@@ -145,6 +145,45 @@ function setActionBar(cfg) { S.actionBar = cfg || null; renderOverlays(); }
 function confirmDialog(opts) { return new Promise((resolve) => { S.confirmCfg = Object.assign({ resolve }, opts || {}); renderOverlays(); }); }
 function burst(size, label) { S.burstCfg = { size, label }; renderOverlays(); setTimeout(() => { S.burstCfg = null; renderOverlays(); }, 1800); }
 
+// ---------- live scan progress banner ----------
+const SCAN_LABELS = { projects: 'Scanning projects', system: 'Measuring caches', largefiles: 'Scanning for large files' };
+function beginScan(type, root) {
+  S.scan = { active: true, type, scanned: 0, found: 0, root: root || '', label: type === 'projects' ? ('Scanning ' + (root || 'your home folder')) : SCAN_LABELS[type] || 'Scanning' };
+  renderRoute();
+}
+function endScan() { if (S.scan) S.scan.active = false; }
+function scanActive(type) { return S.scan && S.scan.active && S.scan.type === type; }
+function renderScanBannerInto(wrap) {
+  const sc = S.scan || {};
+  wrap.innerHTML = '';
+  wrap.appendChild(el('div', { style: 'color:var(--accent-fg);margin-bottom:14px' }, [el('spaci-icon', { name: 'spaci-ring', anim: 'wave', style: 'width:56px;height:56px;display:block' })]));
+  wrap.appendChild(el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:center;gap:10px;justify-content:center' }, [
+    el('span', { text: sc.label || 'Scanning' }),
+    el('span', { class: 'sp-badge-accent', style: 'display:inline-flex;padding:3px 10px;border-radius:7px;font-size:11px;font-weight:700', text: 'running' })
+  ]));
+  const parts = [];
+  if (sc.scanned) parts.push(Number(sc.scanned).toLocaleString() + ' folders scanned');
+  if (sc.found) parts.push(sc.found + ' found');
+  wrap.appendChild(el('div', { style: 'color:var(--text-3);font-size:13.5px;margin-top:7px', text: parts.join(' · ') || 'Working…' }));
+  wrap.appendChild(el('div', { style: 'width:min(420px,80%);height:8px;border-radius:99px;background:var(--track);overflow:hidden;margin-top:18px' }, [
+    el('div', { style: 'height:100%;width:38%;border-radius:99px;background:var(--accent);animation:sp-indet 1.25s ease-in-out infinite' })
+  ]));
+}
+// scanBanner(type): returns the banner node if a scan of `type` is running, else null.
+function scanBanner(type) {
+  if (!scanActive(type)) return null;
+  const wrap = el('div', { id: 'sp-scanbanner', style: 'display:flex;flex-direction:column;align-items:center;text-align:center;padding:26px 0 30px' });
+  renderScanBannerInto(wrap);
+  return wrap;
+}
+function liveScan(type, p) {
+  if (!scanActive(type) || !p || p.phase === 'done') return;
+  if (p.scanned != null) S.scan.scanned = p.scanned;
+  if (p.found != null) S.scan.found = p.found;
+  const b = document.getElementById('sp-scanbanner');
+  if (b) renderScanBannerInto(b);
+}
+
 // ---------- app state ----------
 const S = {
   route: 'dashboard',
@@ -167,8 +206,7 @@ const NAV_TOP = [
 const NAV_SOON = [
   { label: 'Scheduled Scans', icon: 'calendar', soon: 'scheduled' },
   { label: 'Duplicate Finder', icon: 'copy', soon: 'duplicate' },
-  { label: 'Spaci Guard', icon: 'shield', soon: 'guard' },
-  { label: 'Menu-bar Widget', icon: 'activity', route: 'menubar' }
+  { label: 'Spaci Guard', icon: 'shield', soon: 'guard' }
 ];
 const NAV_BOTTOM = [
   { key: 'history', label: 'History', icon: 'log' },
@@ -177,7 +215,7 @@ const NAV_BOTTOM = [
 
 SP_REGISTRY();
 function SP_REGISTRY() {
-  window.SP = { screens: {}, go, state: S, el, ic, ring, fmt, toast, setActionBar, confirm: confirmDialog, burst };
+  window.SP = { screens: {}, go, state: S, el, ic, ring, fmt, toast, setActionBar, confirm: confirmDialog, burst, beginScan, endScan, scanBanner, scanActive };
 }
 
 // ---------- shell ----------
@@ -393,7 +431,11 @@ async function boot() {
   if (api.onCacheUpdated) api.onCacheUpdated(() => loadData().then(() => { if (S.route === 'dashboard') renderRoute(); }));
   if (api.onTrayScan) api.onTrayScan(() => { go('dashboard'); doScan(); });
   if (api.onNavGo) api.onNavGo((route) => { if (route) go(route); });
+  if (api.onScanProgress) api.onScanProgress((p) => liveScan('projects', p));
+  if (api.onSystemProgress) api.onSystemProgress((p) => liveScan('system', p));
+  if (api.onLargeFilesProgress) api.onLargeFilesProgress((p) => liveScan('largefiles', p));
 }
+
 
 // boot after all body scripts (including screen modules) have registered.
 document.addEventListener('DOMContentLoaded', boot);
