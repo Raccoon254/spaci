@@ -64,6 +64,12 @@
     return i > 0 ? p.slice(0, i) : p;
   }
 
+  // Per-path selection set, persisted on shared state across re-renders.
+  function selSet() {
+    if (!S.selLarge || !(S.selLarge instanceof Set)) S.selLarge = new Set();
+    return S.selLarge;
+  }
+
   // ---------- screen ----------
   SP.screens.largefiles = function (host) {
     // progress unsubscribe handle, kept on shared state so a re-render does not
@@ -190,12 +196,28 @@
     function row(f) {
       const name = baseName(f.path);
       const dir = dirName(f.path);
+      const sel = selSet();
+
+      // selection check circle: toggles this file in/out of the delete set
+      // without triggering the row's reveal action.
+      const check = el('div', {
+        class: 'sp-check' + (sel.has(f.path) ? ' sp-check-on' : ''),
+        style: 'width:24px;height:24px;border-radius:50%;border:1.5px solid var(--border-2);flex:none;display:grid;place-items:center;color:transparent;transition:.14s'
+      }, [ic('check', 14)]);
+      check.addEventListener('click', (e) => {
+        stop(e);
+        if (sel.has(f.path)) { sel.delete(f.path); check.className = 'sp-check'; }
+        else { sel.add(f.path); check.className = 'sp-check sp-check-on'; }
+        syncActionBar();
+      });
+
       return el('div', {
         class: 'sp-hov',
         style: 'display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border);cursor:pointer;box-shadow:var(--shadow-sm)',
         hov: 'border-color:var(--border-2)',
         onclick: () => reveal(f.path)
       }, [
+        check,
         el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic(iconForExt(f.ext), 22)]),
         el('div', { style: 'flex:1;min-width:0' }, [
           el('div', { style: 'font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: name }),
@@ -321,6 +343,63 @@
       ]);
     }
 
+    // ---------- floating action bar (permanent delete) ----------
+    // Only the currently-listed files count toward the selection. Deleting is
+    // permanent, so this uses the red danger button and a confirm modal.
+    function currentFiles() {
+      return (S.largeFiles && Array.isArray(S.largeFiles.files)) ? S.largeFiles.files : [];
+    }
+    function selectedFiles() {
+      const sel = selSet();
+      return currentFiles().filter((f) => sel.has(f.path));
+    }
+    function syncActionBar() {
+      const chosen = selectedFiles();
+      const n = chosen.length;
+      if (!n) { SP.setActionBar(null); return; }
+      const bytes = chosen.reduce((a, f) => a + (f.size || 0), 0);
+      SP.setActionBar({
+        count: n + ' file' + (n > 1 ? 's' : ''),
+        size: fmt(bytes),
+        action: 'Delete ' + fmt(bytes),
+        danger: true,
+        onClear: () => { selSet().clear(); SP.go('largefiles'); },
+        onClean: () => doDelete(),
+      });
+    }
+
+    async function doDelete() {
+      if (S.largeDeleting) return;
+      const chosen = selectedFiles();
+      if (!chosen.length) return;
+      const ok = await SP.confirm({
+        title: 'Delete ' + chosen.length + ' file' + (chosen.length === 1 ? '' : 's') + '?',
+        body: 'These files will be permanently deleted and cannot be restored.',
+        confirmLabel: 'Delete',
+        danger: true,
+        icon: 'trash'
+      });
+      if (!ok) return;
+      S.largeDeleting = true;
+      try {
+        const jobs = chosen.map((f) => ({ path: f.path, size: f.size }));
+        const res = await api.clean(jobs, {
+          scope: 'largefiles',
+          label: chosen.length + ' large file' + (chosen.length === 1 ? '' : 's'),
+          reversible: false
+        });
+        if (res && res.ok !== false) {
+          const freed = res.totalFreed != null ? res.totalFreed : chosen.reduce((a, f) => a + (f.size || 0), 0);
+          const deleted = new Set(chosen.map((f) => f.path));
+          if (S.largeFiles) S.largeFiles.files = (S.largeFiles.files || []).filter((f) => !deleted.has(f.path));
+          selSet().clear();
+          SP.burst(fmt(freed), 'across ' + chosen.length + ' file' + (chosen.length === 1 ? '' : 's'));
+        }
+      } catch (_) { /* ignore */ }
+      S.largeDeleting = false;
+      if (S.route === 'largefiles') SP.go('largefiles');
+    }
+
     // ---------- master render ----------
     function render() {
       host.innerHTML = '';
@@ -330,21 +409,23 @@
       if (scan && scan.loading) {
         host.appendChild(loadingState());
         paintProgress();
+        SP.setActionBar(null);
         return;
       }
-      if (scan && scan.error) { host.appendChild(errorState(scan.error)); return; }
+      if (scan && scan.error) { host.appendChild(errorState(scan.error)); SP.setActionBar(null); return; }
 
       const data = S.largeFiles;
-      if (!data) { host.appendChild(startState()); return; }
+      if (!data) { host.appendChild(startState()); SP.setActionBar(null); return; }
 
       host.appendChild(warnBanner());
 
-      if (!data.files.length) { host.appendChild(emptyState()); return; }
+      if (!data.files.length) { host.appendChild(emptyState()); SP.setActionBar(null); return; }
 
       host.appendChild(summary(data));
       host.appendChild(
         el('div', { class: 'sp-stagger', style: 'display:flex;flex-direction:column;gap:9px' }, data.files.map(row))
       );
+      syncActionBar();
     }
 
     // initial paint. Results are cached on S.largeFiles, so revisiting the

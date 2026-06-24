@@ -207,6 +207,11 @@
 
   // ---------- STORAGE CATEGORY DETAIL ----------
   SP.screens.storagecat = function (host) {
+    // The backend reports each category as a single bytes total with no
+    // per-file detail, so there is nothing selectable to delete here. Keep the
+    // floating action bar hidden (no selection state exists for this route).
+    SP.setActionBar(null);
+
     // back button (always available, even on loading/error states)
     const backBtn = el('button', {
       style: 'height:36px;padding:0 13px;border-radius:9px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer;font-family:inherit;margin-bottom:18px',

@@ -176,6 +176,9 @@
     rows.forEach((r) => listWrap.appendChild(r.node));
     listWrap.appendChild(noMatch);
 
+    // Floating action bar reflects the current project selection.
+    syncProjectsActionBar();
+
     // Filter in place (no flicker): hide/show existing rows by name.
     function applyFilter() {
       const q = (S.projQuery || '').trim().toLowerCase();
@@ -196,6 +199,55 @@
   // search input (built before rows exist) reach the latest one.
   function applyFilter() { if (renderList._applyFilter) renderList._applyFilter(); }
 
+  // ----- floating action bar for the projects list -----
+  // Selected projects each contribute all of their cleanable items.
+  function selectedProjects() {
+    const sel = selSet();
+    return (S.projects || []).filter((p) => sel.has(p.path));
+  }
+
+  function syncProjectsActionBar() {
+    const chosen = selectedProjects();
+    const n = chosen.length;
+    if (!n) { SP.setActionBar(null); return; }
+    const bytes = chosen.reduce((s, p) => s + (p.cleanableSize || 0), 0);
+    SP.setActionBar({
+      count: n + ' project' + (n > 1 ? 's' : ''),
+      size: fmt(bytes),
+      action: 'Clean ' + fmt(bytes),
+      danger: false,
+      onClear: () => { selSet().clear(); SP.go('projects'); },
+      onClean: () => cleanSelectedProjects(chosen),
+    });
+  }
+
+  // Clean every cleanable item across the selected projects. Reuses the same
+  // job shape and api.clean call the detail screen builds (safe / reversible,
+  // so no confirm modal). Mirrors the detail's post-clean bookkeeping.
+  async function cleanSelectedProjects(chosen) {
+    if (S.cleaning || !chosen.length) return;
+    const jobs = [];
+    chosen.forEach((p) => (p.items || []).forEach((it) => jobs.push({ path: it.path, isDir: it.isDir, size: it.size })));
+    if (!jobs.length) return;
+    S.cleaning = true;
+    try {
+      const res = await api.clean(jobs, { scope: 'projects', label: chosen.length + ' project' + (chosen.length === 1 ? '' : 's'), reversible: true });
+      if (res && res.ok !== false) {
+        const freed = res.totalFreed != null ? res.totalFreed : jobs.reduce((s, j) => s + (j.size || 0), 0);
+        // Drop cleaned items from each selected project and recompute sizes.
+        chosen.forEach((p) => {
+          p.items = [];
+          p.cleanableSize = 0;
+          delete (S.itemSel || {})[p.path];
+        });
+        selSet().clear();
+        SP.burst(fmt(freed), 'across ' + chosen.length + ' project' + (chosen.length === 1 ? '' : 's'));
+      }
+    } catch (_) { /* ignore */ }
+    S.cleaning = false;
+    if (S.route === 'projects') SP.go('projects');
+  }
+
   function buildRow(p) {
     const sel = selSet();
     const en = enrichOf(p);
@@ -211,6 +263,7 @@
       e.stopPropagation(); // don't open the detail
       if (sel.has(p.path)) { sel.delete(p.path); check.className = ''; }
       else { sel.add(p.path); check.className = 'sp-check-on'; }
+      syncProjectsActionBar();
     });
 
     const folderTile = el('div', {
@@ -434,7 +487,24 @@
         : 'Select items above to reclaim space.';
     }
 
-    function updateAfterToggle() { renderSelectAllLabel(); renderCleanBtn(); }
+    function updateAfterToggle() { renderSelectAllLabel(); renderCleanBtn(); syncDetailActionBar(); }
+
+    // Floating action bar mirrors the in-page clean footer for this project.
+    // Safe / reversible, so no confirm modal (matches "safe by design").
+    function syncDetailActionBar() {
+      const chosenItems = selectedItems();
+      const n = chosenItems.length;
+      if (!n) { SP.setActionBar(null); return; }
+      const freed = chosenItems.reduce((s, i) => s + (i.size || 0), 0);
+      SP.setActionBar({
+        count: n + ' item' + (n > 1 ? 's' : ''),
+        size: fmt(freed),
+        action: 'Clean ' + fmt(freed),
+        danger: false,
+        onClear: () => { chosen.clear(); SP.go('project'); },
+        onClean: () => doClean(),
+      });
+    }
 
     async function doClean() {
       if (S.cleaning) return;
@@ -446,6 +516,7 @@
         const jobs = chosenItems.map((it) => ({ path: it.path, isDir: it.isDir, size: it.size }));
         const res = await api.clean(jobs, { scope: 'projects', label: p.name, reversible: true });
         if (res && res.ok !== false) {
+          const freed = res.totalFreed != null ? res.totalFreed : chosenItems.reduce((s, i) => s + (i.size || 0), 0);
           // drop cleaned items from the project and recompute
           const cleaned = new Set(chosenItems.map((i) => i.path));
           p.items = (p.items || []).filter((i) => !cleaned.has(i.path));
@@ -456,6 +527,7 @@
             const idx = S.projects.findIndex((x) => x.path === p.path);
             if (idx >= 0) S.projects[idx] = p;
           }
+          SP.burst(fmt(freed), 'from ' + p.name);
         }
       } catch (_) { /* ignore */ }
       S.cleaning = false;
@@ -464,6 +536,7 @@
 
     renderSelectAllLabel();
     renderCleanBtn();
+    syncDetailActionBar();
   };
 
   function buildItemRow(it, chosen, onToggle) {

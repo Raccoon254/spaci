@@ -103,6 +103,8 @@
           st.targets = st.targets.filter((t) => !cleanedIds.has(t.id));
           cleanedIds.forEach((id) => sel.delete(id));
           st.lastFreed = res.totalFreed || 0;
+          const freed = res.totalFreed != null ? res.totalFreed : chosen.reduce((a, t) => a + (t.size || 0), 0);
+          SP.burst(fmt(freed), 'across ' + chosen.length + ' cache' + (chosen.length === 1 ? '' : 's'));
         } else {
           st.error = (res && res.error) || 'Clean failed';
         }
@@ -265,6 +267,26 @@
       host.appendChild(selectAllRow(targets));
       groupByCategory(targets).forEach((grp) => host.appendChild(group(grp)));
       host.appendChild(cleanBar(targets));
+      syncActionBar(targets);
+    }
+
+    // ---- floating action bar reflecting the current cache selection ----
+    // System caches are regenerable, so this is treated as safe / reversible:
+    // accent button, "Clean", and no confirm modal.
+    function syncActionBar(targets) {
+      const sel = selSet();
+      const chosen = targets.filter((t) => sel.has(t.id));
+      const n = chosen.length;
+      if (!n) { SP.setActionBar(null); return; }
+      const bytes = chosen.reduce((a, t) => a + (t.size || 0), 0);
+      SP.setActionBar({
+        count: n + ' cache' + (n > 1 ? 's' : ''),
+        size: fmt(bytes),
+        action: 'Clean ' + fmt(bytes),
+        danger: false,
+        onClear: () => { selSet().clear(); SP.go('system'); },
+        onClean: () => cleanSelected(),
+      });
     }
 
     // initial paint, then kick off a scan if we have no cached results
