@@ -1,8 +1,29 @@
 [
   {
+    "version": "2.1.0",
+    "date": "2026-08-17",
+    "tag": "Latest",
+    "major": false,
+    "summary": "Spaci now sees Docker, and scans your projects about ten times faster.",
+    "added": [
+      "Docker: Spaci measures the images, containers, volumes and build cache the engine is holding, which a normal disk scan cannot see because it all lives inside one VM disk.",
+      "Projects that use Docker are marked in the list, and their project page shows the compose services and the engine storage that actually belongs to them.",
+      "Reclaim Docker build cache and unused images from the System screen or straight from Recommendations. Volumes are never touched: they hold your databases and uploads."
+    ],
+    "improved": [
+      "Project scans are around ten times faster: a home folder that took two and a half minutes now takes about twelve seconds.",
+      "Artifacts are measured the same way as system caches, so the space Spaci promises is the space cleaning actually frees.",
+      ".NET projects now offer the whole obj folder instead of hundreds of fragments buried inside it."
+    ],
+    "fixed": [
+      "Sizes no longer count a hardlinked file once per link, which could overstate a single node_modules folder by more than 2 GB.",
+      "The artifact scan no longer walks into .git, which was most of the time spent on long-lived repositories."
+    ]
+  },
+  {
     "version": "2.0.1",
     "date": "2026-06-24",
-    "tag": "Latest",
+    "tag": "Feature",
     "major": false,
     "summary": "Signed and notarized macOS builds, so automatic updates now work end to end.",
     "added": [],
