@@ -7,6 +7,10 @@ on:
       - main
       - v2-redesign
       - 'codex/**'
+    # Release tags too: the release workflow builds and publishes straight to
+    # users, so the tests have to run on exactly what ships.
+    tags:
+      - 'v*.*.*'
 
 permissions:
   contents: read
@@ -37,13 +41,13 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Syntax check
+        # bash on every runner (Git Bash on Windows) so the loop below is
+        # portable; the default shell there is PowerShell.
+        shell: bash
         run: |
-          node --check src/storage-classifier.js
-          node --check src/browsers.js
-          node --check src/system.js
-          node --check src/diskbreakdown.js
-          node --check src/scanner.js
-          node --check src/main.js
+          for f in src/*.js src/renderer/*.js src/renderer/screens/*.js; do
+            node --check "$f"
+          done
 
       - name: Unit tests
         run: npm test
