@@ -45,10 +45,35 @@ In the GitHub repo settings (Settings, Secrets and variables, Actions) add:
    - builds and packages the app on macOS, Windows and Linux,
    - uploads the installers, blockmaps and `latest*.yml` to the GitHub Release,
    - reads the real sha512 from electron-builder's output and POSTs the release
-     to the website, so the changelog and update feed go live.
+     to the website, so the changelog and update feed go live,
+   - writes the GitHub Release title and description from the same changelog entry.
+
+   The tag also triggers `test.yml`, so the suite runs against exactly what ships.
 
 That is it. Installed copies of Spaci pick up the update on their next check
 (within six hours, or immediately via Check for updates on the About screen).
+
+## Where the changelog goes
+
+`changelog.json` is the only place release notes are written. Every other surface
+is generated from it, so they cannot tell different stories:
+
+| Surface | How it gets there |
+| --- | --- |
+| GitHub Release description | `scripts/release-notes.mjs`, in the `sync-feed` job |
+| Website changelog and download page | `scripts/sync-feed.mjs` POSTs to `/api/releases`, stored in Neon |
+| Update feed (`/updates/latest-*.yml`) | Generated from the same database row |
+| Site fallback (`spaci-web/src/lib/releases.ts`) | Updated when a release is cut, enforced by `npm run check:releases` there |
+
+Artifact names, byte sizes and sha512 values always come from electron-builder's
+`latest*.yml`, never typed by hand.
+
+Preview the release description before tagging:
+
+```bash
+node scripts/release-notes.mjs                  # newest changelog entry
+node scripts/release-notes.mjs --version 2.0.1  # a specific release
+```
 
 ## Notes
 

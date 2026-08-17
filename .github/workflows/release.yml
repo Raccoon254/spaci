@@ -107,3 +107,18 @@ jobs:
           SITE: https://spaci.kentom.co.ke
           RELEASE_PUBLISH_SECRET: ${{ secrets.RELEASE_PUBLISH_SECRET }}
           FEED_DIR: feed
+
+      # Written here, not in the build matrix: this job runs once, so there is
+      # no race between three runners setting the same body, and the feed files
+      # from every platform are already collected, which is where the real file
+      # names, sizes and sha512 values come from.
+      - name: Write the GitHub Release description
+        run: |
+          node scripts/release-notes.mjs --feed-dir feed > release-notes.md
+          cat release-notes.md
+          gh release edit "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Spaci ${GITHUB_REF_NAME#v}" \
+            --notes-file release-notes.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
