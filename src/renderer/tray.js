@@ -100,7 +100,7 @@ function render() {
 
     // actions
     el('div', { style: 'border-top:1px solid var(--border);padding:7px 8px 9px' }, [
-      actionRow('radar', 'Open Smart Scan', '⌘S', () => openMain('dashboard')),
+      actionRow('scanner', 'Open Smart Scan', '⌘S', () => openMain('dashboard')),
       actionRow('dashboard', 'Open Spaci', '⌘O', () => openMain()),
       actionRow('settings', 'Settings', '', () => openMain('settings')),
       actionRow('close', 'Quit Spaci', '⌘Q', quitApp)
