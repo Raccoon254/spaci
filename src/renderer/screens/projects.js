@@ -55,7 +55,17 @@
     node: 'node', rust: 'rust', go: 'go', flutter: 'flutter',
     android: 'android', gradle: 'gradle', maven: 'maven', java: 'java',
     python: 'python', php: 'php', dotnet: 'dotnet', xcode: 'apple',
+    docker: 'docker',
   };
+
+  // A project earns a row when it has artifacts on disk OR storage held inside
+  // Docker. Mirrors keepProject() in the main process.
+  function hasReclaimable(p) {
+    return Boolean((p.items && p.items.length) || (p.docker && p.docker.usage));
+  }
+  function dockerBytes(p) {
+    return (p.docker && p.docker.usage && p.docker.usage.totalBytes) || 0;
+  }
   function projectLogo(p) {
     const t = p && p.type ? p.type : {};
     return TYPE_LOGO[t.id] || TYPE_LOGO[t.icon] || t.icon || 'node';
@@ -124,7 +134,7 @@
     try {
       const res = await api.scanProjects(root);
       if (res && res.ok !== false) {
-        const projects = (res.projects || []).filter((p) => p.items && p.items.length);
+        const projects = (res.projects || []).filter(hasReclaimable);
         S.projects = projects;
         S.lastScan = Date.now();
       } else {
@@ -369,6 +379,9 @@
         el('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap', text: p.name }),
         ic(logo, 15, { kind: 'logo', color: 'var(--text-3)' }),
         (p.isGit || (en && en.git)) ? ic('github', 15, { color: 'var(--text-3)' }) : null,
+        // Docker mark: dimmed when the project merely declares Docker, accented
+        // when the engine is actually holding storage for it.
+        p.docker ? ic('docker', 15, { kind: 'logo', color: dockerBytes(p) ? 'var(--accent-fg)' : 'var(--text-4)' }) : null,
       ]);
 
       const node = el('div', {
@@ -477,10 +490,56 @@
     const items = p.items || [];
     const names = items.map((i) => i.name).slice(0, 3).join(', ');
     const more = items.length > 3 ? '…' : '';
+    const usage = p.docker && p.docker.usage;
     const head = items.length
       ? items.length + ' cleanable item' + (items.length === 1 ? '' : 's') + (names ? ' · ' + names + more : '')
-      : 'No cleanable items';
+      : usage
+        ? `${fmt(usage.totalBytes)} in Docker · ${usage.images} image${usage.images === 1 ? '' : 's'}, ${usage.volumes} volume${usage.volumes === 1 ? '' : 's'}`
+        : 'No cleanable items';
     return head + (p.path ? '  ·  ' + p.path : '');
+  }
+
+  /**
+   * Docker card on the project detail. Two independent facts: what the repo
+   * declares (Dockerfile, compose services) and what the engine is actually
+   * storing for it (images, volumes, containers), matched by the working
+   * directory compose stamps on every container it starts.
+   */
+  function buildDockerCard(p) {
+    const d = p.docker;
+    if (!d) return null;
+    const usage = d.usage;
+
+    const declares = [];
+    if (d.dockerfiles && d.dockerfiles.length) declares.push(d.dockerfiles.join(', '));
+    if (d.composeFiles && d.composeFiles.length) declares.push(d.composeFiles.join(', '));
+    if (d.hasDevcontainer) declares.push('.devcontainer');
+
+    const fields = [
+      { icon: 'file', k: 'Files', v: declares.join(' · ') || 'Dockerfile', color: 'var(--text)' },
+    ];
+    if (d.services && d.services.length) {
+      fields.push({ icon: 'box', k: 'Services', v: d.services.slice(0, 4).join(', ') + (d.services.length > 4 ? '…' : ''), color: 'var(--text)' });
+    }
+    if (usage) {
+      fields.push({ icon: 'hard-drive', k: 'Engine storage', v: fmt(usage.totalBytes || 0), color: 'var(--accent-fg)' });
+      fields.push({ icon: 'grid', k: 'Objects', v: `${usage.images} image${usage.images === 1 ? '' : 's'} · ${usage.volumes} volume${usage.volumes === 1 ? '' : 's'} · ${usage.containers} container${usage.containers === 1 ? '' : 's'}`, color: 'var(--text)' });
+      if (usage.running) fields.push({ icon: 'play', k: 'Running', v: String(usage.running), color: 'var(--success-fg)' });
+    } else {
+      fields.push({ icon: 'info', k: 'Engine storage', v: 'Nothing running from this folder', color: 'var(--text-3)' });
+    }
+
+    return el('div', { style: 'background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:20px;box-shadow:var(--shadow-sm);margin-top:16px' }, [
+      el('div', { style: 'display:flex;align-items:center;gap:9px;margin-bottom:14px' }, [
+        ic('docker', 16, { kind: 'logo', color: 'var(--text-3)' }),
+        el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600', text: 'Docker' }),
+      ]),
+      el('div', { style: 'display:flex;gap:34px;flex-wrap:wrap' }, fields.map((g) => el('div', { style: 'min-width:0' }, [
+        el('div', { style: 'color:var(--text-3);font-size:12px;display:flex;gap:6px;align-items:center;margin-bottom:5px' }, [ic(g.icon, 15), g.k]),
+        el('div', { style: 'font-weight:700;font-size:15px;color:' + g.color + ';overflow:hidden;text-overflow:ellipsis', text: g.v }),
+      ]))),
+      usage ? el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:13px;line-height:1.5', text: 'Spaci never deletes Docker volumes or running containers. Reclaim images and build cache from the System screen.' }) : null,
+    ]);
   }
 
   function openDetail(p) {
@@ -586,6 +645,10 @@
         el('div', { style: 'font-weight:700;font-size:15px;color:' + g.color, text: g.v }),
       ]))),
     ]));
+
+    // ----- docker card -----
+    const dockerCard = buildDockerCard(p);
+    if (dockerCard) host.appendChild(dockerCard);
 
     // ----- cleanable items header + select all -----
     const selectAllBtn = el('button', {

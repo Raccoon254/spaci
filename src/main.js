@@ -8,6 +8,7 @@ const { execFile } = require('child_process');
 
 const scanner = require('./scanner');
 const system = require('./system');
+const docker = require('./docker');
 const cleaner = require('./cleaner');
 const largefiles = require('./largefiles');
 const diskbreakdown = require('./diskbreakdown');
@@ -72,6 +73,40 @@ async function refreshBreakdown() {
     return cache.diskBreakdown;
   } catch (_) { return cache.diskBreakdown || null; }
 }
+// ---------- docker ----------
+/**
+ * One daemon round trip per scan: the totals for the Docker card, plus the
+ * per-project attribution folded into the freshly scanned projects. Keeping the
+ * heavy lists out of `cache` matters, they are written to disk on every scan.
+ */
+async function refreshDocker(projects, options = {}) {
+  try {
+    const { inventory } = await scanner.attachDockerUsage(projects || [], options);
+    const disk = await docker.desktopDisk();
+    cache.docker = inventory && inventory.ok
+      ? {
+        ok: true,
+        approximate: Boolean(inventory.approximate),
+        status: inventory.status,
+        categories: inventory.categories,
+        totals: inventory.totals,
+        desktopDisk: disk,
+        projects: (projects || []).filter((p) => p.docker && p.docker.usage).length,
+        at: Date.now(),
+      }
+      : { ok: false, reason: inventory ? inventory.reason : 'unavailable', status: inventory ? inventory.status : null, at: Date.now() };
+    return cache.docker;
+  } catch (e) {
+    cache.docker = { ok: false, reason: 'error', error: e && e.message, at: Date.now() };
+    return cache.docker;
+  }
+}
+
+/** Projects worth keeping: real artifacts on disk, or storage held in Docker. */
+function keepProject(p) {
+  return Boolean(p.items.length || (p.docker && p.docker.usage));
+}
+
 function updateTrayTitle() {
   if (!tray) return;
   const reclaim = (cache.projects || []).reduce((s, p) => s + (p.cleanableSize || 0), 0)
@@ -93,8 +128,11 @@ async function runBackgroundScan() {
     try {
       const phaseStart = Date.now();
       const { projects } = await scanner.scanProjects(root, null, ac.signal);
+      const dockerStart = Date.now();
+      await refreshDocker(projects);
+      phaseMeta.docker = { source: 'background-scan', durationMs: Date.now() - dockerStart, partial: false };
       phaseMeta.projects = { source: 'background-scan', durationMs: Date.now() - phaseStart, partial: ac.signal.aborted };
-      cache.projects = projects.filter((p) => p.items.length);
+      cache.projects = projects.filter(keepProject);
       cache.root = root;
       cache.scannedAt = Date.now();
       cache.meta = { source: 'background-scan', startedAt: started, partial: false, errors, phases: phaseMeta };
@@ -313,7 +351,32 @@ async function getLogo(name) {
   return svg;
 }
 
-function buildRecommendations(projects, sysTargets, prefs) {
+/**
+ * Turn Docker's reclaim policy (which lives in docker.js, next to the prune
+ * allowlist) into recommendation cards.
+ */
+function dockerRecommendations(info) {
+  const COPY = {
+    'build-cache': (s) => `${s.unused} of ${s.total} cached build layers are not in use. Docker rebuilds them the next time you build.`,
+    'dangling-images': (s) => `${s.unused} of ${s.total} images have no container using them. Cleaning removes only the untagged layers left behind by rebuilds.`,
+  };
+  const TITLE = {
+    'build-cache': 'Docker build cache',
+    'dangling-images': 'Unused Docker images',
+  };
+  return docker.reclaimSuggestions(info).map((s) => ({
+    id: 'docker:' + s.kind,
+    kind: 'docker',
+    savings: s.savings,
+    severity: s.severity,
+    icon: 'box',
+    title: `${TITLE[s.kind]} · ${fmt(s.savings)}`,
+    body: COPY[s.kind](s),
+    action: { type: 'docker-prune', kind: s.kind },
+  }));
+}
+
+function buildRecommendations(projects, sysTargets, prefs, dockerInfo) {
   const recs = [];
   const now = Date.now();
   const staleMs = (prefs.staleDays || 60) * 86400000;
@@ -347,7 +410,10 @@ function buildRecommendations(projects, sysTargets, prefs) {
       body: t.description, action: { type: 'select-system', id: t.id },
     });
   }
-  return recs;
+  // Docker is invisible to a filesystem scan, so it is easily the biggest thing
+  // a dev machine is unaware of. Rank it with everything else by size.
+  recs.push(...dockerRecommendations(dockerInfo));
+  return recs.sort((a, b) => (b.savings || 0) - (a.savings || 0));
 }
 function fmt(b) {
   if (b < 1024) return b + ' B';
@@ -404,8 +470,11 @@ ipcMain.handle('scan:projects', async (e, root) => {
   const onProgress = (p) => e.sender.send('scan:progress', p);
   try {
     const res = await scanner.scanProjects(root, onProgress, aborts.projects.signal);
-    cache.projects = (res.projects || []).filter((p) => p.items.length); cache.root = root; cache.scannedAt = Date.now(); writeCache(); updateTrayTitle();
-    return { ok: true, ...res };
+    // One daemon call after the walk. The renderer keeps its running strip up
+    // until this resolves, so no extra progress event is emitted here.
+    await refreshDocker(res.projects || []);
+    cache.projects = (res.projects || []).filter(keepProject); cache.root = root; cache.scannedAt = Date.now(); writeCache(); updateTrayTitle();
+    return { ok: true, ...res, projects: cache.projects, docker: cache.docker };
   } catch (err) { return { ok: false, error: err.message }; }
 });
 
@@ -421,6 +490,37 @@ ipcMain.handle('scan:system', async (e) => {
 });
 
 ipcMain.handle('scan:cancel', (_e, type) => { if (type) aborts[type]?.abort(); else Object.values(aborts).forEach((a) => a && a.abort()); return true; });
+
+// ---------- docker ----------
+// Cheap and cached: the System screen asks on every paint.
+ipcMain.handle('docker:status', async (_e, force) => {
+  if (!force && cache.docker && Date.now() - cache.docker.at < 60000) return cache.docker;
+  const result = await refreshDocker(cache.projects || [], { force: Boolean(force) });
+  writeCache();
+  return result;
+});
+
+ipcMain.handle('docker:kinds', () => Object.values(docker.PRUNE_KINDS)
+  .map(({ id, name, safe, description }) => ({ id, name, safe, description })));
+
+// Reclaim one allowlisted category. The kind is validated inside docker.prune,
+// so an unexpected value from the renderer can never become a docker argument.
+ipcMain.handle('docker:prune', async (_e, kind) => {
+  const spec = docker.PRUNE_KINDS[kind];
+  if (!spec) return { ok: false, error: 'Unknown Docker cleanup: ' + kind, freed: 0 };
+  const res = await docker.prune(kind);
+  if (res.ok) {
+    appendHistory({
+      at: Date.now(), scope: 'docker', label: spec.name, count: 1,
+      freed: res.freed, reversible: spec.safe, items: [],
+    });
+    await refreshDocker(cache.projects || [], { force: true });
+    writeCache();
+    updateTrayTitle();
+    if (win && !win.isDestroyed()) win.webContents.send('cache:updated', cache);
+  }
+  return res;
+});
 
 async function refreshEnrich(p) {
   try {
@@ -450,7 +550,7 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
   } catch (err) { return { ok: false, error: err.message }; }
 });
 
-ipcMain.handle('recommendations', (_e, { projects, sysTargets }) => buildRecommendations(projects || [], sysTargets || [], loadPrefs()));
+ipcMain.handle('recommendations', (_e, { projects, sysTargets }) => buildRecommendations(projects || [], sysTargets || [], loadPrefs(), cache.docker));
 
 ipcMain.handle('open:reveal', (_e, p) => { shell.showItemInFolder(p); });
 ipcMain.handle('open:path', (_e, p) => shell.openPath(p));

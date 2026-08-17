@@ -194,6 +194,123 @@
       ]);
     }
 
+    // ---- Docker ----------------------------------------------------------
+    // Engine storage lives inside a VM image, so no amount of filesystem
+    // scanning can see it. It gets its own card because it is also reclaimed
+    // differently: `docker` prunes it, Spaci never deletes those paths itself.
+    async function loadDocker(force) {
+      if (S.dockerLoading || !api.dockerStatus) return;
+      S.dockerLoading = true;
+      try { S.docker = await api.dockerStatus(force); }
+      catch (_) { S.docker = null; }
+      finally { S.dockerLoading = false; paint(); }
+    }
+
+    async function runPrune(kind, label) {
+      if (S.dockerPruning) return;
+      S.dockerPruning = kind;
+      S.dockerResult = null;
+      paint();
+      try {
+        const res = await api.dockerPrune(kind);
+        S.dockerResult = res && res.ok
+          ? { ok: true, text: `Reclaimed ${fmt(res.freed || 0)} from ${label.toLowerCase()}.` }
+          : { ok: false, text: (res && res.error) || 'Docker cleanup failed.' };
+      } catch (err) {
+        S.dockerResult = { ok: false, text: (err && err.message) || 'Docker cleanup failed.' };
+      } finally {
+        S.dockerPruning = null;
+        paint();
+        loadDocker(true);
+      }
+    }
+
+    function dockerStat(label, cat) {
+      const free = cat ? cat.reclaimable || 0 : 0;
+      return el('div', { style: 'flex:1;min-width:126px' }, [
+        el('div', { style: 'font-size:11.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-3);font-weight:600', text: label }),
+        el('div', { style: 'font-size:16px;font-weight:700;margin-top:4px', text: fmt(cat ? cat.size || 0 : 0) }),
+        el('div', {
+          style: `font-size:12px;margin-top:2px;color:${free > 0 ? 'var(--accent-fg)' : 'var(--text-3)'}`,
+          text: free > 0 ? fmt(free) + ' unused' : 'all in use',
+        }),
+      ]);
+    }
+
+    function dockerButton(label, kind) {
+      const busy = S.dockerPruning === kind;
+      return el('button', {
+        style: 'height:38px;padding:0 16px;border-radius:10px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:650;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit'
+          + (busy ? ';opacity:.55;pointer-events:none' : ''),
+        hov: 'border-color:var(--accent);color:var(--accent-fg)',
+        onclick: () => runPrune(kind, label),
+      }, [busy ? ring('elastic', 15) : ic('broom', 15), busy ? 'Reclaiming…' : label]);
+    }
+
+    function dockerCard() {
+      const d = S.docker;
+      if (!d) return null;
+      const st = d.status || {};
+      if (!d.ok && !st.installed) return null; // nothing to say without Docker
+
+      const shell = (children) => el('div', {
+        style: 'display:flex;flex-direction:column;gap:14px;padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid var(--border);margin:26px 0 0;box-shadow:var(--shadow-sm)',
+      }, children);
+
+      const title = el('div', { style: 'display:flex;align-items:center;gap:13px' }, [
+        el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' },
+          [ic('docker', 24, { kind: 'logo' })]),
+        el('div', { style: 'flex:1;min-width:0' }, [
+          el('div', { style: 'font-weight:700;font-size:15px', text: 'Docker' }),
+          el('div', {
+            style: 'color:var(--text-3);font-size:12px;margin-top:2px',
+            text: d.ok
+              ? 'Images, volumes and build cache' + (d.projects ? ` · ${d.projects} scanned project${d.projects === 1 ? '' : 's'} using Docker` : '')
+              : 'Installed, but the daemon is not running',
+          }),
+        ]),
+        d.ok ? el('div', { style: 'text-align:right;flex:none' }, [
+          el('div', { style: 'font-weight:700;font-size:15px', text: fmt(d.totals.size || 0) }),
+          el('div', { style: 'font-size:12px;color:var(--accent-fg);font-weight:600', text: fmt(d.totals.reclaimable || 0) + ' reclaimable' }),
+        ]) : null,
+      ]);
+
+      if (!d.ok) {
+        return shell([
+          title,
+          el('div', { style: 'color:var(--text-3);font-size:12.5px', text: 'Start Docker and rescan to see how much space images, volumes and build cache are holding.' }),
+        ]);
+      }
+
+      const c = d.categories;
+      const rows = [
+        title,
+        el('div', { style: 'display:flex;flex-wrap:wrap;gap:14px 20px;padding-top:14px;border-top:1px solid var(--border)' }, [
+          dockerStat('Images', c.images),
+          dockerStat('Build cache', c.buildCache),
+          dockerStat('Volumes', c.volumes),
+          dockerStat('Containers', c.containers),
+        ]),
+      ];
+
+      if (S.dockerResult) {
+        rows.push(el('div', {
+          style: `display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:11px;font-size:12.5px;font-weight:600;background:${S.dockerResult.ok ? 'var(--success-soft)' : 'var(--danger-soft)'};color:${S.dockerResult.ok ? 'var(--success-fg)' : 'var(--danger-fg)'}`,
+        }, [ic(S.dockerResult.ok ? 'check' : 'warning', 16), S.dockerResult.text]));
+      }
+
+      const buttons = [];
+      if ((c.buildCache.reclaimable || 0) > 0) buttons.push(dockerButton('Reclaim ' + fmt(c.buildCache.reclaimable) + ' build cache', 'build-cache'));
+      if ((c.images.reclaimable || 0) > 0) buttons.push(dockerButton('Remove unused images', 'dangling-images'));
+      if (buttons.length) rows.push(el('div', { style: 'display:flex;flex-wrap:wrap;gap:9px' }, buttons));
+
+      rows.push(el('div', {
+        style: 'color:var(--text-3);font-size:11.5px;line-height:1.5',
+        text: 'Volumes are never touched: they hold databases and uploads. Build cache and untagged image layers rebuild on your next build.',
+      }));
+      return shell(rows);
+    }
+
     function group(grp) {
       const total = grp.items.reduce((a, t) => a + (t.size || 0), 0);
       return el('div', {}, [
@@ -263,6 +380,8 @@
         if (S.systemError) host.appendChild(el('div', {
           style: 'display:flex;align-items:center;gap:10px;padding:13px 16px;border-radius:12px;background:var(--danger-soft);color:var(--danger-fg);font-size:13px;font-weight:600;margin:0 0 4px'
         }, [ic('warning', 17), S.systemError]));
+        const docker = dockerCard();
+        if (docker) host.appendChild(docker);
         host.appendChild(selectAllRow(targets));
         groupByCategory(targets).forEach((grp) => host.appendChild(group(grp)));
         syncActionBar(targets);
@@ -284,5 +403,8 @@
     const haveData = targetsNow().length > 0;
     const stale = !S.lastScan || (Date.now() - S.lastScan) > 60000;
     if (!S.bgScanning && !S.systemLoading && (!haveData || stale)) runScan();
+
+    // Docker answers in about a second, independently of the cache scan.
+    if (!S.docker || Date.now() - (S.docker.at || 0) > 60000) loadDocker();
   };
 })();

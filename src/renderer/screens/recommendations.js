@@ -47,6 +47,26 @@
   function resolveAction(rec) {
     if (!rec) return null;
     const act = rec.action || {};
+    // Docker is reclaimed by the daemon, not by deleting paths, so it carries a
+    // prune kind instead of clean jobs. Everything else on this screen is
+    // path-based.
+    if (rec.kind === 'docker' || act.type === 'docker-prune') {
+      return {
+        kind: 'docker',
+        dockerKind: act.kind,
+        rec,
+        icon: rec.icon || 'box',
+        name: rec.title || 'Docker',
+        body: rec.body || '',
+        savings: recSize(rec),
+        count: 1,
+        safe: true,
+        reversible: true,
+        jobs: [],
+        items: [{ icon: 'box', path: act.kind === 'build-cache' ? 'docker builder prune' : 'docker image prune' }],
+        meta: { scope: 'docker', label: rec.title || 'Docker', reversible: true },
+      };
+    }
     if (rec.kind === 'project' || act.type === 'open-project') {
       const proj = (S.recsProjects || []).find((p) => p.path === act.path) || null;
       const items = (proj && proj.items) || [];
@@ -302,11 +322,12 @@
       );
     }
 
-    // apply bar
+    // apply bar. A Docker action has no clean jobs: the daemon does the work.
     const cleaning = S.actionCleaning;
+    const applicable = a.kind === 'docker' ? Boolean(a.dockerKind) : a.jobs.length > 0;
     const applyBtn = el('button', {
       class: safe ? 'sp-ab-accent' : 'sp-ab-danger',
-      style: 'height:46px;padding:0 22px;border-radius:12px;border:none;color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer;flex:none' + ((cleaning || !a.jobs.length || S.actionResult) ? ';opacity:.6;pointer-events:none' : ''),
+      style: 'height:46px;padding:0 22px;border-radius:12px;border:none;color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer;flex:none' + ((cleaning || !applicable || S.actionResult) ? ';opacity:.6;pointer-events:none' : ''),
       onclick: () => apply(),
     }, [
       cleaning ? ic('spaci-ring', 16, { anim: 'elastic' }) : ic('trash', 16),
@@ -328,11 +349,13 @@
     );
 
     async function apply() {
-      if (S.actionCleaning || !a.jobs.length) return;
+      if (S.actionCleaning || !applicable) return;
       S.actionCleaning = true;
       if (S.route === 'action') SP.go('action'); // reflect the cleaning state
       try {
-        const res = await api.clean(a.jobs, a.meta);
+        const res = a.kind === 'docker'
+          ? await api.dockerPrune(a.dockerKind).then((r) => (r && r.ok ? { ok: true, totalFreed: r.freed } : r))
+          : await api.clean(a.jobs, a.meta);
         if (res && res.ok) {
           S.actionResult = { ok: true, totalFreed: res.totalFreed };
           // Celebratory success overlay, same as the other clean surfaces.

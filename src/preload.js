@@ -35,6 +35,11 @@ contextBridge.exposeInMainWorld('api', {
   enrichProject: (p) => ipcRenderer.invoke('project:enrich', p),
   recommendations: (payload) => ipcRenderer.invoke('recommendations', payload),
 
+  // docker
+  dockerStatus: (force) => ipcRenderer.invoke('docker:status', force),
+  dockerKinds: () => ipcRenderer.invoke('docker:kinds'),
+  dockerPrune: (kind) => ipcRenderer.invoke('docker:prune', kind),
+
   // cleaning
   clean: (jobs, meta) => ipcRenderer.invoke('clean', jobs, meta),
 
