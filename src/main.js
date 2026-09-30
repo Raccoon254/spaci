@@ -16,7 +16,7 @@ const telemetry = require('./telemetry');
 const largefiles = require('./largefiles');
 const diskbreakdown = require('./diskbreakdown');
 const { initUpdater, getUpdateController } = require('./updater');
-const { createCacheStore } = require('./scan-cache');
+const { createCacheStore, writeFileAtomic } = require('./scan-cache');
 const { createScanCoordinator, singleFlight, keyedSingleFlight } = require('./scan-coordinator');
 const { createScheduler, backgroundGate, clampIntervalHours, HOUR } = require('./scheduler');
 const { createScanService } = require('./background');
@@ -54,7 +54,9 @@ function loadPrefs() {
   catch { return { ...DEFAULT_PREFS }; }
 }
 function savePrefs(p) {
-  try { fs.mkdirSync(path.dirname(PREFS_PATH), { recursive: true }); fs.writeFileSync(PREFS_PATH, JSON.stringify(p, null, 2)); }
+  // Atomic: a crash mid-write must not truncate the file, or the next load
+  // falls back to defaults and the next save wipes the user's settings.
+  try { writeFileAtomic(PREFS_PATH, JSON.stringify(p, null, 2)); }
   catch (e) { console.error('savePrefs', e); }
 }
 
@@ -72,8 +74,7 @@ function sendUsagePing() {
     // not saved would otherwise count as a new user every day.
     savePrefs: (p) => {
       const next = { ...loadPrefs(), installId: p.installId, lastPingDate: p.lastPingDate };
-      fs.mkdirSync(path.dirname(PREFS_PATH), { recursive: true });
-      fs.writeFileSync(PREFS_PATH, JSON.stringify(next, null, 2));
+      writeFileAtomic(PREFS_PATH, JSON.stringify(next, null, 2));
     },
     version: app.getVersion(),
   }).catch(() => { /* never let analytics touch the app */ });
@@ -96,7 +97,8 @@ let bgScheduler = null; // started in app.whenReady (powerMonitor needs a ready 
 const HISTORY_PATH = path.join(app.getPath('userData'), 'history.json');
 function readHistory() { try { return JSON.parse(fs.readFileSync(HISTORY_PATH, 'utf8')); } catch { return []; } }
 function appendHistory(entry) {
-  try { const h = readHistory(); h.unshift(entry); fs.writeFileSync(HISTORY_PATH, JSON.stringify(h.slice(0, 200))); } catch (e) { /* ignore */ }
+  try { const h = readHistory(); h.unshift(entry); writeFileAtomic(HISTORY_PATH, JSON.stringify(h.slice(0, 200))); }
+  catch (e) { console.error('appendHistory', e && e.message); }
 }
 
 // ---------- disk usage breakdown (by category) ----------
@@ -196,7 +198,11 @@ function scanConditions() {
 function scheduleState() {
   const s = cache.schedule || {};
   const k = cache.kindScannedAt || {};
-  const manual = Math.min(k.projects || 0, k.system || 0);
+  // A timestamp from the future (clock corrected by NTP) says nothing about
+  // when we last scanned; counting it would stall or loop the scheduler.
+  const t = Date.now();
+  const seen = (v) => (typeof v === 'number' && v > 0 && v <= t ? v : 0);
+  const manual = Math.min(seen(k.projects), seen(k.system));
   return { ...s, lastCompletedAt: Math.max(s.lastCompletedAt || 0, manual) };
 }
 
@@ -210,6 +216,10 @@ function createBackgroundScheduler() {
       return backgroundGate({ enabled: Boolean(prefs.backgroundScans), onboarded: Boolean(prefs.onboarded), force, ...scanConditions() });
     },
     getState: scheduleState,
+    // A background pass normally takes minutes; give up after an hour, abort it
+    // and make sure its late result is never written.
+    options: { runTimeoutMs: 60 * 60 * 1000 },
+    onTimeout: () => scanService.expireBackground(),
     saveState: (st) => {
       cache.schedule = { ...(cache.schedule || {}), lastCompletedAt: st.lastCompletedAt || 0, lastAttemptAt: st.lastAttemptAt || 0, failures: st.failures || 0 };
       writeCache();
@@ -379,6 +389,10 @@ app.whenReady().then(() => {
     getPrefs: loadPrefs,
     beforeInstall: () => { isQuitting = true; },
     onReady: announceUpdate,
+    // Squirrel failed after "ready": drop the tray item and, if a restart was
+    // under way, go back to close-to-tray behaviour.
+    onReadyWithdrawn: () => { updateReadyVersion = null; },
+    onInstallAbandoned: () => { isQuitting = false; },
   });
   // After sleep, screen unlock or plugging in, re-check once (never a burst):
   // the schedulers recompute from the last completed run.
@@ -699,4 +713,4 @@ ipcMain.handle('scan:largefiles', async (e, root, minBytes) => {
   } catch (err) { return { ok: false, error: err.message }; }
 });
 ipcMain.handle('history:get', () => readHistory());
-ipcMain.handle('history:clear', () => { try { fs.writeFileSync(HISTORY_PATH, '[]'); } catch (e) { /* */ } return []; });
+ipcMain.handle('history:clear', () => { try { writeFileAtomic(HISTORY_PATH, '[]'); } catch (e) { console.error('history:clear', e && e.message); } return []; });

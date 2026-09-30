@@ -228,3 +228,21 @@ test('the primary instance brings its window forward on a second launch', async 
     m.appEvents.emit('before-quit');
   } finally { m.cleanup(); }
 });
+
+test('preferences.json and history.json are written atomically (temp file, then rename)', async () => {
+  const m = loadMain();
+  const renames = [];
+  const realRename = fs.renameSync;
+  fs.renameSync = (a, b) => { renames.push([path.basename(a), path.basename(b)]); return realRename(a, b); };
+  try {
+    await m.handlers['prefs:set']({}, { theme: 'light' });
+    await m.handlers['history:clear']();
+    assert.ok(renames.some(([a, b]) => b === 'preferences.json' && a.endsWith('.tmp')), 'prefs renamed into place');
+    assert.ok(renames.some(([a, b]) => b === 'history.json' && a.endsWith('.tmp')), 'history renamed into place');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(m.userData, 'preferences.json'), 'utf8')).theme, 'light');
+    assert.deepEqual(fs.readdirSync(m.userData).filter((f) => f.endsWith('.tmp')), []);
+  } finally {
+    fs.renameSync = realRename;
+    m.cleanup();
+  }
+});
