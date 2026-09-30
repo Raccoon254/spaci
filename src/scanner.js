@@ -13,6 +13,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 const docker = require('./docker');
+const languages = require('./languages');
 
 // Scanning is IO bound, not CPU bound: the win comes from keeping many reads in
 // flight rather than from cores. These caps keep a scan responsive without
@@ -775,7 +776,7 @@ async function buildProject(dir, detected, signal, rootEntries) {
   const names = rootEntries || await fsp.readdir(dir).catch(() => []);
   const dockerFiles = docker.detect(names);
 
-  const [mtime, iconPath, isGit, services] = await Promise.all([
+  const [mtime, iconPath, isGit, services, primary] = await Promise.all([
     fsp.stat(dir).then((s) => s.mtimeMs, () => 0),
     findProjectIcon(dir, type),
     // A worktree or submodule has .git as a file, not a directory.
@@ -783,6 +784,8 @@ async function buildProject(dir, detected, signal, rootEntries) {
     dockerFiles && dockerFiles.composeFiles.length
       ? docker.composeServices(path.join(dir, dockerFiles.composeFiles[0]))
       : Promise.resolve([]),
+    // Root manifests only, so the list can show a tech icon before enrichment.
+    languages.quickPrimary(dir, names),
   ]);
 
   const project = {
@@ -797,6 +800,7 @@ async function buildProject(dir, detected, signal, rootEntries) {
     git: null,
     isGit,
     iconPath,
+    primary,
     // Engine storage (images, volumes, cache) is attached later by
     // attachDockerUsage: it needs one daemon call for the whole scan, not one
     // per project.
@@ -884,14 +888,60 @@ async function findIosIcon(dir) {
   return null;
 }
 
-/** Compute total size + git for a single project (called on selection / details). */
+// Language and framework analysis per project, reused while nothing it depends
+// on changed: the git HEAD (or its absence), the manifests it read and the
+// project folder's own mtime.
+const TECH_CACHE = new Map();
+const TECH_CACHE_MAX = 300;
+const EMPTY_TECH = { languages: [], frameworks: [], primary: null, analysis: null };
+
+async function techKey(dir, signal) {
+  const [res, rootMtime] = await Promise.all([
+    runGit(dir, ['rev-parse', '--verify', '-q', 'HEAD'], { signal, timeout: 3000 }),
+    fsp.stat(dir).then((s) => s.mtimeMs, () => 0),
+  ]);
+  const head = !res.err && /^[0-9a-f]{40,64}$/.test(res.stdout.trim()) ? res.stdout.trim() : null;
+  return { head, rootMtime };
+}
+
+async function stampsUnchanged(dir, stamps) {
+  const now = await Promise.all(stamps.map(([rel]) =>
+    fsp.stat(path.join(dir, rel)).then((s) => s.mtimeMs, () => -1)));
+  return stamps.every(([, m], i) => now[i] === m);
+}
+
+async function analyzeTech(dir, signal, opts = {}) {
+  try {
+    const key = await techKey(dir, signal);
+    const hit = TECH_CACHE.get(dir);
+    if (hit && hit.head === key.head && (key.head || hit.rootMtime === key.rootMtime)
+      && await stampsUnchanged(dir, hit.manifests)) {
+      return hit.result;
+    }
+    const { result, manifests } = await languages.analyzeProjectDetailed(dir, { signal, ...opts });
+    // A partial answer (budget or abort) is returned but never cached.
+    if (!result.analysis.truncated && !signal?.aborted) {
+      TECH_CACHE.delete(dir);
+      TECH_CACHE.set(dir, { ...key, manifests, result });
+      if (TECH_CACHE.size > TECH_CACHE_MAX) TECH_CACHE.delete(TECH_CACHE.keys().next().value);
+    }
+    return result;
+  } catch {
+    return EMPTY_TECH;
+  }
+}
+
+/** Compute total size, git and languages/frameworks for one project (called on selection / details). */
 async function enrichProject(dir, signal) {
-  const [total, git] = await Promise.all([dirSize(dir, signal), gitStatus(dir)]);
-  return { totalSize: total, git };
+  const [total, git, tech] = await Promise.all([dirSize(dir, signal), gitStatus(dir), analyzeTech(dir, signal)]);
+  return {
+    totalSize: total, git,
+    languages: tech.languages, frameworks: tech.frameworks, primary: tech.primary, analysis: tech.analysis,
+  };
 }
 
 module.exports = {
   PROJECT_TYPES, CLEAN_RULES, SKIP_DELETE,
-  scanProjects, dirSize, enrichProject, gitStatus, detectType, detectTypes,
+  scanProjects, dirSize, enrichProject, analyzeTech, gitStatus, detectType, detectTypes,
   attachDockerUsage, walkSize, drain, mapPool, revalidateArtifact,
 };
