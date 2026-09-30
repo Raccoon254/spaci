@@ -128,8 +128,12 @@
         count: 1,
         safe: risk.key === 'safe',
         reversible: risk.key !== 'permanent',
+        // Unused images come back only by downloading or rebuilding them.
+        after: act.kind === 'unused-images'
+          ? { short: 'Downloads again when needed', title: 'Downloaded or rebuilt when needed', text: 'Docker downloads or rebuilds an image the next time a container or build needs it. Large images can take a while to download again.' }
+          : null,
         jobs: [],
-        items: [{ icon: 'box', path: act.kind === 'build-cache' ? 'docker builder prune' : 'docker image prune' }],
+        items: [{ icon: 'box', path: act.kind === 'build-cache' ? 'docker builder prune' : act.kind === 'unused-images' ? 'docker image prune -a' : 'docker image prune' }],
         meta: { scope: 'docker', label: rec.title || 'Docker' },
       };
     }
@@ -376,7 +380,7 @@
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:10px 32px;padding:16px 2px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:22px' }, [
         stat('hard-drive', 'Reclaimable', fmt(a.savings), 'var(--accent-fg)'),
         stat('box', 'Locations', String(a.count), 'var(--text)'),
-        stat(reversible ? 'refresh' : 'lock', 'After cleaning', reversible ? 'Rebuilds on next install/build' : 'Permanent', reversible ? 'var(--text)' : 'var(--danger-fg)'),
+        stat(reversible ? 'refresh' : 'lock', 'After cleaning', a.after ? a.after.short : reversible ? 'Rebuilds on next install/build' : 'Permanent', reversible ? 'var(--text)' : 'var(--danger-fg)'),
       ])
     );
 
@@ -385,8 +389,8 @@
       el('div', { style: 'display:flex;align-items:flex-start;gap:14px;padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid var(--border);margin-bottom:20px' }, [
         ic(reversible ? 'refresh' : 'shield', 22, { color: reversible ? 'var(--accent-fg)' : 'var(--danger-fg)' }),
         el('div', { style: 'flex:1' }, [
-          el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: reversible ? 'Rebuilds on next install or build' : 'Permanent removal' }),
-          el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: reversible
+          el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: a.after ? a.after.title : reversible ? 'Rebuilds on next install or build' : 'Permanent removal' }),
+          el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: a.after ? a.after.text : reversible
             ? 'These are regenerable caches and build output. Your tools rebuild them automatically the next time you build or install.'
             : 'These files will not be regenerated automatically. Make sure you no longer need them before applying.' }),
         ]),
@@ -456,14 +460,16 @@
     // apply bar. A Docker action has no clean jobs: the daemon does the work.
     const cleaning = S.actionCleaning;
     const applicable = a.kind === 'docker' ? Boolean(a.dockerKind) : a.jobs.length > 0;
-    const spent = !!S.actionResult && (S.actionResult.state === 'done' || S.actionResult.state === 'empty');
+    // Only a clean that freed space is spent. "Nothing was freed" must not read as Cleaned.
+    const spent = !!S.actionResult && S.actionResult.state === 'done';
+    const emptied = !!S.actionResult && S.actionResult.state === 'empty';
     const applyBtn = el('button', {
       class: safe ? 'sp-ab-accent' : 'sp-ab-danger',
       style: 'height:46px;padding:0 22px;border-radius:12px;border:none;color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer;flex:none' + ((cleaning || !applicable || spent) ? ';opacity:.6;pointer-events:none' : ''),
       onclick: () => apply(),
     }, [
       cleaning ? ic('spaci-ring', 16, { anim: 'elastic' }) : ic('trash', 16),
-      cleaning ? 'Cleaning…' : spent ? 'Cleaned' : S.actionResult ? 'Try again' : (safe ? 'Clean ' + fmt(a.savings) : 'Remove ' + fmt(a.savings)),
+      cleaning ? 'Cleaning…' : spent ? 'Cleaned' : emptied ? 'Nothing to clean' : S.actionResult ? 'Try again' : (safe ? 'Clean ' + fmt(a.savings) : 'Remove ' + fmt(a.savings)),
     ]);
 
     const cancelBtn = el('button', {
@@ -491,7 +497,7 @@
           count: a.kind === 'docker' ? 1 : a.jobs.length,
           bytes: a.savings != null ? a.savings : undefined,
           permanent: permanentNames,
-          note: a.kind === 'docker' ? 'Docker prunes ' + a.name + '. Docker rebuilds this cache the next time you build.' : undefined
+          note: a.kind === 'docker' ? (a.after ? a.after.text : 'Docker rebuilds this cache the next time you build.') : undefined
         });
         if (!cf.go) return;
         confirmed = cf.confirmed;
@@ -500,7 +506,7 @@
       if (S.route === 'action') SP.go('action'); // reflect the cleaning state
       try {
         const res = a.kind === 'docker'
-          ? await api.dockerPrune(a.dockerKind).then((r) => (r && r.ok ? { ok: true, totalFreed: r.freed, note: r.note || (S.docker && S.docker.diskNote) || null } : r))
+          ? await api.dockerPrune(a.dockerKind, { confirmed }).then((r) => (r && r.ok ? { ok: true, totalFreed: r.freed, note: r.note || (S.docker && S.docker.diskNote) || null } : r))
           : await api.clean(a.jobs, confirmed ? Object.assign({}, a.meta, { confirmed: true }) : a.meta);
         if (a.kind !== 'docker' && res && res.ok !== false) {
           // Try again resends only what was not removed.

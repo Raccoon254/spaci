@@ -319,10 +319,13 @@ test('only regenerable things can be pruned', () => {
   // The whole point: volumes hold real data and must never be offered.
   assert.ok(!kinds.some((k) => /volume/i.test(k)));
   for (const spec of Object.values(docker.PRUNE_KINDS)) {
-    assert.ok(!spec.args.includes('volume'), spec.id + ' must not touch volumes');
-    // Only the opt-in unused-images kind may sweep everything, and only images.
-    if (spec.id === 'unused-images') continue;
-    assert.ok(!spec.args.includes('-a') && !spec.args.includes('--all'), spec.id + ' must not prune everything');
+    assert.ok(!spec.args.includes('volume') && !spec.args.includes('--volumes'), spec.id + ' must not touch volumes');
+    assert.ok(!spec.args.includes('system'), spec.id + ' must not run a system-wide prune');
+    // -a is allowed only where it is the point (unused images) and never safe.
+    if (spec.args.includes('-a') || spec.args.includes('--all')) {
+      assert.equal(spec.id, 'unused-images');
+      assert.equal(spec.safe, false, 'removing every unused image must be confirmed');
+    }
   }
   assert.equal(docker.PRUNE_KINDS['stopped-containers'].safe, false);
   assert.equal(docker.PRUNE_KINDS['unused-images'].safe, false, 'unused images are opt-in');

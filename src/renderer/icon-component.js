@@ -65,7 +65,9 @@
         var lmap = window.SPACI_LOGOS || {};
         var ld = lmap[name];
         var lbody = ld ? (ld.p || '').replace(/opacity="(?:0?\.[0-5]\d*)"/g, 'opacity="0.72"') : '';
-        this._root.innerHTML = ld ? '<svg viewBox="' + ld.v + '" fill="none" style="width:100%;height:100%;display:block">' + lbody + '</svg>' : '';
+        // The logo paths carry no fill of their own (all are filled shapes, none
+        // stroked), so the root must supply it: fill="none" drew them blank.
+        this._root.innerHTML = ld ? '<svg viewBox="' + ld.v + '" fill="currentColor" style="width:100%;height:100%;display:block">' + lbody + '</svg>' : '';
         return;
       }
       // Two-tone UI icons load their SVG file from src/renderer/icons/<name>.svg

@@ -183,7 +183,7 @@ function buildOps(mod) {
     scanSystem: (ctx) => mod('system').scanSystem(ctx.progress, ctx.signal),
 
     diskBreakdown: (ctx, home) => mod('diskbreakdown').diskBreakdown(home),
-    topChildren: (ctx, dirs, limit) => mod('diskbreakdown').topChildren(Array.isArray(dirs) ? dirs : [], limit),
+    topChildren: (ctx, dirs, limit, exclude) => mod('diskbreakdown').topChildren(Array.isArray(dirs) ? dirs : [], limit, undefined, Array.isArray(exclude) ? exclude : []),
 
     scanLargeFiles: (ctx, root, minBytes) => mod('largefiles').scanLargeFiles(root, minBytes, ctx.progress, ctx.signal),
 

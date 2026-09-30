@@ -92,6 +92,13 @@ function tic(id, size, opt) {
 }
 
 // ---------- formatting ----------
+// The system disk's everyday name on this OS (the renderer has no process.platform).
+function diskName() {
+  const p = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || '';
+  if (/mac/i.test(p)) return 'Macintosh HD';
+  if (/win/i.test(p)) return 'Local Disk';
+  return 'System disk';
+}
 function fmt(bytes) {
   bytes = Number(bytes) || 0;
   if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(bytes >= 10 * 1024 ** 3 ? 0 : 1) + ' GB';
@@ -794,15 +801,15 @@ function diskMini() {
   const segs = cats.map((c, i) => el('span', {
     style: `height:100%;border-radius:2px;background:${catColor(c, i)};flex-basis:${((Number(c.bytes) || 0) / sumCats) * pct}%;flex-grow:0;flex-shrink:0`
   }));
-  const diskName = PLATFORM === 'mac' ? 'Macintosh HD' : 'Main disk';
+  const diskLabel = diskName();
   return el('div', {
     class: 'sp-hov',
-    'aria-label': 'Storage: ' + diskName + ', ' + free + ' free' + (d ? ', ' + pct + '% used' : ''),
+    'aria-label': 'Storage: ' + diskLabel + ', ' + free + ' free' + (d ? ', ' + pct + '% used' : ''),
     style: 'background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:14px;margin:14px 0 10px;cursor:pointer',
     hov: 'border-color:var(--border-2)',
     onclick: () => go('storage')
   }, [
-    el('div', { style: 'display:flex;justify-content:space-between;font-size:12px;color:var(--text-2);font-weight:600;margin-bottom:10px' }, [el('span', { text: diskName }), el('span', { text: free + ' free' })]),
+    el('div', { style: 'display:flex;justify-content:space-between;font-size:12px;color:var(--text-2);font-weight:600;margin-bottom:10px' }, [el('span', { text: diskLabel }), el('span', { text: free + ' free' })]),
     el('div', { style: 'height:9px;border-radius:99px;background:var(--track);overflow:hidden;display:flex;gap:2px' }, segs),
     el('div', { style: 'display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:9px' }, [el('span', { text: pct + '% used' }), el('span', { text: total })])
   ]);

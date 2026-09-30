@@ -1,0 +1,62 @@
+name: E2E
+
+# Builds the unpacked app on macOS, Windows and Linux and drives the real main
+# process over CDP (scripts/e2e/cdp-e2e.mjs). On Linux it also runs against a
+# real Docker engine with more than 1 GB of unused images, so a Docker
+# recommendation that frees nothing fails here instead of on a user's machine.
+on:
+  push:
+    branches: ['main', 'hotfix/**', 'feature/**']
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            bin: release/mac-arm64/Spaci.app/Contents/MacOS/Spaci
+            args: '--mac dir'
+          - os: windows-latest
+            bin: release/win-unpacked/Spaci.exe
+            args: '--win dir'
+          - os: ubuntu-24.04
+            bin: release/linux-unpacked/spaci
+            args: '--linux dir'
+            docker: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build unpacked app (unsigned)
+        shell: bash
+        run: npx electron-builder ${{ matrix.args }} --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Linux sandbox helper and display
+        if: runner.os == 'Linux'
+        run: |
+          # As the deb does: the setuid helper lets Chromium sandbox under
+          # Ubuntu's AppArmor user-namespace restriction.
+          sudo chown root:root release/linux-unpacked/chrome-sandbox
+          sudo chmod 4755 release/linux-unpacked/chrome-sandbox
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb >/dev/null
+      - name: Pull images no container uses (over 1 GB)
+        if: matrix.docker
+        run: |
+          docker pull -q node:22-bookworm
+          docker pull -q python:3.12-bookworm
+          docker system df
+      - name: Run E2E (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a node scripts/e2e/cdp-e2e.mjs ${{ matrix.bin }} ${{ matrix.docker && '--docker' || '' }}
+      - name: Run E2E (macOS, Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: node scripts/e2e/cdp-e2e.mjs "${{ matrix.bin }}"

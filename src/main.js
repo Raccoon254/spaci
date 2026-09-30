@@ -865,8 +865,13 @@ ipcMain.handle('brandicon:get', (_e, id, theme) => getBrandIcon(id, theme));
 let lastTopChildren = new Set();
 ipcMain.handle('fs:top-children', async (_e, dirs) => {
   const list = Array.isArray(dirs) ? dirs : [];
-  const items = await work('topChildren', [list, 25]).catch((e) => { console.error('[top-children] failed:', e && e.message); return []; });
-  const categoryDirs = ipcGuards.knownPathSet(((cache.diskBreakdown && cache.diskBreakdown.categories) || []).flatMap((c) => (c && c.dirs) || []));
+  const cats = (cache.diskBreakdown && cache.diskBreakdown.categories) || [];
+  // The System drill-down lists only what no other category counts.
+  const sys = cats.find((c) => c && c.key === 'system');
+  const isSystemDrill = sys && Array.isArray(sys.dirs) && list.length === sys.dirs.length && list.every((d, i) => d === sys.dirs[i]);
+  const classified = isSystemDrill ? cats.filter((c) => c && c.key !== 'system').flatMap((c) => (c && c.dirs) || []) : [];
+  const items = await work('topChildren', [list, 25, classified]).catch((e) => { console.error('[top-children] failed:', e && e.message); return []; });
+  const categoryDirs = ipcGuards.knownPathSet(cats.flatMap((c) => (c && c.dirs) || []));
   const parents = ipcGuards.knownPathSet(list.filter((d) => categoryDirs.has(d)));
   // Accumulate rather than replace: the renderer keeps each category's list, so
   // going back to an earlier category must not break its Open buttons.
@@ -925,9 +930,13 @@ ipcMain.handle('docker:kinds', () => Object.values(docker.PRUNE_KINDS)
 
 // Reclaim one allowlisted category. The kind is validated inside docker.prune,
 // so an unexpected value from the renderer can never become a docker argument.
-ipcMain.handle('docker:prune', async (_e, kind) => {
+ipcMain.handle('docker:prune', async (_e, kind, opts) => {
   const spec = docker.PRUNE_KINDS[kind];
   if (!spec) return { ok: false, error: 'Unknown Docker cleanup: ' + kind, freed: 0 };
+  // Same rule as clean: anything that is not safe needs an explicit confirm.
+  if (!spec.safe && !(opts && opts.confirmed === true)) {
+    return { ok: false, error: 'needs-confirmation', freed: 0 };
+  }
   let res;
   try { res = await dockerCall('prune', [kind]); }
   catch (e) { return { ok: false, error: (e && e.message) || 'Docker cleanup failed.', freed: 0 }; }

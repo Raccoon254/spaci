@@ -58,3 +58,32 @@ test('empty input gives an empty attribution', () => {
   assert.deepEqual(r.pieces, []);
   assert.equal(r.estimate, 0);
 });
+
+test('topChildren skips folders another category counts, and their ancestors', async () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const { topChildren } = require('../src/diskbreakdown');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-tc-'));
+  const mk = (rel, bytes) => { const p = path.join(root, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, Buffer.alloc(bytes, 1)); };
+  mk('Library/Caches/a.bin', 200000);      // classified (caches)
+  mk('Library/Mystery/b.bin', 300000);     // unclassified inside Library
+  mk('.codex/sessions/c.bin', 400000);     // unclassified hidden folder
+  mk('projects/app/d.bin', 500000);        // classified (projects)
+  try {
+    const items = await topChildren([root, path.join(root, 'Library')], 25, 20000,
+      [path.join(root, 'Library', 'Caches'), path.join(root, 'projects')]);
+    const names = items.map((i) => path.relative(root, i.path)).sort();
+    assert.deepEqual(names, ['.codex', path.join('Library', 'Mystery')]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('APFS sibling volumes of the boot container are labelled, the Data volume is not', () => {
+  const { parseApfsVolumes } = require('../src/diskbreakdown');
+  const list = { Containers: [
+    { ContainerReference: 'disk3', Volumes: [
+      { Roles: ['System'], CapacityInUse: 13656313856 }, { Roles: ['Data'], CapacityInUse: 426e9 },
+      { Roles: ['VM'], CapacityInUse: 9665884160 }, { Roles: ['Preboot'], CapacityInUse: 10879954944 },
+      { Roles: [], CapacityInUse: 5 } ] },
+    { ContainerReference: 'disk1', Volumes: [{ Roles: ['Preboot'], CapacityInUse: 6090752 }] },
+  ] };
+  assert.deepEqual(parseApfsVolumes(list, 'disk3').map((v) => v.name), ['macOS system files', 'Startup files (Preboot)', 'Swap (virtual memory)']);
+});
