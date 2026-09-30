@@ -10,9 +10,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { pathToFileURL } = require('url');
 
 const SCRIPTS = path.join(__dirname, '..', 'scripts');
-const lib = () => import(path.join(SCRIPTS, 'changelog-lib.mjs'));
+// import() takes a URL: a bare absolute path is 'd:' as a scheme on Windows.
+const lib = () => import(pathToFileURL(path.join(SCRIPTS, 'changelog-lib.mjs')).href);
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32)]);
 const SVG = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>');

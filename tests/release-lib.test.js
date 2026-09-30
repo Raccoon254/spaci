@@ -9,9 +9,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { pathToFileURL } = require('url');
 
 const SCRIPTS = path.join(__dirname, '..', 'scripts');
-const lib = () => import(path.join(SCRIPTS, 'release-lib.mjs'));
+// import() takes a URL: a bare absolute path is 'd:' as a scheme on Windows.
+const lib = () => import(pathToFileURL(path.join(SCRIPTS, 'release-lib.mjs')).href);
 
 test('version regex: X.Y.Z and X.Y.Z-rc.N only', async () => {
   const { RELEASE_RE, parseReleaseVersion, isPrerelease } = await lib();
