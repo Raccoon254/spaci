@@ -33,6 +33,8 @@ function ic(name, size, opt) { opt = opt || {}; let s = `width:${size}px;height:
 const ringEl = (anim, size) => el('spaci-icon', { name: 'spaci-ring', anim, style: `width:${size}px;height:${size}px;display:block` });
 function fmt(b) { b = Number(b) || 0; if (b >= 1024 ** 3) return (b / 1024 ** 3).toFixed(b >= 10 * 1024 ** 3 ? 0 : 1) + ' GB'; if (b >= 1024 ** 2) return Math.round(b / 1024 ** 2) + ' MB'; if (b >= 1024) return Math.round(b / 1024) + ' KB'; return b + ' B'; }
 function normDisk(d) { if (!d) return null; const total = Number(d.total) || 0; const free = Number(d.free != null ? d.free : d.avail != null ? d.avail : 0) || 0; const used = Number(d.used != null ? d.used : total - free) || 0; return { total, free, used }; }
+// Informational recommendations (the Docker disk image) have nothing to reclaim.
+function isInfoRec(r) { return !!(r && r.action && r.action.type === 'none'); }
 function recBytes(r) { return Number(r.bytes != null ? r.bytes : r.savings != null ? r.savings : r.size || 0) || 0; }
 
 const state = { disk: null, breakdown: null, recs: [], history: [], scanning: false, mode: '' };
@@ -55,7 +57,7 @@ function render() {
   const d = state.disk || { total: 0, used: 0, free: 0 };
   const cats = ((state.breakdown && state.breakdown.categories) || []).filter((c) => c.bytes > 0);
   const sumCats = cats.reduce((a, c) => a + (Number(c.bytes) || 0), 0) || 1;
-  const reclaim = (state.recs || []).reduce((a, r) => a + recBytes(r), 0);
+  const reclaim = (state.recs || []).filter((r) => !isInfoRec(r)).reduce((a, r) => a + recBytes(r), 0);
   const lifetime = (state.history || []).reduce((a, h) => a + (Number(h.freed) || 0), 0);
   const cacheCat = cats.find((c) => c.key === 'caches');
   const projRecs = (state.recs || []).filter((r) => (r.kind || '') === 'project').length;

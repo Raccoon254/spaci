@@ -23,7 +23,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
-const { buildStoryCategories, systemCategory } = require('./storage-classifier');
+const { buildStoryCategories, buildSystemTargets, systemCategory } = require('./storage-classifier');
+const docker = require('./docker');
 
 // Overall deadline so the worst-case runtime stays bounded (~20s).
 const DEADLINE_MS = 20000;
@@ -146,6 +147,117 @@ async function sizeOf(p, deadline) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// "What macOS calls System Data"
+//
+// macOS Storage settings lumps developer data, caches, app data, swap and
+// snapshots into one "System Data" figure. This splits that figure into the
+// parts Spaci can see, so a large number stops being a mystery. It is an
+// estimate: Apple does not publish how it draws the line.
+// ---------------------------------------------------------------------------
+
+const SWAP_DIR = '/System/Volumes/VM';
+
+/**
+ * Pure attribution step. `cats` is { key: bytes } from the (possibly scaled)
+ * breakdown; the raw measurements are scaled by the same `factor` so they stay
+ * consistent with it. Each piece is capped by the category it lives inside, so
+ * nothing is counted twice and the pieces never exceed their parent.
+ *
+ * Categories macOS counts as System Data: developer caches (developer and
+ * xcode targets), AI tools, app data, caches, browser data and the unmeasured
+ * system remainder. Applications, Documents, Downloads, Media, Mail and your
+ * own project folders are not part of it.
+ */
+function attributeSystemData(input) {
+  const {
+    cats = {},
+    factor = 1,
+    dockerBytes = 0,
+    devCacheBytes = 0,
+    dotCacheBytes = 0,
+    swapBytes = 0,
+    snapshots = null,
+  } = input || {};
+  const c = (k) => Math.max(0, Number(cats[k]) || 0);
+  const scale = (n) => Math.round(Math.max(0, Number(n) || 0) * factor);
+
+  const docker_ = Math.min(scale(dockerBytes), c('appdata'));
+  const ai = c('aitools');
+  const dev = Math.min(scale(devCacheBytes), c('developer') + c('xcode'));
+  const dotCache = Math.min(scale(dotCacheBytes), c('caches'));
+  const swap = Math.min(scale(swapBytes), c('system'));
+  const otherApp = (c('appdata') - docker_) + (c('caches') - dotCache) + c('browsers');
+  const os_ = c('system') - swap;
+
+  const pieces = [
+    { key: 'docker', label: 'Docker disk image', bytes: docker_, hint: 'What the image really occupies on disk' },
+    { key: 'aitools', label: 'AI tools', bytes: ai, hint: 'Session history, logs and caches from AI coding tools' },
+    { key: 'devcaches', label: 'Developer caches', bytes: dev, hint: 'Package caches, build caches and Xcode data' },
+    { key: 'dotcache', label: '~/.cache', bytes: dotCache, hint: 'Caches kept by command-line tools' },
+    { key: 'swap', label: 'Swap', bytes: swap, hint: 'Memory macOS has paged out to disk' },
+    { key: 'appdata', label: 'App data and other caches', bytes: otherApp, hint: 'Application Support, Library caches and browser data' },
+    { key: 'os', label: 'macOS and other system files', bytes: os_, hint: 'What is left once everything above is accounted for' },
+  ].filter((p) => p.bytes > 0);
+
+  return {
+    platform: 'darwin',
+    estimate: pieces.reduce((a, p) => a + p.bytes, 0),
+    pieces,
+    // APFS does not report how large a snapshot is, so only the count is known.
+    snapshots: snapshots && snapshots.count > 0 ? { count: snapshots.count } : null,
+  };
+}
+
+function localSnapshots() {
+  return new Promise((resolve) => {
+    execFile('tmutil', ['listlocalsnapshots', '/'], { timeout: 5000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      if (err) { resolve(null); return; }
+      const count = String(stdout || '').split('\n').filter((l) => /^com\.apple\./.test(l.trim())).length;
+      resolve({ count });
+    });
+  });
+}
+
+async function measureSystemData({ home, categories, sizeByDir, factor, deadline }) {
+  const measure = async (p) => (sizeByDir.has(p) ? sizeByDir.get(p) : sizeOf(p, deadline));
+
+  const devPaths = [];
+  for (const t of buildSystemTargets({ home })) {
+    const story = t.storyCategory || String(t.category || '').toLowerCase();
+    if (story === 'developer' || story === 'xcode') devPaths.push(...t.paths);
+  }
+  // A path inside another listed path is already counted by its parent.
+  const uniq = Array.from(new Set(devPaths.filter(Boolean)));
+  const topLevel = uniq.filter((p) => !uniq.some((q) => isInside(q, p)));
+
+  const dotCacheDir = path.join(home, '.cache');
+  const [devSizes, dotCacheRaw, swapBytes, snapshots, disk] = await Promise.all([
+    mapLimit(topLevel, 4, measure),
+    measure(dotCacheDir),
+    sizeOf(SWAP_DIR, deadline),
+    localSnapshots(),
+    docker.desktopDisk('darwin', home).catch(() => null),
+  ]);
+
+  const devCacheBytes = devSizes.reduce((a, b) => a + b, 0);
+  // Developer caches that live under ~/.cache are counted as developer caches.
+  const insideDot = topLevel.filter((p) => isInside(dotCacheDir, p));
+  const dotCacheBytes = Math.max(0, dotCacheRaw - insideDot.reduce((a, p) => a + (topLevel.indexOf(p) >= 0 ? devSizes[topLevel.indexOf(p)] : 0), 0));
+
+  const cats = {};
+  for (const cat of categories) cats[cat.key] = cat.bytes;
+  return attributeSystemData({
+    cats,
+    factor,
+    dockerBytes: disk ? disk.allocatedBytes || disk.bytes || 0 : 0,
+    devCacheBytes,
+    dotCacheBytes,
+    swapBytes,
+    snapshots,
+  });
+}
+
 /**
  * Compute a disk usage breakdown for the given home directory.
  * Returns { total, used, free, categories } where categories is a sorted
@@ -256,11 +368,26 @@ async function diskBreakdown(home = os.homedir()) {
     .filter((c) => c.bytes > 0)
     .sort((a, b) => b.bytes - a.bytes);
 
+  // macOS only: the System Data explainer. Never allowed to fail the breakdown.
+  let systemData = null;
+  if (process.platform === 'darwin' && used > 0) {
+    try {
+      systemData = await measureSystemData({
+        home,
+        categories: result,
+        sizeByDir,
+        factor: measuredTotal > used ? used / measuredTotal : 1,
+        deadline: Date.now() + 8000,
+      });
+    } catch { systemData = null; }
+  }
+
   return {
     total,
     used,
     free,
     categories: result,
+    systemData,
     meta: { source: 'disk-breakdown', scannedAt: Date.now(), partial: false },
   };
 }
@@ -289,4 +416,4 @@ async function topChildren(dirs, limit = 25, deadlineMs = 45000) {
     .slice(0, limit);
 }
 
-module.exports = { diskBreakdown, topChildren, parseDuBytes };
+module.exports = { diskBreakdown, topChildren, parseDuBytes, attributeSystemData };

@@ -237,6 +237,16 @@
       )
     );
 
+    // Anonymous usage counts. Stored as the `telemetry` pref: on unless it has
+    // been switched off (unset counts as on).
+    card.appendChild(
+      row(
+        'Share anonymous usage counts',
+        'Once a day Spaci sends a random install ID, the app version and your operating system. Never file names, paths or sizes.',
+        toggle(p.telemetry !== false, () => patchPrefs(store, { telemetry: p.telemetry === false }, true))
+      )
+    );
+
     // Light mode (theme toggle: persist + flip root class + S.theme, re-render)
     card.appendChild(
       row(

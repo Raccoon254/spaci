@@ -409,7 +409,13 @@
       const chosen = projectsNow().filter((p) => sel.has(p.path));
       const n = chosen.length;
       if (!n) { SP.setActionBar(null); return; }
-      const bytes = chosen.reduce((s, p) => s + (p.cleanableSize || 0), 0);
+      // Bulk clean only ever takes items the scan verified as safe. The rest
+      // are cleaned one at a time from the project detail view.
+      const bytes = chosen.reduce((s, p) => s + safeItems(p).reduce((a, it) => a + (it.size || 0), 0), 0);
+      if (!bytes && !chosen.some((p) => safeItems(p).length)) {
+        SP.setActionBar({ count: n + ' project' + (n > 1 ? 's' : ''), size: 'nothing safe to bulk clean', action: 'Open a project to review', danger: false, onClear: () => { selSet().clear(); paint(); }, onClean: () => {} });
+        return;
+      }
       SP.setActionBar({
         count: n + ' project' + (n > 1 ? 's' : ''),
         size: fmt(bytes),
@@ -426,23 +432,28 @@
     async function cleanSelectedProjects(chosen) {
       if (S.cleaning || !chosen.length) return;
       const jobs = [];
-      chosen.forEach((p) => (p.items || []).forEach((it) => jobs.push({ path: it.path, isDir: it.isDir, size: it.size })));
+      chosen.forEach((p) => safeItems(p).forEach((it) => jobs.push({ path: it.path, isDir: it.isDir, size: it.size })));
       if (!jobs.length) return;
       S.cleaning = true;
       try {
         const res = await api.clean(jobs, { scope: 'projects', label: chosen.length + ' project' + (chosen.length === 1 ? '' : 's'), reversible: true });
-        if (res && res.ok !== false) {
-          const freed = res.totalFreed != null ? res.totalFreed : jobs.reduce((s, j) => s + (j.size || 0), 0);
+        const sum = SP.reportClean(res, {
+          fallbackFreed: jobs.reduce((s, j) => s + (j.size || 0), 0),
+          burstLabel: 'across ' + chosen.length + ' project' + (chosen.length === 1 ? '' : 's')
+        });
+        if (sum.ok) {
           // Drop cleaned items from each selected project and recompute sizes.
+          // Anything refused or reported as failed stays listed and selected.
           chosen.forEach((p) => {
-            p.items = [];
-            p.cleanableSize = 0;
-            delete (S.itemSel || {})[p.path];
+            p.items = (p.items || []).filter((it) => sum.blocked(it.path));
+            p.cleanableSize = p.items.reduce((s, it) => s + (it.size || 0), 0);
+            if (!p.items.length) delete (S.itemSel || {})[p.path];
           });
-          selSet().clear();
-          SP.burst(fmt(freed), 'across ' + chosen.length + ' project' + (chosen.length === 1 ? '' : 's'));
+          chosen.forEach((p) => { if (!p.items.length) selSet().delete(p.path); });
         }
-      } catch (_) { /* ignore */ }
+      } catch (err) {
+        SP.reportClean({ ok: false, error: (err && err.message) || 'Clean failed' });
+      }
       S.cleaning = false;
       paint();
     }
@@ -572,7 +583,7 @@
     const items = (p.items || []).slice();
     const sel = (S.itemSel = S.itemSel || {});
     const selKey = p.path;
-    const chosen = (sel[selKey] = sel[selKey] || new Set(items.map((i) => i.path))); // default: all selected
+    const chosen = (sel[selKey] = sel[selKey] || new Set(items.filter((i) => i.safe === true).map((i) => i.path))); // default: safe items only
 
     // ----- back button -----
     host.appendChild(el('button', {
@@ -657,10 +668,11 @@
       hov: 'background:var(--panel);color:var(--text)',
     }, []);
     function renderSelectAllLabel() {
-      const allOn = items.length && chosen.size === items.length;
+      const pick = items.filter((it) => it.safe === true);
+      const allOn = pick.length > 0 && pick.every((it) => chosen.has(it.path));
       selectAllBtn.innerHTML = '';
       selectAllBtn.appendChild(ic('check-circle', 15));
-      selectAllBtn.appendChild(document.createTextNode(allOn ? 'Deselect all' : 'Select all'));
+      selectAllBtn.appendChild(document.createTextNode(allOn ? 'Deselect all' : (pick.length < items.length ? 'Select all safe' : 'Select all')));
     }
     host.appendChild(el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin:26px 0 12px' }, [
       el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600', text: 'Cleanable items (' + items.length + ')' }),
@@ -679,9 +691,10 @@
     }
 
     selectAllBtn.addEventListener('click', () => {
-      const allOn = chosen.size === items.length;
+      const pick = items.filter((it) => it.safe === true);
+      const allOn = pick.length > 0 && pick.every((it) => chosen.has(it.path));
       chosen.clear();
-      if (!allOn) items.forEach((it) => chosen.add(it.path));
+      if (!allOn) pick.forEach((it) => chosen.add(it.path));
       itemRows.forEach((r) => r.sync());
       updateAfterToggle();
     });
@@ -702,8 +715,8 @@
       SP.setActionBar({
         count: n + ' item' + (n > 1 ? 's' : ''),
         size: fmt(freed),
-        action: 'Clean ' + fmt(freed),
-        danger: false,
+        action: (chosenItems.some((i) => i.safe !== true) ? 'Delete ' : 'Clean ') + fmt(freed),
+        danger: chosenItems.some((i) => i.safe !== true),
         onClear: () => { chosen.clear(); itemRows.forEach((r) => r.sync()); updateAfterToggle(); },
         onClean: () => doClean(),
       });
@@ -713,14 +726,29 @@
       if (S.cleaning) return;
       const chosenItems = selectedItems();
       if (!chosenItems.length) return;
+      const risky = chosenItems.filter((i) => i.safe !== true);
+      if (risky.length) {
+        const ok = await SP.confirm({
+          title: 'Delete ' + risky.length + ' unverified item' + (risky.length === 1 ? '' : 's') + '?',
+          body: risky.slice(0, 3).map((i) => i.name + (i.note ? ' (' + i.note + ')' : '')).join('. ') + '. Spaci could not confirm these are rebuildable, so check you no longer need them.',
+          confirmLabel: 'Delete',
+          danger: true,
+          icon: 'trash'
+        });
+        if (!ok) return;
+      }
       S.cleaning = true;
       try {
         const jobs = chosenItems.map((it) => ({ path: it.path, isDir: it.isDir, size: it.size }));
         const res = await api.clean(jobs, { scope: 'projects', label: p.name, reversible: true });
-        if (res && res.ok !== false) {
-          const freed = res.totalFreed != null ? res.totalFreed : chosenItems.reduce((s, i) => s + (i.size || 0), 0);
-          // drop cleaned items from the project and recompute
-          const cleaned = new Set(chosenItems.map((i) => i.path));
+        const sum = SP.reportClean(res, {
+          fallbackFreed: chosenItems.reduce((s, i) => s + (i.size || 0), 0),
+          burstLabel: 'from ' + p.name
+        });
+        if (sum.ok) {
+          // drop cleaned items from the project and recompute; refused or
+          // failed items stay listed
+          const cleaned = new Set(chosenItems.filter((i) => !sum.blocked(i.path)).map((i) => i.path));
           p.items = (p.items || []).filter((i) => !cleaned.has(i.path));
           p.cleanableSize = (p.items || []).reduce((s, i) => s + (i.size || 0), 0);
           delete (S.itemSel || {})[p.path];
@@ -729,9 +757,10 @@
             const idx = S.projects.findIndex((x) => x.path === p.path);
             if (idx >= 0) S.projects[idx] = p;
           }
-          SP.burst(fmt(freed), 'from ' + p.name);
         }
-      } catch (_) { /* ignore */ }
+      } catch (err) {
+        SP.reportClean({ ok: false, error: (err && err.message) || 'Clean failed' });
+      }
       S.cleaning = false;
       if (S.route === 'project') SP.go('project');
     }
@@ -739,6 +768,8 @@
     renderSelectAllLabel();
     syncDetailActionBar();
   };
+
+  function safeItems(p) { return (p.items || []).filter((it) => it.safe === true); }
 
   function buildItemRow(it, chosen, onToggle) {
     const badgeSafe = it.safe;

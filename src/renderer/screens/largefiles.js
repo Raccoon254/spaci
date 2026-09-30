@@ -423,14 +423,19 @@
           label: chosen.length + ' large file' + (chosen.length === 1 ? '' : 's'),
           reversible: false
         });
-        if (res && res.ok !== false) {
-          const freed = res.totalFreed != null ? res.totalFreed : chosen.reduce((a, f) => a + (f.size || 0), 0);
-          const deleted = new Set(chosen.map((f) => f.path));
+        const sum = SP.reportClean(res, {
+          fallbackFreed: chosen.reduce((a, f) => a + (f.size || 0), 0),
+          burstLabel: 'across ' + chosen.length + ' file' + (chosen.length === 1 ? '' : 's')
+        });
+        if (sum.ok) {
+          // Refused or failed files stay listed and selected.
+          const deleted = new Set(chosen.filter((f) => !sum.blocked(f.path)).map((f) => f.path));
           if (S.largeFiles) S.largeFiles.files = (S.largeFiles.files || []).filter((f) => !deleted.has(f.path));
-          selSet().clear();
-          SP.burst(fmt(freed), 'across ' + chosen.length + ' file' + (chosen.length === 1 ? '' : 's'));
+          deleted.forEach((pth) => selSet().delete(pth));
         }
-      } catch (_) { /* ignore */ }
+      } catch (err) {
+        SP.reportClean({ ok: false, error: (err && err.message) || 'Delete failed' });
+      }
       S.largeDeleting = false;
       paint();
     }

@@ -128,6 +128,48 @@ function renderOverlays() {
       ])
     ]));
   }
+  const rp = S.reportCfg;
+  if (rp) {
+    const close = () => { S.reportCfg = null; renderOverlays(); };
+    const tone = rp.tone === 'accent' ? 'sp-cm-accent' : 'sp-cm-danger';
+    const section = (label, rows) => rows.length ? el('div', { style: 'margin-bottom:14px' }, [
+      el('div', { style: 'font-size:13px;color:var(--text-2);font-weight:600;line-height:1.5;margin-bottom:8px', text: label }),
+      el('div', { style: 'display:flex;flex-direction:column;gap:7px' }, rows)
+    ]) : null;
+    const line = (name, path, note) => el('div', { style: 'padding:10px 12px;border-radius:10px;background:var(--panel-2);border:1px solid var(--border);min-width:0' }, [
+      name ? el('div', { style: 'font-weight:600;font-size:13px', text: name }) : null,
+      path ? el('div', { class: 'mono', style: 'color:var(--text-3);font-size:11.5px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: path }) : null,
+      note ? el('div', { style: 'color:var(--text-2);font-size:12.5px;margin-top:3px;line-height:1.5', text: note }) : null
+    ]);
+    const shown = (list) => list.slice(0, 6);
+    const more = (list) => list.length > 6 ? el('div', { style: 'color:var(--text-3);font-size:12px;padding:2px 2px 0', text: 'and ' + (list.length - 6) + ' more' }) : null;
+    const blocks = [];
+    (rp.groups || []).forEach((g) => {
+      const rows = shown(g.items).map((it) => line(it.name, it.path, null));
+      const extra = more(g.items);
+      if (extra) rows.push(extra);
+      blocks.push(section(g.reason, rows));
+    });
+    if ((rp.errors || []).length) {
+      const rows = shown(rp.errors).map((er) => line(null, er.path, er.message));
+      const extra = more(rp.errors);
+      if (extra) rows.push(extra);
+      blocks.push(section('Could not be removed', rows));
+    }
+    h.appendChild(el('div', { style: 'position:absolute;inset:0;z-index:80;background:rgba(0,0,0,.5);display:grid;place-items:center;animation:sp-fadein .2s', onclick: close }, [
+      el('div', { style: 'width:480px;max-width:90%;max-height:86%;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--border-2);border-radius:18px;padding:26px;animation:sp-pop .26s cubic-bezier(.22,.61,.36,1)', onclick: (e) => e.stopPropagation() }, [
+        el('div', { style: 'display:flex;align-items:center;gap:13px;margin-bottom:12px' }, [
+          el('div', { class: tone, style: 'width:44px;height:44px;border-radius:12px;display:grid;place-items:center;flex:none' }, [ic(rp.icon || 'warning', 23)]),
+          el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.3px', text: rp.title })
+        ]),
+        el('div', { style: 'color:var(--text-2);font-size:13.5px;line-height:1.6;margin-bottom:16px', text: rp.lead }),
+        el('div', { class: 'sp-scroll', style: 'overflow-y:auto;min-height:0;margin-bottom:8px' }, blocks),
+        el('div', { style: 'display:flex;justify-content:flex-end;margin-top:8px' }, [
+          el('button', { class: 'sp-ab-accent', style: 'height:42px;padding:0 22px;border-radius:11px;border:none;color:#fff;font-weight:700;font-size:14px;cursor:pointer', onclick: close }, ['Done'])
+        ])
+      ])
+    ]));
+  }
   const bu = S.burstCfg;
   if (bu) {
     h.appendChild(el('div', { style: 'position:absolute;inset:0;z-index:85;display:grid;place-items:center;background:rgba(10,12,10,.42);backdrop-filter:blur(3px);animation:sp-fadein .2s;pointer-events:none' }, [
@@ -165,6 +207,78 @@ function burst(size, label) {
   // full-screen celebration fades (the user wants both).
   toast(size + ' reclaimed', label || 'Cleanup complete');
   setTimeout(() => { S.burstCfg = null; renderOverlays(); }, 2300);
+}
+
+// ---------- clean results ----------
+// Every screen that calls api.clean passes the response through here. The clean
+// IPC can succeed while removing nothing: items may be refused (an AI tool is
+// running) or fail part way. This turns that into one summary and, unless the
+// caller shows its own banner, into a dialog, so a refused clean never looks
+// like a successful "freed 0 B".
+//   state: 'done' (everything removed), 'partial' (some freed, some not),
+//          'blocked' (nothing freed, items refused or failed), 'empty'
+//          (nothing to remove), 'failed' (the clean call itself failed)
+function summariseClean(res, opts) {
+  opts = opts || {};
+  const ok = !!res && res.ok !== false;
+  const refused = ok && Array.isArray(res.refused) ? res.refused.filter(Boolean) : [];
+  const errors = ok && Array.isArray(res.errors) ? res.errors.filter(Boolean) : [];
+  const freed = ok ? (res.totalFreed != null ? Number(res.totalFreed) || 0 : (opts.fallbackFreed || 0)) : 0;
+  const issues = refused.length + errors.length;
+  let state = 'done';
+  if (!ok) state = 'failed';
+  else if (issues && freed > 0) state = 'partial';
+  else if (issues) state = 'blocked';
+  else if (freed <= 0) state = 'empty';
+  const refusedPaths = new Set(refused.map((r) => r.path));
+  const refusedTargets = new Set(refused.map((r) => r.target).filter(Boolean));
+  const errorPaths = errors.map((e) => e.path).filter(Boolean);
+  const sep = /^[a-zA-Z]:[\\/]/.test(errorPaths[0] || '') ? '\\' : '/';
+  return {
+    ok, state, freed, refused, errors, issues, refusedTargets,
+    error: !ok ? ((res && res.error) || 'Clean failed') : null,
+    // True when this path was refused or reported a failure at or below it.
+    blocked: (p) => refusedPaths.has(p) || errorPaths.some((ep) => ep === p || ep.indexOf(p + sep) === 0)
+  };
+}
+function shortHome(p) {
+  const home = S._homeDir;
+  if (p && home && (p === home || p.indexOf(home + '/') === 0)) return '~' + p.slice(home.length);
+  return p || '';
+}
+function reportClean(res, opts) {
+  opts = opts || {};
+  const sum = summariseClean(res, opts);
+  const noun = (n) => n + ' item' + (n === 1 ? '' : 's');
+  if (sum.state === 'done') {
+    burst(fmt(sum.freed), opts.burstLabel);
+    return sum;
+  }
+  if (sum.state === 'failed') {
+    S.reportCfg = { tone: 'danger', title: 'Could not clean', lead: sum.error + '. Nothing was removed.', groups: [], errors: [] };
+  } else if (sum.state === 'empty') {
+    S.reportCfg = { tone: 'accent', icon: 'info', title: 'Nothing was freed', lead: 'The selected items were already empty or gone.', groups: [], errors: [] };
+  } else {
+    const names = opts.names || (() => '');
+    const byReason = new Map();
+    sum.refused.forEach((r) => {
+      const reason = r.reason || 'Spaci left this alone.';
+      if (!byReason.has(reason)) byReason.set(reason, []);
+      byReason.get(reason).push({ name: names(r.target) || '', path: shortHome(r.path) });
+    });
+    const lead = [];
+    if (sum.refused.length) lead.push(noun(sum.refused.length) + (sum.refused.length === 1 ? ' was' : ' were') + ' left alone.');
+    if (sum.errors.length) lead.push(noun(sum.errors.length) + ' could not be removed.');
+    S.reportCfg = {
+      tone: sum.state === 'partial' ? 'accent' : 'danger',
+      title: sum.state === 'partial' ? 'Freed ' + fmt(sum.freed) + ', with some items left' : 'Nothing was cleaned',
+      lead: lead.join(' ') + (sum.state === 'partial' ? '' : ' No space was freed.'),
+      groups: Array.from(byReason, ([reason, items]) => ({ reason, items })),
+      errors: sum.errors.map((e) => ({ path: shortHome(e.path), message: e.error || 'Unknown error' }))
+    };
+  }
+  renderOverlays();
+  return sum;
 }
 
 // ---------- live scan progress banner ----------
@@ -262,7 +376,7 @@ const NAV_TOP = [
   { key: 'system', label: 'System Cleaner', icon: 'broom', count: () => (S.sysTargets || []).length },
   { key: 'largefiles', label: 'Large Files', icon: 'weight' },
   { key: 'storage', label: 'Storage', icon: 'chart' },
-  { key: 'recommendations', label: 'Recommendations', icon: 'sparkles', hot: true, count: () => (S.recs || []).length }
+  { key: 'recommendations', label: 'Recommendations', icon: 'sparkles', hot: true, count: () => (S.recs || []).filter((r) => !(r.action && r.action.type === 'none')).length }
 ];
 const NAV_SOON = [
   { label: 'Scheduled Scans', icon: 'calendar', route: 'scheduled' },
@@ -276,7 +390,7 @@ const NAV_BOTTOM = [
 
 SP_REGISTRY();
 function SP_REGISTRY() {
-  window.SP = { screens: {}, go, state: S, el, ic, ring, fmt, toast, setActionBar, confirm: confirmDialog, burst, beginScan, endScan, scanBanner, scanActive, scanCard };
+  window.SP = { screens: {}, go, state: S, el, ic, ring, fmt, toast, setActionBar, confirm: confirmDialog, burst, beginScan, endScan, scanBanner, scanActive, scanCard, summariseClean, reportClean };
 }
 
 // ---------- shell (built once, then reused; only content swaps on nav) ----------
