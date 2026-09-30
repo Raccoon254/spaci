@@ -878,6 +878,54 @@ ipcMain.handle('fs:top-children', async (_e, dirs) => {
   for (const it of items || []) if (it && parents.has(path.dirname(it.path))) lastTopChildren.add(it.path);
   return items;
 });
+// ---- storage breakdown (os-storage) ----
+// The scan worker keeps each folder's last size between runs
+// (src/os-storage/size-cache.js); utilityProcess inherits this environment.
+process.env.SPACI_STORAGE_CACHE = path.join(app.getPath('userData'), 'storage-sizes.json');
+// storage:measure runs the breakdown with progress snapshots for the Storage
+// screen; the worker joins it with a background refresh already running.
+const storageSenders = new Set();
+let storageRun = null;
+ipcMain.handle('storage:measure', (e) => {
+  if (e && e.sender) storageSenders.add(e.sender);
+  if (storageRun) return storageRun;
+  const onProgress = (snap) => {
+    for (const s of storageSenders) { if (s.isDestroyed()) storageSenders.delete(s); else s.send('storage:progress', snap); }
+  };
+  const started = Date.now();
+  storageRun = work('diskBreakdown', [os.homedir()], { onProgress })
+    .then((b) => {
+      cache.diskBreakdown = { ...b, at: Date.now(), meta: { ...(b.meta || {}), durationMs: Date.now() - started } };
+      writeCache();
+      if (win && !win.isDestroyed()) win.webContents.send('disk:breakdown-updated', cache.diskBreakdown);
+      return cache.diskBreakdown;
+    })
+    .catch((err) => { console.error('[storage] measure failed:', err && err.message); return cache.diskBreakdown || null; })
+    .finally(() => { storageRun = null; storageSenders.clear(); });
+  return storageRun;
+});
+// One click to the Full Disk Access pane (macOS). A fixed URL, never one from the renderer.
+ipcMain.handle('storage:open-fda', async () => {
+  if (process.platform !== 'darwin') return false;
+  try { await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'); return true; } catch { return false; }
+});
+// Reveal a folder the breakdown itself listed (System items, their children,
+// unclassified home folders). Anything else is refused.
+ipcMain.handle('storage:reveal', (_e, p) => {
+  const listed = new Set();
+  const add = (x) => { if (typeof x === 'string' && x) listed.add(x); };
+  for (const c of (cache.diskBreakdown && cache.diskBreakdown.categories) || []) {
+    for (const it of [...(c.os || []), ...(c.areas || []), ...(c.info || []), ...((c.remainder && c.remainder.parts) || [])]) {
+      for (const x of it.paths || []) add(x);
+      for (const ch of it.children || []) add(ch && ch.path);
+    }
+    for (const u of c.unclassified || []) add(u && u.path);
+  }
+  if (typeof p !== 'string' || !listed.has(p)) return 'Not allowed';
+  shell.showItemInFolder(p);
+  return '';
+});
+// ---- end storage breakdown (os-storage) ----
 ipcMain.handle('cache:get', () => cache);
 // Explicit request: bypasses the battery/load gate, joins a run in flight.
 ipcMain.handle('scan:now', () => { if (bgScheduler) bgScheduler.runNow(); return true; });

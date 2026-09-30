@@ -182,7 +182,8 @@ function buildOps(mod) {
 
     scanSystem: (ctx) => mod('system').scanSystem(ctx.progress, ctx.signal),
 
-    diskBreakdown: (ctx, home) => mod('diskbreakdown').diskBreakdown(home),
+    // Storage breakdown (os-storage): progress snapshots while measuring, when asked for.
+    diskBreakdown: (ctx, home) => mod('diskbreakdown').diskBreakdown(home, { onProgress: ctx.progress || undefined, signal: ctx.signal }),
     topChildren: (ctx, dirs, limit, exclude) => mod('diskbreakdown').topChildren(Array.isArray(dirs) ? dirs : [], limit, undefined, Array.isArray(exclude) ? exclude : []),
 
     scanLargeFiles: (ctx, root, minBytes) => mod('largefiles').scanLargeFiles(root, minBytes, ctx.progress, ctx.signal),
