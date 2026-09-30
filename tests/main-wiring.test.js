@@ -71,7 +71,8 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
     nativeImage: { createEmpty: () => img, createFromPath: () => img, createFromNamedImage: () => img },
     powerMonitor: Object.assign(new EventEmitter(), { isOnBatteryPower: () => false, getCurrentThermalState: () => 'nominal' }),
     Notification: Object.assign(class {}, { isSupported: () => false }),
-    net: { isOnline: () => true },
+    // Notices use net.fetch; tests replace it. Never the real network.
+    net: { isOnline: () => true, fetch: async () => { throw new Error('offline (test)'); } },
   };
   const mk = (kind) => (...args) => {
     const d = deferred();
@@ -245,4 +246,98 @@ test('preferences.json and history.json are written atomically (temp file, then 
     fs.renameSync = realRename;
     m.cleanup();
   }
+});
+
+// ---------- notices and What's new ----------
+
+const NOTICE_CHANNELS = ['notices:list', 'notices:dismiss', 'notices:open', 'whatsnew:get', 'whatsnew:seen'];
+
+function seededUserData(prefs, stored) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-notices-'));
+  if (prefs) fs.writeFileSync(path.join(dir, 'preferences.json'), JSON.stringify(prefs));
+  if (stored) fs.writeFileSync(path.join(dir, 'notices.json'), JSON.stringify(stored));
+  return dir;
+}
+const aNotice = (over = {}) => ({
+  id: 'n-1', kind: 'announcement', severity: 'info', title: 'Hello', summary: 'Hi.',
+  body: [{ t: 'p', c: [{ t: 'text', v: 'Body' }] }], media: [], cta: { label: 'Read', url: 'https://spaci.kentom.co.ke/blog' },
+  version: null, audience: {}, startsAt: '2026-01-01T00:00:00Z', endsAt: null, dismissible: true,
+  publishedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', ...over,
+});
+
+test('notices IPC: exactly the contract channels, bridged in preload, safe before the app is ready', async () => {
+  const m = loadMain();
+  try {
+    for (const ch of NOTICE_CHANNELS) assert.equal(typeof m.handlers[ch], 'function', ch);
+    const preload = fs.readFileSync(path.join(SRC, 'preload.js'), 'utf8');
+    const bridged = [...preload.matchAll(/invoke\('((?:notices|whatsnew):[a-z]+)'/g)].map((x) => x[1]).sort();
+    assert.deepEqual(bridged, [...NOTICE_CHANNELS].sort());
+    assert.match(preload, /sub\('notices:updated'/);
+    assert.deepEqual(await m.handlers['notices:list'](), []);
+    assert.equal(await m.handlers['notices:dismiss']({}, 'n-1'), false);
+    assert.equal(await m.handlers['whatsnew:get'](), null);
+  } finally { m.cleanup(); }
+});
+
+test('notices: stored list served, dismissals persisted atomically, junk refused, prefs:set cannot overwrite notice state', async () => {
+  const userData = seededUserData({ onboarded: true, lastSeenVersion: '2.0.0' }, { notices: [aNotice(), aNotice({ id: 'evil', cta: { label: 'x', url: 'javascript:alert(1)' } })] });
+  const m = loadMain(userData);
+  const renames = [];
+  const realRename = fs.renameSync;
+  fs.renameSync = (a, b) => { renames.push([path.basename(a), path.basename(b)]); return realRename(a, b); };
+  try {
+    m.ready.resolve();
+    await flush();
+    const list = await m.handlers['notices:list']();
+    assert.deepEqual(list.map((n) => n.id), ['n-1'], 'the tampered notice is dropped on load');
+    assert.equal(list[0].seen, false);
+    for (const bad of [null, 7, '', 'x'.repeat(200), { id: 'n-1' }]) assert.equal(await m.handlers['notices:dismiss']({}, bad), false);
+    assert.equal(await m.handlers['notices:dismiss']({}, 'n-1'), true);
+    const prefsFile = path.join(m.userData, 'preferences.json');
+    assert.deepEqual(JSON.parse(fs.readFileSync(prefsFile, 'utf8')).dismissedNotices, ['n-1']);
+    assert.ok(renames.some(([a, b]) => b === 'preferences.json' && a.endsWith('.tmp')));
+    assert.deepEqual(await m.handlers['notices:list'](), []);
+    assert.ok(m.sent.some(([ch, p]) => ch === 'notices:updated' && p.reason === 'dismissed'));
+
+    const p = await m.handlers['prefs:set']({}, { dismissedNotices: [], lastSeenVersion: '9.9.9', seenNoticeIds: ['x'], notices: 'no', theme: 'light' });
+    assert.deepEqual(p.dismissedNotices, ['n-1']);
+    assert.equal(p.lastSeenVersion, '2.0.0');
+    assert.equal(p.notices, true);
+    assert.equal(p.theme, 'light');
+    await m.handlers['prefs:set']({}, { notices: false });
+    assert.equal(JSON.parse(fs.readFileSync(prefsFile, 'utf8')).notices, false);
+
+    // What's new after an upgrade (2.0.0 -> 2.1.0), from the site via net.fetch.
+    const urls = [];
+    m.electron.net.fetch = async (url) => {
+      urls.push(url);
+      return { status: 200, text: async () => JSON.stringify({ version: '2.1.0', highlight: 'Hi', body: [{ t: 'script' }, { t: 'hr' }], media: [], links: [] }) };
+    };
+    const w = await m.handlers['whatsnew:get']();
+    assert.deepEqual(urls, ['https://spaci.kentom.co.ke/api/releases/2.1.0/notes']);
+    assert.deepEqual(w, { version: '2.1.0', highlight: 'Hi', body: [{ t: 'hr' }], media: [], links: [] });
+    assert.equal(await m.handlers['whatsnew:seen']({}, '../../x'), false);
+    assert.equal(await m.handlers['whatsnew:seen']({}, '2.1.0'), true);
+    assert.equal(JSON.parse(fs.readFileSync(prefsFile, 'utf8')).lastSeenVersion, '2.1.0');
+    assert.equal(await m.handlers['whatsnew:get'](), null);
+    assert.deepEqual(fs.readdirSync(m.userData).filter((f) => f.endsWith('.tmp')), []);
+    m.appEvents.emit('before-quit');
+  } finally {
+    fs.renameSync = realRename;
+    m.cleanup();
+  }
+});
+
+test('a fresh install records its version at launch and never shows What\'s new', async () => {
+  const m = loadMain();
+  try {
+    let fetched = 0;
+    m.electron.net.fetch = async () => { fetched++; throw new Error('offline'); };
+    m.ready.resolve();
+    await flush();
+    assert.equal(JSON.parse(fs.readFileSync(path.join(m.userData, 'preferences.json'), 'utf8')).lastSeenVersion, '2.1.0');
+    assert.equal(await m.handlers['whatsnew:get'](), null);
+    assert.equal(fetched, 0);
+    m.appEvents.emit('before-quit');
+  } finally { m.cleanup(); }
 });

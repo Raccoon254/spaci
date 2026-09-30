@@ -21,6 +21,9 @@ const { createScanCoordinator, singleFlight, keyedSingleFlight } = require('./sc
 const { createScheduler, backgroundGate, clampIntervalHours, HOUR } = require('./scheduler');
 const { createScanService } = require('./background');
 const { startupRole, focusPlan } = require('./instance');
+const { sanitizeTechId, sanitizeFlavor } = require('./tech-ids');
+const { createNoticesService } = require('./notices');
+const { createMediaCache } = require('./notice-media');
 
 const isDev = process.argv.includes('--dev');
 
@@ -48,7 +51,15 @@ const DEFAULT_PREFS = {
   backgroundScans: true,
   scanIntervalHours: 6,
   autoCheckUpdates: true,
+  // In-app notices (src/notices.js). lastSeenVersion has no default on purpose:
+  // its absence on an onboarded install means an upgrade from before 2.3.
+  notices: true,
+  dismissedNotices: [],
+  seenNoticeIds: [],
 };
+// Written only by the notices service, never through prefs:set, so a renderer
+// that saves a stale copy of its prefs cannot resurrect a dismissed notice.
+const NOTICE_OWNED_PREFS = ['dismissedNotices', 'seenNoticeIds', 'notifiedNoticeIds', 'lastSeenVersion'];
 function loadPrefs() {
   try { return { ...DEFAULT_PREFS, ...JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8')) }; }
   catch { return { ...DEFAULT_PREFS }; }
@@ -59,6 +70,8 @@ function savePrefs(p) {
   try { writeFileAtomic(PREFS_PATH, JSON.stringify(p, null, 2)); }
   catch (e) { console.error('savePrefs', e); }
 }
+/** Merge a few keys into the latest prefs on disk (read, merge, atomic write). */
+function patchPrefs(patch) { savePrefs({ ...loadPrefs(), ...patch }); }
 
 // ---------- anonymous usage ping ----------
 // Once a day: a random install ID, the version and the OS. Nothing else. The
@@ -227,6 +240,57 @@ function createBackgroundScheduler() {
   });
 }
 
+// ---------- notices and What's new ----------
+// Policy, validation and scheduling live in notices.js, notice-model.js and
+// notice-media.js (tested without Electron). This is only the wiring.
+let noticesService = null; // created in app.whenReady
+const NOTICES_PATH = path.join(app.getPath('userData'), 'notices.json');
+const liveNotifications = new Set(); // keeps click handlers alive until the notification goes away
+
+/** Show the main window on one notice. Waits for the page if the window is new. */
+function openNoticeInWindow(id) {
+  showWin();
+  if (!win || win.isDestroyed()) return;
+  const wc = win.webContents;
+  const send = () => { try { if (!wc.isDestroyed()) wc.send('notices:updated', { reason: 'open', id }); } catch (_) { /* window gone */ } };
+  if (typeof wc.isLoading === 'function' && wc.isLoading()) wc.once('did-finish-load', send);
+  else send();
+}
+
+function notifyNotice(notice) {
+  if (!Notification.isSupported()) return;
+  const n = new Notification({ title: notice.title, body: notice.summary || '' });
+  liveNotifications.add(n);
+  const release = () => liveNotifications.delete(n);
+  n.on('click', () => { release(); if (noticesService && noticesService.has(notice.id)) openNoticeInWindow(notice.id); else showWin(); });
+  n.on('close', release);
+  n.show();
+}
+
+// Read at load time, like the other electron imports (the wiring test stubs it).
+const electronNet = require('electron').net;
+function createNotices() {
+  const net = electronNet;
+  // Chromium's network stack (system proxy, certificate store) when available.
+  const fetchImpl = net && typeof net.fetch === 'function' ? (url, init) => net.fetch(url, init) : globalThis.fetch;
+  return createNoticesService({
+    fetchImpl,
+    version: app.getVersion(),
+    platform: telemetry.mapPlatform(process.platform),
+    getPrefs: loadPrefs,
+    patchPrefs,
+    store: {
+      load: () => JSON.parse(fs.readFileSync(NOTICES_PATH, 'utf8')),
+      save: (data) => writeFileAtomic(NOTICES_PATH, JSON.stringify(data)),
+    },
+    media: createMediaCache({ dir: path.join(app.getPath('userData'), 'notice-media') }),
+    notify: notifyNotice,
+    emit: (payload) => { if (win && !win.isDestroyed()) win.webContents.send('notices:updated', payload); },
+    // Bundled with the app (package.json build.files): the offline What's new.
+    readChangelog: () => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'changelog.json'), 'utf8')),
+  });
+}
+
 // ---------- window ----------
 function createWindow() {
   win = new BrowserWindow({
@@ -385,6 +449,8 @@ app.whenReady().then(() => {
   updateTrayTitle();
   bgScheduler = createBackgroundScheduler();
   bgScheduler.start();
+  noticesService = createNotices();
+  noticesService.start();
   const updates = initUpdater(() => win, {
     getPrefs: loadPrefs,
     beforeInstall: () => { isQuitting = true; },
@@ -396,7 +462,7 @@ app.whenReady().then(() => {
   });
   // After sleep, screen unlock or plugging in, re-check once (never a burst):
   // the schedulers recompute from the last completed run.
-  const wake = () => { if (bgScheduler) bgScheduler.wake(); updates.wake(); };
+  const wake = () => { if (bgScheduler) bgScheduler.wake(); updates.wake(); if (noticesService) noticesService.wake(); };
   for (const ev of ['resume', 'unlock-screen', 'on-ac']) {
     try { powerMonitor.on(ev, wake); } catch (_) { /* event not supported on this platform */ }
   }
@@ -408,6 +474,7 @@ app.on('before-quit', () => {
   isQuitting = true;
   // Stop timers and abort every scan; aborted scans can no longer commit.
   if (bgScheduler) bgScheduler.stop();
+  if (noticesService) noticesService.stop();
   const u = getUpdateController();
   if (u) u.stop();
   scanCoordinator.abortAll('quit');
@@ -452,6 +519,23 @@ function getIcon(name) {
   try { svg = fs.readFileSync(path.join(__dirname, 'renderer', 'icons', key + '.svg'), 'utf8'); }
   catch { svg = null; }
   iconCache.set(key, svg);
+  return svg;
+}
+
+// Catppuccin language/framework icons from src/renderer/icons/tech/<flavor>/<id>.svg.
+// The id must be a plain [a-z0-9-] token and the flavor exactly mocha or latte
+// (default mocha), so nothing can escape the folder. Returns null when missing.
+const techIconCache = new Map();
+function getTechIcon(id, flavor) {
+  const key = sanitizeTechId(id);
+  if (!key) return null;
+  const fl = sanitizeFlavor(flavor);
+  const ck = fl + '/' + key;
+  if (techIconCache.has(ck)) return techIconCache.get(ck);
+  let svg = null;
+  try { svg = fs.readFileSync(path.join(__dirname, 'renderer', 'icons', 'tech', fl, key + '.svg'), 'utf8'); }
+  catch { svg = null; }
+  techIconCache.set(ck, svg);
   return svg;
 }
 
@@ -545,10 +629,14 @@ function fmt(b) {
 // ---------- IPC ----------
 ipcMain.handle('prefs:get', () => loadPrefs());
 ipcMain.handle('prefs:set', (_e, patch) => {
-  const p = { ...loadPrefs(), ...(patch && typeof patch === 'object' ? patch : {}) };
+  const clean = { ...(patch && typeof patch === 'object' ? patch : {}) };
+  for (const k of NOTICE_OWNED_PREFS) delete clean[k];
+  if ('notices' in clean && typeof clean.notices !== 'boolean') delete clean.notices;
+  const p = { ...loadPrefs(), ...clean };
   savePrefs(p);
   // Debounced and idempotent: a theme toggle never triggers a scan by itself.
   if (bgScheduler) bgScheduler.reschedule();
+  if (noticesService) noticesService.reschedule();
   const u = getUpdateController();
   if (u) u.reschedule();
   return p;
@@ -566,6 +654,7 @@ ipcMain.handle('disk:breakdown', async () => {
   return await refreshBreakdown();
 });
 ipcMain.handle('icon:get', (_e, name) => getIcon(name));
+ipcMain.handle('techicon:get', (_e, id, flavor) => getTechIcon(id, flavor));
 
 // Biggest immediate children of a category's directories (Storage drill-down).
 ipcMain.handle('fs:top-children', (_e, dirs) => diskbreakdown.topChildren(Array.isArray(dirs) ? dirs : [], 25));
@@ -714,3 +803,12 @@ ipcMain.handle('scan:largefiles', async (e, root, minBytes) => {
 });
 ipcMain.handle('history:get', () => readHistory());
 ipcMain.handle('history:clear', () => { try { writeFileAtomic(HISTORY_PATH, '[]'); } catch (e) { console.error('history:clear', e && e.message); } return []; });
+
+// ---------- notices and What's new (IPC) ----------
+// Every handler validates its input (ids and versions are bounded strings,
+// checked in notices.js) and answers sensibly before the service exists.
+ipcMain.handle('notices:list', () => (noticesService ? noticesService.list() : []));
+ipcMain.handle('notices:dismiss', (_e, id) => (noticesService ? noticesService.dismiss(id) : false));
+ipcMain.handle('notices:open', (_e, id) => (noticesService ? noticesService.open(id) : null));
+ipcMain.handle('whatsnew:get', () => (noticesService ? noticesService.whatsNew() : null));
+ipcMain.handle('whatsnew:seen', (_e, version) => (noticesService ? noticesService.whatsNewSeen(version) : false));

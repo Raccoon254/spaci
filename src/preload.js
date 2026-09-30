@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   topChildren: (dirs) => ipcRenderer.invoke('fs:top-children', dirs),
   icon: (name) => ipcRenderer.invoke('icon:get', name),
   iconSvg: (name) => ipcRenderer.invoke('icon:get', name),
+  techIcon: (id, flavor) => ipcRenderer.invoke('techicon:get', id, flavor),
   logo: (name) => ipcRenderer.invoke('logo:get', name),
   cacheGet: () => ipcRenderer.invoke('cache:get'),
   scanNow: () => ipcRenderer.invoke('scan:now'),
@@ -54,6 +55,14 @@ contextBridge.exposeInMainWorld('api', {
   checkUpdate: () => ipcRenderer.invoke('update:check'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   onUpdateStatus: (cb) => sub('update:status', cb),
+
+  // notices and What's new (main validates every argument)
+  noticesList: () => ipcRenderer.invoke('notices:list'),
+  noticesDismiss: (id) => ipcRenderer.invoke('notices:dismiss', id),
+  noticesOpen: (id) => ipcRenderer.invoke('notices:open', id),
+  whatsNewGet: () => ipcRenderer.invoke('whatsnew:get'),
+  whatsNewSeen: (version) => ipcRenderer.invoke('whatsnew:seen', version),
+  onNoticesUpdated: (cb) => sub('notices:updated', cb),
 
   // events
   onScanProgress: (cb) => sub('scan:progress', cb),
