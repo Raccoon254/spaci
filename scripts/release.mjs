@@ -13,10 +13,18 @@
 //          "major": false, "summary": "...",
 //          "added": [...], "improved": [...], "fixed": [...] }
 //      Do NOT add a "files" array, the build fills sha512 and sizes.
+//      Optional rich fields (highlight, notes, media, links, notice) are
+//      described in changelog/README.md and validated here before tagging.
 //   2. Run:  make release    (or:  npm run release)
+//
+//   node scripts/release.mjs --check   validates the top entry and stops
+//                                      (no version bump, commit or tag).
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { validateEntry } from './changelog-lib.mjs';
+
+const checkOnly = process.argv.includes('--check');
 
 const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
 const git = (...a) => execFileSync('git', a, { stdio: 'inherit' });
@@ -41,6 +49,21 @@ for (const field of ['date', 'summary']) {
   }
 }
 
+// The rich fields: notes file, images, links and the in-app notice. Any error
+// stops the release before anything is changed.
+const { errors, warnings, files: extraFiles } = validateEntry(entry, { root: '.' });
+for (const w of warnings) console.warn(`warning: ${w}`);
+if (errors.length) {
+  console.error(`The ${version} changelog entry has ${errors.length} problem${errors.length === 1 ? '' : 's'}; nothing was released:`);
+  for (const e of errors) console.error(`  - ${e}`);
+  console.error('See changelog/README.md for the format.');
+  process.exit(1);
+}
+if (checkOnly) {
+  console.log(`The ${version} changelog entry is valid.${extraFiles.length ? ` It ships ${extraFiles.length} file(s): ${extraFiles.join(', ')}` : ''}`);
+  process.exit(0);
+}
+
 const tag = `v${version}`;
 if (gitOut('tag', '--list', tag)) {
   console.error(`Tag ${tag} already exists. Bump the version in changelog.json.`);
@@ -55,8 +78,10 @@ if (pkg.version !== version) {
   console.log(`package.json version -> ${version}`);
 }
 
-// Stage and commit only if something actually changed.
-git('add', 'package.json', 'changelog.json');
+// Stage and commit only if something actually changed. The notes and images
+// must be in the tagged commit: the site and the GitHub Release load them from
+// raw.githubusercontent.com at this tag.
+git('add', '--', 'package.json', 'changelog.json', ...extraFiles);
 const staged = gitOut('diff', '--cached', '--name-only');
 if (staged) {
   git('commit', '-m', `Release ${tag}`);

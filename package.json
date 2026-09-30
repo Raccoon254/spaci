@@ -31,7 +31,8 @@
     },
     "files": [
       "src/**/*",
-      "assets/**/*"
+      "assets/**/*",
+      "changelog.json"
     ],
     "publish": [
       {

@@ -17,6 +17,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { releaseBodyTop } from './changelog-lib.mjs';
 
 const REPO = 'Raccoon254/spaci';
 const SITE = 'https://spaci.kentom.co.ke';
@@ -105,6 +106,13 @@ const url = (file) => `https://github.com/${REPO}/releases/download/v${version}/
 // --- markdown --------------------------------------------------------------
 
 const out = [];
+// The custom highlight and the Markdown notes (images from the tag) lead,
+// when the entry has them. Old entries render exactly as before.
+try {
+  out.push(...releaseBodyTop(entry, { root: '.' }));
+} catch (e) {
+  console.error(`warning: could not read the release notes for ${version}: ${e.message}`);
+}
 out.push(entry.summary || `Spaci ${version}.`);
 out.push('');
 

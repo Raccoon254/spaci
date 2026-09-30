@@ -68,6 +68,14 @@ is generated from it, so they cannot tell different stories:
 Artifact names, byte sizes and sha512 values always come from electron-builder's
 `latest*.yml`, never typed by hand.
 
+An entry can also carry a custom highlight, a Markdown notes file with images,
+links and an in-app notice for users on older versions. See
+[changelog/README.md](changelog/README.md). Check an entry without releasing:
+
+```bash
+node scripts/release.mjs --check
+```
+
 Preview the release description before tagging:
 
 ```bash

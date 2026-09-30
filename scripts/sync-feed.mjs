@@ -10,6 +10,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { releaseExtras } from './changelog-lib.mjs';
 
 const SITE = process.env.SITE || 'https://spaci.kentom.co.ke';
 const SECRET = process.env.RELEASE_PUBLISH_SECRET;
@@ -115,7 +116,12 @@ const release = {
   added: entry.added || [],
   improved: entry.improved || [],
   fixed: entry.fixed || [],
-  files
+  files,
+  // Optional rich fields (changelog/README.md): highlight, notes (the Markdown
+  // text, repo-relative images rewritten to raw.githubusercontent.com at the
+  // tag), media, links and notice. Absent from old entries, so their payload
+  // is unchanged.
+  ...releaseExtras(entry, { root: '.' })
 };
 
 const res = await fetch(`${SITE}/api/releases`, {
