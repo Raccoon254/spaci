@@ -170,17 +170,29 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
   const updaterPath = path.join(SRC, 'updater.js');
   delete require.cache[mainPath];
   delete require.cache[updaterPath];
+  // main.js installs process-wide crash handlers. Keep them off this test
+  // process (they would pile up across loads) and hand them to the tests.
+  const PROC_EVENTS = ['uncaughtException', 'unhandledRejection'];
+  const beforeListeners = Object.fromEntries(PROC_EVENTS.map((ev) => [ev, process.listeners(ev)]));
+  const processHandlers = {};
   try {
     require(mainPath);
   } finally {
     Module._load = origLoad;
+    for (const ev of PROC_EVENTS) {
+      for (const fn of process.listeners(ev)) {
+        if (beforeListeners[ev].includes(fn)) continue;
+        process.removeListener(ev, fn);
+        processHandlers[ev] = fn;
+      }
+    }
   }
   const cleanup = () => {
     delete require.cache[mainPath];
     delete require.cache[updaterPath];
     fs.rmSync(userData, { recursive: true, force: true });
   };
-  return { handlers, appEvents, ready, sent, jobs, userData, electron, cleanup, counts, windows, forks, calls, required, requiredAnywhere, appPath };
+  return { handlers, appEvents, ready, sent, jobs, userData, electron, cleanup, counts, windows, forks, calls, required, requiredAnywhere, appPath, processHandlers };
 }
 
 test('startup survives a truncated cache.json and serves an empty, well-formed cache', async () => {
@@ -865,5 +877,42 @@ test('the language cache survives worker restarts: main seeds each scan from tec
     const saved = JSON.parse(fs.readFileSync(path.join(userData, 'tech-cache.json'), 'utf8'));
     assert.deepEqual(saved.map(([k]) => k), ['/home/u/a', '/home/u/b']);
     m.appEvents.emit('before-quit');
+  } finally { m.cleanup(); }
+});
+
+test('crash log: startup failures show a dialog and quit; crashes and rejections are written to main.log', async () => {
+  const boxes = [];
+  const dialog = { showErrorBox: (title, body) => boxes.push([title, body]) };
+  const updater = { initUpdater: () => { throw new Error('updater exploded'); }, getUpdateController: () => null };
+  const m = loadMain(undefined, { dialog, updater });
+  try {
+    const logFile = await m.handlers['app:log-path']();
+    assert.equal(logFile, path.join(m.userData, 'main.log'));
+    m.ready.resolve();
+    await flush();
+    await flush();
+    assert.equal(boxes.length, 1);
+    assert.equal(boxes[0][0], 'Spaci could not start');
+    assert.match(boxes[0][1], /updater exploded/);
+    assert.ok(boxes[0][1].includes(logFile), 'the dialog says where the log is');
+    assert.equal(m.counts.quits, 1, 'no silent process left behind');
+
+    m.processHandlers.uncaughtException(new Error('late bug'));
+    m.processHandlers.unhandledRejection('rejected value');
+    m.appEvents.emit('render-process-gone', {}, { getURL: () => 'file:///app/index.html' }, { reason: 'crashed', exitCode: 11 });
+    m.appEvents.emit('child-process-gone', {}, { type: 'Utility', name: 'Spaci scan worker', reason: 'oom', exitCode: 9 });
+    const text = fs.readFileSync(logFile, 'utf8');
+    assert.match(text, /\[info\] Spaci 2\.1\.0 started/);
+    assert.match(text, /\[error\] startup failed: Error: updater exploded/);
+    assert.match(text, /\[error\] uncaughtException: Error: late bug/);
+    assert.match(text, /\[error\] unhandledRejection: rejected value/);
+    assert.match(text, /\[error\] render-process-gone index\.html: reason=crashed exitCode=11/);
+    assert.match(text, /\[error\] child-process-gone type=Utility name=Spaci scan worker reason=oom exitCode=9/);
+    assert.equal(boxes.length, 1, 'one dialog per session, the log has the rest');
+    // Settings can reveal the log file.
+    const opened = [];
+    m.electron.shell.showItemInFolder = (p) => opened.push(p);
+    assert.equal(await m.handlers['open:reveal']({}, logFile), '');
+    assert.deepEqual(opened, [logFile]);
   } finally { m.cleanup(); }
 });

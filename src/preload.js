@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   getPrefs: () => ipcRenderer.invoke('prefs:get'),
   setPrefs: (patch) => ipcRenderer.invoke('prefs:set', patch),
   home: () => ipcRenderer.invoke('app:home'),
+  logPath: () => ipcRenderer.invoke('app:log-path'),
 
   // disk + icons
   diskUsage: (p) => ipcRenderer.invoke('disk:usage', p),

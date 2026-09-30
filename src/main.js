@@ -1,9 +1,51 @@
 'use strict';
 const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, powerMonitor, Notification } = require('electron');
+const path = require('path');
+
+// ---------- crash log (first, before anything else can fail) ----------
+// Uncaught exceptions, unhandled rejections, renderer and child process crashes
+// and startup failures go to <logs>/main.log, rotated at 1 MB. Settings links to
+// it (app:log-path), so a user can send it with a bug report.
+const { createCrashLog, describeError } = require('./crash-log');
+function logFilePath() {
+  try { if (typeof app.setAppLogsPath === 'function') app.setAppLogsPath(); } catch (_) { /* keep the default */ }
+  try { return path.join(app.getPath('logs'), 'main.log'); } catch (_) { /* not available this early */ }
+  try { return path.join(app.getPath('userData'), 'logs', 'main.log'); } catch (_) { return null; }
+}
+const crashLog = createCrashLog({ file: logFilePath() });
+let crashDialogShown = false;
+/** Tell the user once per session; the log has every occurrence. */
+function showCrashDialog(title, err) {
+  if (crashDialogShown || !dialog || typeof dialog.showErrorBox !== 'function') return;
+  crashDialogShown = true;
+  try {
+    dialog.showErrorBox(title, `${(err && err.message) || String(err)}\n\nDetails were saved to ${crashLog.file || 'the Spaci log'}.`);
+  } catch (_) { /* no dialog before ready on some platforms */ }
+}
+process.on('uncaughtException', (err) => {
+  crashLog.error('uncaughtException', err);
+  console.error('[main] uncaught exception:', err);
+  showCrashDialog('Spaci hit an unexpected error', err);
+});
+process.on('unhandledRejection', (reason) => {
+  crashLog.error('unhandledRejection', reason);
+  console.error('[main] unhandled rejection:', reason);
+});
+app.on('render-process-gone', (_e, wc, details) => {
+  const d = details || {};
+  let url = '';
+  try { url = wc && typeof wc.getURL === 'function' ? path.basename(wc.getURL()) : ''; } catch (_) { /* destroyed */ }
+  crashLog.error(`render-process-gone ${url}: reason=${d.reason} exitCode=${d.exitCode}`);
+});
+app.on('child-process-gone', (_e, details) => {
+  const d = details || {};
+  // A worker the client killed on purpose (idle, quit) exits 'clean-exit' or 'killed'.
+  crashLog[d.reason === 'clean-exit' ? 'info' : 'error'](`child-process-gone type=${d.type} name=${d.name || d.serviceName || ''} reason=${d.reason} exitCode=${d.exitCode}`);
+});
+
 const os = require('os');
 const fs = require('fs');
 const fsp = fs.promises;
-const path = require('path');
 const { execFile } = require('child_process');
 const crypto = require('crypto');
 
@@ -537,8 +579,25 @@ function createTray() {
   createTrayWindow();
 }
 
+/**
+ * Startup failed: say so in a dialog (with where the log is) and quit, rather
+ * than leaving a process with no window.
+ */
+function startupFailed(err) {
+  crashLog.error('startup failed', err);
+  console.error('[main] startup failed:', err);
+  showCrashDialog('Spaci could not start', err);
+  isQuitting = true;
+  try { app.quit(); } catch (_) { /* already quitting */ }
+}
+
 app.whenReady().then(() => {
   if (!isPrimary) return; // quitting: no window, tray, timers or updater
+  crashLog.info(`Spaci ${app.getVersion()} started (${process.platform} ${process.arch}, Electron ${process.versions.electron || 'n/a'})`);
+  startApp();
+}).catch(startupFailed);
+
+function startApp() {
   // Before any clean can run: a 'started' entry left by a crash is not "done".
   recoverInterruptedHistory();
   // Off the startup path; the interval catches an app left open past midnight.
@@ -570,7 +629,7 @@ app.whenReady().then(() => {
     try { powerMonitor.on(ev, wake); } catch (_) { /* event not supported on this platform */ }
   }
   app.on('activate', () => showWin());
-});
+}
 // Keep running in the background (menu-bar tray) even with no windows open.
 app.on('window-all-closed', () => { /* intentionally no quit */ });
 app.on('before-quit', () => {
@@ -762,6 +821,8 @@ ipcMain.handle('prefs:set', (_e, patch) => {
   return p;
 });
 ipcMain.handle('app:home', () => os.homedir());
+// Settings > Diagnostics: where the main log lives (it may not exist yet).
+ipcMain.handle('app:log-path', () => crashLog.file || null);
 ipcMain.handle('win:show', (_e, route) => {
   showWin();
   if (route && win && !win.isDestroyed()) win.webContents.send('nav:go', route);
@@ -1039,6 +1100,7 @@ function openablePaths() {
   for (const t of cache.system || []) out.push(...((t && t.existingPaths) || []));
   const roots = loadPrefs().scanRoots;
   if (Array.isArray(roots)) out.push(...roots);
+  if (crashLog.file) out.push(crashLog.file); // Settings > Diagnostics can reveal the log
   return ipcGuards.knownPathSet(out);
 }
 
