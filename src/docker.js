@@ -744,6 +744,16 @@ const PRUNE_KINDS = {
     safe: true,
     description: 'Untagged image layers left behind by rebuilds. Nothing references them.',
   },
+  // What `docker system df` reports as reclaimable for images: every image no
+  // container uses, not only untagged layers. Needs -a to actually free it.
+  // Not safe: removed images have to be pulled or built again.
+  'unused-images': {
+    id: 'unused-images',
+    name: 'Unused images',
+    args: ['image', 'prune', '-a', '-f'],
+    safe: false,
+    description: 'Removes every image no container uses. Docker downloads or rebuilds an image the next time something needs it, which can take a while for large images.',
+  },
   'stopped-containers': {
     id: 'stopped-containers',
     name: 'Stopped containers',
@@ -810,7 +820,8 @@ function reclaimSuggestions(info) {
   }
   if (images && images.reclaimable >= SUGGEST_MIN_IMAGES) {
     out.push({
-      kind: 'dangling-images',
+      // images.reclaimable is what `image prune -a` frees, so offer that kind.
+      kind: 'unused-images',
       savings: images.reclaimable,
       total: images.count,
       unused: images.count - images.active,

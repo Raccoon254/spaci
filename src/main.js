@@ -506,12 +506,12 @@ function getIcon(name) {
 function dockerRecommendations(info) {
   const COPY = {
     'build-cache': (s) => `${s.unused} of ${s.total} cached build layers are not in use. Docker rebuilds them the next time you build.`,
-    'dangling-images': (s) => `${s.unused} of ${s.total} images have no container using them. Cleaning removes only the untagged layers left behind by rebuilds.`,
+    'unused-images': (s) => `${s.unused} of ${s.total} images have no container using them. Removing them frees this space; Docker downloads or rebuilds an image the next time something needs it.`,
     'desktop-disk': (s) => [s.message, s.sizeNote, s.guidance].filter(Boolean).join(' '),
   };
   const TITLE = {
     'build-cache': 'Docker build cache',
-    'dangling-images': 'Unused Docker images',
+    'unused-images': 'Unused Docker images',
     'desktop-disk': 'Docker disk image',
   };
   // Unknown kinds are dropped rather than crashing the recommendations list.
@@ -527,6 +527,8 @@ function dockerRecommendations(info) {
       body: COPY[s.kind](s),
       // The disk image is explained, not cleaned: pruning needs a running engine.
       action: informational ? { type: 'none' } : { type: 'docker-prune', kind: s.kind },
+      // The prune kind's own safety: unused images must be downloaded again.
+      safe: informational ? true : Boolean(docker.PRUNE_KINDS[s.kind] && docker.PRUNE_KINDS[s.kind].safe),
     };
   });
 }
@@ -673,9 +675,13 @@ ipcMain.handle('docker:kinds', () => Object.values(docker.PRUNE_KINDS)
 
 // Reclaim one allowlisted category. The kind is validated inside docker.prune,
 // so an unexpected value from the renderer can never become a docker argument.
-ipcMain.handle('docker:prune', async (_e, kind) => {
+ipcMain.handle('docker:prune', async (_e, kind, opts) => {
   const spec = docker.PRUNE_KINDS[kind];
   if (!spec) return { ok: false, error: 'Unknown Docker cleanup: ' + kind, freed: 0 };
+  // Same rule as clean: anything that is not safe needs an explicit confirm.
+  if (!spec.safe && !(opts && opts.confirmed === true)) {
+    return { ok: false, error: 'needs-confirmation', freed: 0 };
+  }
   const res = await docker.prune(kind);
   if (res.ok) {
     const at = Date.now();

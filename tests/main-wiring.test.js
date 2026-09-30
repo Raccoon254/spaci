@@ -440,7 +440,9 @@ test('docker prune history is a v2 entry with main-decided reversibility and hin
   const m = loadMain(undefined, { docker: { PRUNE_KINDS, prune: async () => ({ ok: true, freed: 42 }) } });
   try {
     await m.handlers['docker:prune']({}, 'build-cache');
-    await m.handlers['docker:prune']({}, 'stopped-containers');
+    // Not safe: refused without an explicit confirm, runs with one.
+    assert.deepEqual(await m.handlers['docker:prune']({}, 'stopped-containers'), { ok: false, error: 'needs-confirmation', freed: 0 });
+    await m.handlers['docker:prune']({}, 'stopped-containers', { confirmed: true });
     const [stopped, build] = readHistoryFile(m);
     assert.deepEqual(
       [build.v, build.scope, build.reversible, build.restoreHint, build.count, build.freed, build.items.length],

@@ -315,12 +315,17 @@ test('a stopped daemon degrades to a reason, never an exception', async () => {
 
 test('only regenerable things can be pruned', () => {
   const kinds = Object.keys(docker.PRUNE_KINDS);
-  assert.deepEqual(kinds.sort(), ['build-cache', 'dangling-images', 'stopped-containers']);
+  assert.deepEqual(kinds.sort(), ['build-cache', 'dangling-images', 'stopped-containers', 'unused-images']);
   // The whole point: volumes hold real data and must never be offered.
   assert.ok(!kinds.some((k) => /volume/i.test(k)));
   for (const spec of Object.values(docker.PRUNE_KINDS)) {
-    assert.ok(!spec.args.includes('volume'), spec.id + ' must not touch volumes');
-    assert.ok(!spec.args.includes('-a') && !spec.args.includes('--all'), spec.id + ' must not prune everything');
+    assert.ok(!spec.args.includes('volume') && !spec.args.includes('--volumes'), spec.id + ' must not touch volumes');
+    assert.ok(!spec.args.includes('system'), spec.id + ' must not run a system-wide prune');
+    // -a is allowed only where it is the point (unused images) and never safe.
+    if (spec.args.includes('-a') || spec.args.includes('--all')) {
+      assert.equal(spec.id, 'unused-images');
+      assert.equal(spec.safe, false, 'removing every unused image must be confirmed');
+    }
   }
   assert.equal(docker.PRUNE_KINDS['stopped-containers'].safe, false);
 });
@@ -328,7 +333,10 @@ test('only regenerable things can be pruned', () => {
 test('suggestions cover the regenerable categories and skip small change', () => {
   const info = { ok: true, categories: docker.parseSummary(DF_SUMMARY) };
   const kinds = docker.reclaimSuggestions(info).map((s) => s.kind);
-  assert.deepEqual(kinds, ['build-cache', 'dangling-images']);
+  // Docker's reclaimable image figure is what `image prune -a` frees, so the
+  // suggestion must be the kind that actually frees it (2.2.1 offered 2.5 GB
+  // and ran a dangling-only prune that freed nothing).
+  assert.deepEqual(kinds, ['build-cache', 'unused-images']);
   // 3.74 GB of reclaimable volumes on this fixture, deliberately not offered.
   assert.ok(!kinds.includes('volumes'));
 
@@ -375,6 +383,7 @@ test('every prune kind builds exactly the argv it promises', async () => {
   const expected = {
     'build-cache': ['builder', 'prune', '-f'],
     'dangling-images': ['image', 'prune', '-f'],
+    'unused-images': ['image', 'prune', '-a', '-f'],
     'stopped-containers': ['container', 'prune', '-f'],
   };
   for (const [kind, argv] of Object.entries(expected)) {

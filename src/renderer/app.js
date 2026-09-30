@@ -49,6 +49,13 @@ function ic(name, size, opt) {
 const ring = (anim, size, color) => ic('spaci-ring', size, { anim, color });
 
 // ---------- formatting ----------
+// The system disk's everyday name on this OS (the renderer has no process.platform).
+function diskName() {
+  const p = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || '';
+  if (/mac/i.test(p)) return 'Macintosh HD';
+  if (/win/i.test(p)) return 'Local Disk';
+  return 'System disk';
+}
 function fmt(bytes) {
   bytes = Number(bytes) || 0;
   if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(bytes >= 10 * 1024 ** 3 ? 0 : 1) + ' GB';
@@ -615,7 +622,7 @@ function diskMini() {
     hov: 'border-color:var(--border-2)',
     onclick: () => go('storage')
   }, [
-    el('div', { style: 'display:flex;justify-content:space-between;font-size:12px;color:var(--text-2);font-weight:600;margin-bottom:10px' }, [el('span', { text: 'Macintosh HD' }), el('span', { text: free + ' free' })]),
+    el('div', { style: 'display:flex;justify-content:space-between;font-size:12px;color:var(--text-2);font-weight:600;margin-bottom:10px' }, [el('span', { text: diskName() }), el('span', { text: free + ' free' })]),
     el('div', { style: 'height:9px;border-radius:99px;background:var(--track);overflow:hidden;display:flex;gap:2px' }, segs),
     el('div', { style: 'display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:9px' }, [el('span', { text: pct + '% used' }), el('span', { text: total })])
   ]);

@@ -31,6 +31,13 @@ function el(tag, attrs, children) {
 }
 function ic(name, size, opt) { opt = opt || {}; let s = `width:${size}px;height:${size}px`; if (opt.color) s += `;color:${opt.color}`; const a = { name, style: s }; if (opt.anim) a.anim = opt.anim; return el('spaci-icon', a); }
 const ringEl = (anim, size) => el('spaci-icon', { name: 'spaci-ring', anim, style: `width:${size}px;height:${size}px;display:block` });
+// The system disk's everyday name on this OS (the renderer has no process.platform).
+function diskName() {
+  const p = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || '';
+  if (/mac/i.test(p)) return 'Macintosh HD';
+  if (/win/i.test(p)) return 'Local Disk';
+  return 'System disk';
+}
 function fmt(b) { b = Number(b) || 0; if (b >= 1024 ** 3) return (b / 1024 ** 3).toFixed(b >= 10 * 1024 ** 3 ? 0 : 1) + ' GB'; if (b >= 1024 ** 2) return Math.round(b / 1024 ** 2) + ' MB'; if (b >= 1024) return Math.round(b / 1024) + ' KB'; return b + ' B'; }
 function normDisk(d) { if (!d) return null; const total = Number(d.total) || 0; const free = Number(d.free != null ? d.free : d.avail != null ? d.avail : 0) || 0; const used = Number(d.used != null ? d.used : total - free) || 0; return { total, free, used }; }
 // Informational recommendations (the Docker disk image) have nothing to reclaim.
@@ -71,7 +78,7 @@ function render() {
       el('div', { style: 'color:var(--accent-fg)' }, [ringEl(sc ? 'spin' : 'shimmer', 34)]),
       el('div', { style: 'flex:1;min-width:0' }, [
         el('div', { style: 'font-size:15px;font-weight:700;letter-spacing:-.3px' }, [el('span', { text: 'Spaci' }), el('span', { style: 'color:var(--accent-fg)', text: '.' })]),
-        el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:1px', text: 'Macintosh HD · ' + fmt(d.free) + ' free' })
+        el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:1px', text: diskName() + ' · ' + fmt(d.free) + ' free' })
       ])
     ]),
 

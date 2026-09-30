@@ -248,18 +248,27 @@
 
     async function runPrune(kind, label) {
       if (S.dockerPruning) return;
-      const cf = await SP.confirmClean({ title: 'Run Docker cleanup?', count: 1, note: label + '. Docker rebuilds this cache the next time you build.' });
+      const images = kind === 'unused-images';
+      const cf = await SP.confirmClean({
+        title: 'Run Docker cleanup?', count: 1, force: images,
+        note: images
+          ? 'Removes every image no container uses. Docker downloads or rebuilds an image the next time something needs it.'
+          : label + '. Docker rebuilds this cache the next time you build.'
+      });
       if (!cf.go) return;
       S.dockerPruning = kind;
-      S.dockerResult = null;
       paint();
       try {
-        const res = await api.dockerPrune(kind);
-        S.dockerResult = res && res.ok
-          ? { ok: true, text: `Reclaimed ${fmt(res.freed || 0)} from ${label.toLowerCase()}.` }
-          : { ok: false, text: (res && res.error) || 'Docker cleanup failed.' };
+        const res = await api.dockerPrune(kind, { confirmed: cf.confirmed });
+        // Same toast, burst and report as every other clean in the app.
+        if (res && res.ok) {
+          SP.reportClean({ ok: true, totalFreed: res.freed || 0, refused: [], errors: [] }, { burstLabel: 'from ' + label.toLowerCase() });
+        } else {
+          const why = res && res.error === 'needs-confirmation' ? 'Spaci needs your confirmation for this. Try again and confirm' : ((res && res.error) || 'Docker cleanup failed');
+          SP.reportClean({ ok: false, error: why });
+        }
       } catch (err) {
-        S.dockerResult = { ok: false, text: (err && err.message) || 'Docker cleanup failed.' };
+        SP.reportClean({ ok: false, error: (err && err.message) || 'Docker cleanup failed' });
       } finally {
         S.dockerPruning = null;
         paint();
@@ -417,20 +426,14 @@
       const gapNote = disk ? diskImageNote(disk) : null;
       if (gapNote) rows.push(gapNote);
 
-      if (S.dockerResult) {
-        rows.push(el('div', {
-          style: `display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:11px;font-size:12.5px;font-weight:600;background:${S.dockerResult.ok ? 'var(--success-soft)' : 'var(--danger-soft)'};color:${S.dockerResult.ok ? 'var(--success-fg)' : 'var(--danger-fg)'}`,
-        }, [ic(S.dockerResult.ok ? 'check' : 'warning', 16), S.dockerResult.text]));
-      }
-
       const buttons = [];
       if ((c.buildCache.reclaimable || 0) > 0) buttons.push(dockerButton('Reclaim ' + fmt(c.buildCache.reclaimable) + ' build cache', 'build-cache'));
-      if ((c.images.reclaimable || 0) > 0) buttons.push(dockerButton('Remove unused images', 'dangling-images'));
+      if ((c.images.reclaimable || 0) > 0) buttons.push(dockerButton('Remove ' + fmt(c.images.reclaimable) + ' of unused images', 'unused-images'));
       if (buttons.length) rows.push(el('div', { style: 'display:flex;flex-wrap:wrap;gap:9px' }, buttons));
 
       rows.push(el('div', {
         style: 'color:var(--text-3);font-size:11.5px;line-height:1.5',
-        text: 'Volumes are never touched: they hold databases and uploads. Build cache and untagged image layers rebuild on your next build.',
+        text: 'Volumes are never touched: they hold databases and uploads. Build cache rebuilds on your next build; removed images are downloaded or rebuilt when needed.',
       }));
       return shell(rows);
     }

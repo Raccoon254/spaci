@@ -36,7 +36,7 @@ contextBridge.exposeInMainWorld('api', {
   // docker
   dockerStatus: (force) => ipcRenderer.invoke('docker:status', force),
   dockerKinds: () => ipcRenderer.invoke('docker:kinds'),
-  dockerPrune: (kind) => ipcRenderer.invoke('docker:prune', kind),
+  dockerPrune: (kind, opts) => ipcRenderer.invoke('docker:prune', kind, opts),
 
   // cleaning
   clean: (jobs, meta) => ipcRenderer.invoke('clean', jobs, meta),

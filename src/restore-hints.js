@@ -10,6 +10,7 @@
 const SYSTEM_CACHE_HINT = 'Regenerates automatically when the owning app runs.';
 const TRASH_HINT = 'Still in your Trash: put it back from there. The space is freed only when the Trash is emptied.';
 const DOCKER_HINT = 'Docker rebuilds this cache the next time you build.';
+const DOCKER_IMAGES_HINT = 'Docker downloads or rebuilds these images the next time a container or build needs them.';
 const GENERIC_BUILD_HINT = "Run the project's build";
 const FALLBACK_HINT = 'Rebuilds the next time you build or install this project.';
 
@@ -115,10 +116,11 @@ function systemRestoreHint(target) {
 
 /** Docker prune kinds whose data Docker recreates by itself. */
 function dockerRestoreHint(kind) {
+  if (kind === 'unused-images') return DOCKER_IMAGES_HINT;
   return kind === 'build-cache' || kind === 'dangling-images' ? DOCKER_HINT : null;
 }
 
 module.exports = {
-  SYSTEM_CACHE_HINT, TRASH_HINT, DOCKER_HINT, NODE_LOCKFILES,
+  SYSTEM_CACHE_HINT, TRASH_HINT, DOCKER_HINT, DOCKER_IMAGES_HINT, NODE_LOCKFILES,
   artifactRestoreHint, systemRestoreHint, dockerRestoreHint, baseName,
 };
