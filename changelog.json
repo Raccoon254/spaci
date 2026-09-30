@@ -1,8 +1,50 @@
 [
   {
+    "version": "2.3.0",
+    "date": "2026-10-01",
+    "tag": "Latest",
+    "major": false,
+    "summary": "Clean all developer files in one go, optional auto-clean with a 24 hour undo, and a Storage screen that explains your whole disk.",
+    "highlight": "Clean all developer files in one go, and see what your whole disk is used for",
+    "notes": "changelog/2.3.0.md",
+    "links": [
+      {
+        "label": "Download Spaci",
+        "url": "https://spaci.kentom.co.ke/download"
+      }
+    ],
+    "notice": {
+      "severity": "update",
+      "title": "Spaci 2.3 is here",
+      "summary": "Clean all developer files in one go, optional auto-clean with undo, and a Storage screen that explains your whole disk.",
+      "cta": {
+        "label": "Get 2.3",
+        "url": "https://spaci.kentom.co.ke/download"
+      },
+      "endsInDays": 30
+    },
+    "added": [
+      "Clean all developer files: every verified build folder and package cache in one go, after one confirm that lists what goes and how it comes back.",
+      "Risk tiers everywhere: Safe, Review and Permanent, each with the right kind of confirm.",
+      "Optional auto-clean for stale projects and large package caches, with a preview to approve first and Undo in History for 24 hours.",
+      "Storage accounts for system space on macOS, Windows and Linux, with the system cleanup command for items your system manages.",
+      "What is new and in-app notices, with a Settings switch.",
+      "Docker volumes grouped by project with per-volume removal, and Restart Docker when it stops responding.",
+      "Logos for AI tools, Docker, browsers, languages and frameworks."
+    ],
+    "improved": [
+      "Scans run in a background process, so the window never freezes.",
+      "Keyboard and screen reader support, stronger contrast and reduced motion.",
+      "Reclaimable figures count only what a clean would actually remove.",
+      "Linux: a tray menu, and the window closes the app when there is no tray.",
+      "Crashes at startup are logged, with the log reachable from Settings."
+    ],
+    "fixed": []
+  },
+  {
     "version": "2.2.2",
     "date": "2026-09-30",
-    "tag": "Latest",
+    "tag": "Feature",
     "major": false,
     "summary": "Docker image cleanup now frees the space it promises, and Storage explains what the System figure is made of.",
     "added": [
