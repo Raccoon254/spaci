@@ -65,7 +65,7 @@ function parseYml(text) {
 function fromFeeds(dir) {
   const out = [];
   const seen = new Set();
-  for (const name of ['latest-mac.yml', 'latest.yml', 'latest-linux.yml']) {
+  for (const name of ['latest-mac.yml', 'latest.yml', 'latest-linux.yml', 'deb-linux.yml']) {
     const p = join(dir, name);
     if (!existsSync(p)) continue;
     for (const f of parseYml(readFileSync(p, 'utf8'))) {
@@ -85,6 +85,7 @@ function conventional(v) {
     { file: `Spaci-${v}.dmg` },
     { file: `Spaci-Setup-${v}.exe` },
     { file: `Spaci-${v}.AppImage` },
+    { file: `spaci_${v}_amd64.deb` },
   ];
 }
 
@@ -92,11 +93,12 @@ const artifacts = feedDir ? fromFeeds(feedDir) : conventional(version);
 
 // What a person should actually download: installers, never the update-only
 // .zip builds or the .blockmap deltas.
-const INSTALLER = /\.(dmg|exe|AppImage)$/i;
+const INSTALLER = /\.(dmg|exe|AppImage|deb)$/i;
 const label = (file) => {
   if (/\.dmg$/i.test(file)) return /arm64/i.test(file) ? 'macOS (Apple Silicon)' : 'macOS (Intel)';
   if (/\.exe$/i.test(file)) return 'Windows';
-  if (/\.AppImage$/i.test(file)) return 'Linux';
+  if (/\.AppImage$/i.test(file)) return 'Linux (AppImage, needs libfuse2)';
+  if (/\.deb$/i.test(file)) return 'Linux (Ubuntu, Debian)';
   return null;
 };
 const mb = (bytes) => (bytes ? `${Math.round(bytes / (1024 * 1024))} MB` : '');

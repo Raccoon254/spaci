@@ -68,6 +68,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # electron-updater has no feed for a .deb, so describe it in the same
+      # shape for the website sync and the release notes.
+      - name: Describe the deb for the website
+        if: matrix.platform == 'linux'
+        run: |
+          node -e '
+          const fs = require("fs"), crypto = require("crypto"), path = require("path");
+          const deb = fs.readdirSync("release").find((f) => f.endsWith(".deb"));
+          if (!deb) { console.log("no deb built"); process.exit(0); }
+          const buf = fs.readFileSync(path.join("release", deb));
+          const sha512 = crypto.createHash("sha512").update(buf).digest("base64");
+          const version = require("./package.json").version;
+          fs.writeFileSync("release/deb-linux.yml", `version: ${version}\nfiles:\n  - url: ${deb}\n    sha512: ${sha512}\n    size: ${buf.length}\n`);
+          console.log(fs.readFileSync("release/deb-linux.yml", "utf8"));'
+
       # A tag with a suffix (v2.2.0-rc.1) is a release candidate: it becomes a
       # GitHub prerelease for testing and is never synced to the update feed.
       - name: Publish installers to the GitHub Release
@@ -88,7 +103,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: feed-${{ matrix.os }}
-          path: release/latest*.yml
+          path: |
+            release/latest*.yml
+            release/deb-linux.yml
           if-no-files-found: ignore
 
   sync-feed:
@@ -112,7 +129,7 @@ jobs:
       - name: Flatten feed files
         run: |
           mkdir -p feed
-          find feed-artifacts -name 'latest*.yml' -exec cp {} feed/ \;
+          find feed-artifacts \( -name 'latest*.yml' -o -name 'deb-linux.yml' \) -exec cp {} feed/ \;
           ls -la feed
 
       - name: Publish release metadata to spaci.kentom.co.ke
