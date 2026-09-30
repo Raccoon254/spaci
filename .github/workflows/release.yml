@@ -67,6 +67,7 @@ jobs:
 
       - name: Build and package (Windows / Linux)
         if: matrix.platform != 'mac'
+        shell: bash   # the Linux deb pass below is bash; Windows defaults to PowerShell
         run: |
           npx electron-builder ${{ matrix.args }} --publish never
           if [ "${{ matrix.platform }}" = linux ]; then
