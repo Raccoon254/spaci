@@ -322,7 +322,7 @@
           el('div', { style: 'font-size:31px;font-weight:700;letter-spacing:-1.1px', text: 'Projects' }),
           el('div', { style: 'color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:540px', text: 'Regenerable build artifacts: node_modules, target, .next, __pycache__ and more.' }),
         ]),
-        el('div', { style: 'display:flex;gap:10px;flex:none' }, [chooseBtn, scanBtn]),
+        el('div', { style: 'display:flex;gap:10px;flex:none' }, [SP.cleanAllButton ? SP.cleanAllButton() : null, chooseBtn, scanBtn]),
       ]));
     }
 
@@ -946,6 +946,7 @@
   //  PROJECT DETAIL
   // =====================================================================
   SP.screens.project = function (host) {
+    if (SP.tiers) SP.tiers.ensure();
     const p = S.currentProject;
     if (!p) { SP.go('projects'); return; }
     const en = enrichOf(p) || {};
@@ -1138,9 +1139,10 @@
   function safeItems(p) { return (p.items || []).filter((it) => it.safe === true); }
 
   function buildItemRow(it, chosen, onToggle, p) {
-    // Three tiers, as everywhere: Safe (green), Review (amber), Permanent (red).
-    const risk = it.reversible === false ? { cls: 'sp-badge-warn', text: 'Permanent' }
-      : it.safe === true ? { cls: 'sp-badge-safe', text: 'Safe' } : { cls: 'sp-badge-caution', text: 'Review' };
+    // Three tiers, as everywhere: Safe (green), Review (amber), Permanent (red),
+    // decided by main (src/clean-tiers.js) via SP.tiers.
+    const tier = SP.tiers ? SP.tiers.item(it) : (it.reversible === false ? 'C' : it.safe === true ? 'A' : 'B');
+    const risk = SP.tiers ? SP.tiers.badge(tier) : { A: { cls: 'sp-badge-safe', text: 'Safe' }, B: { cls: 'sp-badge-caution', text: 'Review' }, C: { cls: 'sp-badge-warn', text: 'Permanent' } }[tier];
     const locked = it.safe !== true; // unverified: information only, never cleaned by Spaci
     const check = locked ? el('div', { style: 'width:24px;flex:none' }) : el('div', {
       class: chosen.has(it.path) ? 'sp-check-on' : '',
