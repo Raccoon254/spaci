@@ -238,14 +238,14 @@ function parseApfsVolumes(list, containerRef) {
 }
 function plist(args) {
   return new Promise((resolve) => {
-    execFile('/bin/sh', ['-c', `diskutil ${args} -plist | plutil -convert json -o - -`], { timeout: 8000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+    execFile('/bin/sh', ['-c', `diskutil ${args} | plutil -convert json -o - -`], { timeout: 8000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
       if (err) { resolve(null); return; }
       try { resolve(JSON.parse(stdout)); } catch { resolve(null); }
     });
   });
 }
 async function osVolumes() {
-  const [info, list] = await Promise.all([plist('info /'), plist('apfs list')]);
+  const [info, list] = await Promise.all([plist('info -plist /'), plist('apfs list -plist')]);
   if (!info || !list || !info.APFSContainerReference) return [];
   return parseApfsVolumes(list, info.APFSContainerReference);
 }
@@ -480,4 +480,4 @@ async function topChildren(dirs, limit = 25, deadlineMs = 45000, exclude = []) {
     .slice(0, limit);
 }
 
-module.exports = { diskBreakdown, topChildren, parseDuBytes, attributeSystemData, parseApfsVolumes };
+module.exports = { diskBreakdown, topChildren, parseDuBytes, attributeSystemData, parseApfsVolumes, osVolumes };
