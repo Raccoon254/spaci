@@ -184,10 +184,10 @@
     lines.push('Build output and package caches: ' + plan.count + (plan.count === 1 ? ' item' : ' items')
       + (plan.projects ? ' across ' + plan.projects + (plan.projects === 1 ? ' project' : ' projects') : '') + '.');
     lines.push('');
-    plan.groups.slice(0, 6).forEach((g) => {
-      lines.push(g.label + ', ' + g.count + ' (' + fmt(g.bytes) + '). Back with: ' + g.hint + '.');
+    plan.groups.forEach((g) => {
+      lines.push('• ' + g.label + ': ' + g.count + ' (' + fmt(g.bytes) + ')');
+      if (g.hint) lines.push('   Comes back: ' + String(g.hint).replace(/\.$/, '') + '.');
     });
-    if (plan.groups.length > 6) lines.push('and ' + (plan.groups.length - 6) + ' more kinds, ' + fmt(plan.groups.slice(6).reduce((a, g) => a + g.bytes, 0)) + '.');
     lines.push('');
     lines.push('Everything rebuilds on the next install or build. App caches, the Maven repository, AI tool history, the Trash and anything unverified are not included.');
     return lines.join('\n');
@@ -298,7 +298,7 @@
     const reclaimSpace = reclaimStr.lastIndexOf(' ');
     const defaultNum = totalReclaim ? reclaimStr.slice(0, reclaimSpace) : '0';
     const defaultUnit = totalReclaim ? reclaimStr.slice(reclaimSpace + 1) : 'B';
-    const defaultSub = totalReclaim ? 'top recommendations' : "you're all clear";
+    const defaultSub = totalReclaim ? 'top recommendations' : (S.lastScan ? "you're all clear" : 'run a scan to find space');
 
     const centerNum = el('span', { text: defaultNum });
     const centerUnit = el('span', { style: 'font-size:17px;font-weight:600;letter-spacing:-.3px;color:var(--accent-fg);margin-left:3px', text: defaultUnit });

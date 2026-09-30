@@ -661,7 +661,8 @@
           // Anything refused or reported as failed stays listed and selected.
           chosen.forEach((p) => {
             p.items = (p.items || []).filter((it) => !sent.has(it.path) || sum.blocked(it.path));
-            p.cleanableSize = p.items.reduce((s, it) => s + (it.size || 0), 0);
+            // Only verified items count, as the scanner does: an unverified venv is never cleaned.
+            p.cleanableSize = p.items.reduce((s, it) => s + (it.safe === true ? (it.size || 0) : 0), 0);
             if (!p.items.length) delete (S.itemSel || {})[p.path];
           });
           chosen.forEach((p) => { if (!p.items.length) selSet().delete(p.path); });
@@ -1117,7 +1118,7 @@
           // failed items stay listed
           const cleaned = new Set(chosenItems.filter((i) => !sum.blocked(i.path)).map((i) => i.path));
           p.items = (p.items || []).filter((i) => !cleaned.has(i.path));
-          p.cleanableSize = (p.items || []).reduce((s, i) => s + (i.size || 0), 0);
+          p.cleanableSize = (p.items || []).reduce((s, i) => s + (i.safe === true ? (i.size || 0) : 0), 0);
           delete (S.itemSel || {})[p.path];
           // refresh the cached list entry too
           if (Array.isArray(S.projects)) {

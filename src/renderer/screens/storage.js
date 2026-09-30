@@ -137,10 +137,17 @@
     C: { label: 'Your data', cls: 'sp-badge-warn', title: 'Tier C: your data or irreversible; decide item by item' },
     D: { label: 'Managed by the OS', cls: 'sp-badge-accent', title: 'Tier D: managed by the operating system; Spaci explains it and never cleans it' },
   };
+  // Same Safe / Review / Permanent pills as every other screen; D (managed by
+  // the OS) is the one extra, since nothing else in the app has it.
   function tierChip(t) {
     const m = TIER[t];
     if (!m) return null;
-    return el('span', { class: m.cls, title: m.title, style: 'display:inline-flex;align-items:center;padding:2px 8px;border-radius:99px;font-size:10.5px;font-weight:700;letter-spacing:.2px;white-space:nowrap;flex:none', text: t + ' · ' + m.label });
+    if (t !== 'D' && SP.tiers && typeof SP.tiers.pill === 'function') {
+      const pill = SP.tiers.pill(t);
+      pill.title = m.title;
+      return pill;
+    }
+    return el('span', { class: m.cls, title: m.title, style: 'display:inline-flex;align-items:center;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700;white-space:nowrap;flex:none', text: m.label });
   }
   const CONF = {
     partial: 'Partial: ran out of time, bytes so far',

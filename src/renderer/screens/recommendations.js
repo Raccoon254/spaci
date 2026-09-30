@@ -321,6 +321,10 @@
         class: 'sp-hov',
         style: `display:flex;align-items:center;gap:16px;padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid ${borderColor};cursor:pointer`,
         hov: 'border-color:var(--border-2);transform:translateX(2px)',
+        // Mouse users can click anywhere on the card; keyboard and screen
+        // reader users get one control, the Clean button inside it.
+        role: 'presentation',
+        tabindex: '-1',
         onclick: () => openAction(r),
       }, [
         el('div', { style: 'width:48px;height:48px;border-radius:13px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [recMark(r, 25)]),

@@ -66,8 +66,11 @@ test('a complete, valid entry passes and lists the files the release commit must
 test('old entries without the new fields validate and add nothing to the payloads', async () => {
   const { validateEntry, releaseExtras, releaseBodyTop } = await lib();
   const changelog = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'changelog.json'), 'utf8'));
+  const RICH = ['highlight', 'notes', 'media', 'links', 'notice'];
   for (const e of changelog) {
     assert.deepEqual(validateEntry(e, { root: path.join(__dirname, '..') }).errors, [], e.version);
+    // Entries that use the rich fields are covered by the tests above.
+    if (RICH.some((k) => e[k] !== undefined)) continue;
     assert.deepEqual(releaseExtras(e), {});
     assert.deepEqual(releaseBodyTop(e), []);
   }

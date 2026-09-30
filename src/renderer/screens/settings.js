@@ -691,7 +691,7 @@
           el('div', {
             style: 'color:var(--text-2);font-size:12.5px;margin-top:2px',
             text:
-              'Spaci only ever targets regenerable caches and build output, never your source code or files.',
+              'Spaci never touches your source code. Build output and caches it has verified rebuild on their own; anything permanent, and files you pick in Large Files, are only removed after you confirm, and large files go to the Trash.',
           }),
         ]),
         el('button', {

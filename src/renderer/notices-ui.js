@@ -88,7 +88,8 @@
     (Array.isArray(blocks) ? blocks.slice(0, MAX_BLOCKS) : []).forEach((b) => {
       if (!b || typeof b !== 'object') return;
       let node = null;
-      if (b.t === 'h') node = el(b.level === 2 ? 'h3' : 'h4', { class: 'sp-nb-h' + (b.level === 2 ? '2' : '3') }, inlines(b.c, 1));
+      // Always h3 under the sheet's h2 so headings never skip a level; the class keeps the visual size.
+      if (b.t === 'h') node = el('h3', { class: 'sp-nb-h' + (b.level === 2 ? '2' : '3') }, inlines(b.c, 1));
       else if (b.t === 'p') node = el('p', { class: 'sp-nb-p' }, inlines(b.c, 1));
       else if (b.t === 'ul' || b.t === 'ol') {
         node = el(b.t, { class: 'sp-nb-list' }, (Array.isArray(b.items) ? b.items : []).map((it) => el('li', {}, inlines(it, 1))));
