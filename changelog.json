@@ -1,8 +1,27 @@
 [
   {
-    "version": "2.2.1",
+    "version": "2.2.2",
     "date": "2026-09-30",
     "tag": "Latest",
+    "major": false,
+    "summary": "Docker image cleanup now frees the space it promises, and Storage explains what the System figure is made of.",
+    "added": [
+      "Storage: the System category now opens a breakdown. On macOS it lists the system volumes (macOS itself, Preboot, Recovery, swap), then the biggest folders no other category counts, such as Homebrew, Xcode simulators and hidden folders in your home, each with an Open button."
+    ],
+    "improved": [
+      "Docker cleanup results use the same notification as every other clean.",
+      "The disk card names your disk the way your system does, instead of always saying Macintosh HD."
+    ],
+    "fixed": [
+      "Unused Docker images: Spaci showed their size but ran a cleanup that only removes untagged layers, so nothing was freed and the item came back after every scan. It now removes the unused images, asks first (they have to be downloaded or rebuilt again), and the item disappears once they are gone.",
+      "A cleanup that freed nothing no longer shows as Cleaned.",
+      "Storage: very large folders that took too long to measure were counted as empty, which inflated System by tens of GB. They now get more time, and any folder still not measured is named instead of hidden in System."
+    ]
+  },
+  {
+    "version": "2.2.1",
+    "date": "2026-09-30",
+    "tag": "Feature",
     "major": false,
     "summary": "A safety and honesty update: nothing irreversible is deleted without asking, large files go to the Trash, and History records exactly what happened.",
     "added": [
