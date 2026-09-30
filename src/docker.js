@@ -751,6 +751,17 @@ const PRUNE_KINDS = {
     safe: false,
     description: 'Removes stopped containers. Their volumes and images are kept.',
   },
+  // Tagged images are where most engine space goes, and `image prune -f` never
+  // touches them. `-a` removes every image no container (running or stopped)
+  // uses. Nothing is lost for good, but each one downloads or rebuilds again on
+  // next use, so it is opt-in.
+  'unused-images': {
+    id: 'unused-images',
+    name: 'Unused images',
+    args: ['image', 'prune', '-a', '-f'],
+    safe: false,
+    description: 'Removes every image no container uses, tagged or not. They download or rebuild again the next time you need them.',
+  },
 };
 
 // Below these, a suggestion is noise rather than a win.
@@ -796,7 +807,10 @@ function reclaimSuggestions(info) {
     return out;
   }
 
-  const { buildCache, images } = info.categories;
+  const { buildCache, images, volumes } = info.categories;
+  const note = disk ? diskNote(platform) : null;
+  // Per-item detail exists only on a full (non-partial) inventory.
+  const detail = !info.partial && Array.isArray(info.images) && info.images.length > 0;
 
   if (buildCache && buildCache.reclaimable >= SUGGEST_MIN_BUILD_CACHE) {
     out.push({
@@ -805,22 +819,88 @@ function reclaimSuggestions(info) {
       total: buildCache.count,
       unused: buildCache.count - buildCache.active,
       severity: buildCache.reclaimable > SUGGEST_HIGH ? 'high' : 'normal',
-      note: disk ? diskNote(platform) : null,
+      note,
     });
   }
-  if (images && images.reclaimable >= SUGGEST_MIN_IMAGES) {
+  if (images) {
+    // Docker's image "reclaimable" counts every unused image, tagged or not,
+    // which is what `image prune -a` frees. `image prune` (dangling) frees only
+    // the untagged ones, so size it from the detail when we have it.
+    const dangling = detail
+      ? info.images.filter((i) => i.dangling && i.containers === 0)
+      : null;
+    const danglingBytes = dangling
+      ? dangling.reduce((s, i) => s + (i.uniqueBytes || i.bytes), 0)
+      : images.reclaimable;
+    if (danglingBytes >= SUGGEST_MIN_IMAGES) {
+      out.push({
+        kind: 'dangling-images',
+        savings: danglingBytes,
+        total: images.count,
+        unused: dangling ? dangling.length : images.count - images.active,
+        severity: danglingBytes > SUGGEST_HIGH ? 'high' : 'normal',
+        estimated: !dangling,
+        note,
+      });
+    }
+    if (images.reclaimable >= SUGGEST_MIN_IMAGES) {
+      out.push({
+        kind: 'unused-images',
+        savings: images.reclaimable,
+        total: images.count,
+        unused: images.count - images.active,
+        severity: images.reclaimable > SUGGEST_HIGH ? 'high' : 'normal',
+        // Opt-in: the UI must confirm, since the images download again.
+        optIn: true,
+        safe: false,
+        note,
+      });
+    }
+  }
+
+  // Volumes are never offered for pruning, however large: they are the only
+  // Docker storage that cannot be regenerated. The user is told they exist and
+  // sent to review them one by one, nothing more.
+  const unusedVolumes = unusedVolumeSummary(info, volumes);
+  if (unusedVolumes && unusedVolumes.bytes >= SUGGEST_MIN_BUILD_CACHE) {
     out.push({
-      kind: 'dangling-images',
-      savings: images.reclaimable,
-      total: images.count,
-      unused: images.count - images.active,
-      severity: images.reclaimable > SUGGEST_HIGH ? 'high' : 'normal',
-      note: disk ? diskNote(platform) : null,
+      kind: 'unused-volumes',
+      informational: true,
+      action: 'review',
+      prune: null,
+      savings: 0,
+      bytes: unusedVolumes.bytes,
+      count: unusedVolumes.count,
+      topProjects: unusedVolumes.topProjects,
+      severity: 'info',
+      message: 'Volumes no container uses. They can hold databases and uploads, so review them one at a time.',
+      note,
     });
   }
-  // Volumes are never suggested, however large: they are the only Docker
-  // storage that cannot be regenerated.
   return out;
+}
+
+/** Count, size and the biggest compose projects among unused volumes. */
+function unusedVolumeSummary(info, category) {
+  const list = Array.isArray(info.volumes) && info.volumes.length && !info.partial ? info.volumes : null;
+  if (list) {
+    const unused = list.filter((v) => (v.links || 0) === 0);
+    const byProject = new Map();
+    for (const v of unused) {
+      const key = v.project || null;
+      const cur = byProject.get(key) || { project: key, count: 0, bytes: 0 };
+      cur.count += 1;
+      cur.bytes += v.bytes || 0;
+      byProject.set(key, cur);
+    }
+    const topProjects = [...byProject.values()]
+      .filter((p) => p.project)
+      .sort((a, b) => b.bytes - a.bytes)
+      .slice(0, 3);
+    return { count: unused.length, bytes: unused.reduce((s, v) => s + (v.bytes || 0), 0), topProjects };
+  }
+  if (!category) return null;
+  return { count: category.count - category.active, bytes: category.reclaimable, topProjects: [] };
 }
 
 /** '...Total reclaimed space: 5.765GB' -> bytes. */
@@ -828,17 +908,6 @@ function parseReclaimed(stdout) {
   const m = String(stdout || '').match(/Total reclaimed space:\s*([\d.]+\s*[a-zA-Z]*)/);
   return m ? parseSize(m[1]) : 0;
 }
-
-// Volumes are not in PRUNE_KINDS so nothing that lists the allowlist can offer
-// them. They are reachable only through prune('volumes', { confirmVolumes: true }).
-// No `-a`: on current Docker that would also remove named volumes.
-const VOLUME_PRUNE = {
-  id: 'volumes',
-  name: 'Unused volumes',
-  args: ['volume', 'prune', '-f'],
-  safe: false,
-  description: 'Removes volumes no container uses. Databases and uploads live here and cannot be recovered.',
-};
 
 /** Why freed space may not show up on the host, worded for each platform. */
 function diskNote(platform = process.platform) {
@@ -854,16 +923,14 @@ function diskNote(platform = process.platform) {
 const DISK_NOTE = diskNote();
 
 /**
- * Run one prune. Unknown kinds are refused, never passed through. Volumes need
- * an explicit `options.confirmVolumes === true` on top of naming the kind.
+ * Run one prune. Unknown kinds are refused, never passed through. Volumes can
+ * never be pruned: they hold databases and uploads, so the only way to remove
+ * one is removeVolume(), one volume at a time, confirmed by its exact name.
  */
 async function prune(kind, options = {}) {
-  let spec = Object.prototype.hasOwnProperty.call(PRUNE_KINDS, kind) ? PRUNE_KINDS[kind] : null;
+  const spec = Object.prototype.hasOwnProperty.call(PRUNE_KINDS, kind) ? PRUNE_KINDS[kind] : null;
   if (kind === 'volumes') {
-    if (options.confirmVolumes !== true) {
-      return { ok: false, error: 'Removing volumes needs explicit confirmation', freed: 0 };
-    }
-    spec = VOLUME_PRUNE;
+    return { ok: false, error: 'Volumes are never removed in bulk. Review them and remove one at a time.', freed: 0 };
   }
   if (!spec) return { ok: false, error: `Unknown prune kind: ${kind}`, freed: 0 };
 
@@ -892,6 +959,463 @@ async function prune(kind, options = {}) {
   return { ok: true, kind, freed: parseReclaimed(res.stdout), output: res.stdout.trim(), note: diskNote(options.platform) };
 }
 
+// ---------------------------------------------------------------------------
+// Volumes: listed in full, removed one at a time and only by exact name
+// ---------------------------------------------------------------------------
+
+const VOLUME_INSPECT_BATCH = 50;
+const VOLUME_INSPECT_TIMEOUT_MS = 15000;
+const VOLUME_RM_TIMEOUT_MS = 60000;
+// Docker's own rule for volume names. Anything else is refused before the CLI
+// sees it, so a "name" can never turn into a flag such as `-f`.
+const VOLUME_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+// Volumes created without a name get a 64-hex id.
+const ANONYMOUS_RE = /^[0-9a-f]{64}$/;
+
+function isAnonymousVolume(name, labels) {
+  return ANONYMOUS_RE.test(String(name || '')) || Boolean(labels && 'com.docker.volume.anonymous' in labels);
+}
+
+/** `docker volume inspect a b c` prints a JSON array; a missing name fails the
+ *  command but the others are still printed, so parse stdout either way. */
+function parseVolumeInspect(stdout) {
+  let arr;
+  try { arr = JSON.parse(String(stdout || '').trim() || '[]'); } catch { return []; }
+  return Array.isArray(arr) ? arr.filter((v) => v && typeof v.Name === 'string') : [];
+}
+
+/**
+ * Merge `docker system df -v` (sizes, links, and which container mounts what)
+ * with `docker volume inspect` (structured labels and creation time).
+ * Pure: exported so tests can feed it real captured output.
+ */
+function buildVolumeList(dfStdout, inspected = []) {
+  let raw;
+  try { raw = JSON.parse(dfStdout); } catch { return []; }
+  if (!raw || !Array.isArray(raw.Volumes)) return [];
+
+  // The verbose containers list names each mounted volume in `Mounts`
+  // (comma separated; bind mounts show as host paths and never match a name).
+  const mountedBy = new Map();
+  for (const c of raw.Containers || []) {
+    const labels = parseLabels(c.Labels);
+    for (const m of String(c.Mounts || '').split(',')) {
+      const name = m.trim();
+      if (!name) continue;
+      const list = mountedBy.get(name) || [];
+      list.push({ name: c.Names, service: labels['com.docker.compose.service'] || null });
+      mountedBy.set(name, list);
+    }
+  }
+  const inspectByName = new Map(inspected.map((v) => [v.Name, v]));
+
+  return raw.Volumes.map((v) => {
+    const detail = inspectByName.get(v.Name);
+    // Inspect labels are a real object; the df form is "k=v,k=v" and breaks on
+    // values containing a comma, so it is only the fallback.
+    const labels = detail && detail.Labels && typeof detail.Labels === 'object'
+      ? { ...detail.Labels }
+      : parseLabels(v.Labels);
+    const users = mountedBy.get(v.Name) || [];
+    const links = Number(v.Links) || 0;
+    return {
+      name: v.Name,
+      sizeBytes: parseSize(v.Size),
+      inUse: links > 0 || users.length > 0,
+      links,
+      containers: users.map((u) => u.name),
+      project: labels['com.docker.compose.project'] || null,
+      volume: labels['com.docker.compose.volume'] || null,
+      // Compose labels the volume with its key, not a service; the service is
+      // whichever container mounts it, when one still exists.
+      service: labels['com.docker.compose.service'] || (users.find((u) => u.service) || {}).service || null,
+      driver: (detail && detail.Driver) || v.Driver || null,
+      createdAt: (detail && detail.CreatedAt) || null,
+      labels,
+      anonymous: isAnonymousVolume(v.Name, labels),
+    };
+  });
+}
+
+/**
+ * Every volume with its size, users and compose origin. Never throws; returns
+ * [] when the engine is down or the listing cannot be read (status() says why).
+ */
+async function listVolumes(options = {}) {
+  const st = options.status || (await status(options));
+  if (!st.running) return [];
+  const df = await runDocker(['system', 'df', '-v', '--format', 'json'], {
+    ...options,
+    timeout: options.timeout || INVENTORY_TIMEOUT_MS,
+  });
+  if (!df.ok) return [];
+  const base = buildVolumeList(df.stdout);
+  const names = base.map((v) => v.name).filter((n) => VOLUME_NAME_RE.test(n));
+  const inspected = [];
+  for (let i = 0; i < names.length; i += VOLUME_INSPECT_BATCH) {
+    const batch = names.slice(i, i + VOLUME_INSPECT_BATCH);
+    const res = await runDocker(['volume', 'inspect', ...batch], {
+      ...options,
+      timeout: options.inspectTimeout || VOLUME_INSPECT_TIMEOUT_MS,
+    });
+    inspected.push(...parseVolumeInspect(res.stdout));
+  }
+  return buildVolumeList(df.stdout, inspected);
+}
+
+/**
+ * Group a volume list by compose project, biggest first. Volumes outside
+ * compose land in '(anonymous)' or '(other)' groups keyed with project: null.
+ */
+function groupVolumesByProject(volumes) {
+  const groups = new Map();
+  for (const v of Array.isArray(volumes) ? volumes : []) {
+    const key = v.project || (v.anonymous ? '(anonymous)' : '(other)');
+    const g = groups.get(key) || {
+      key, project: v.project || null, count: 0, inUse: 0, unused: 0,
+      totalBytes: 0, unusedBytes: 0, volumes: [],
+    };
+    g.count += 1;
+    g.totalBytes += v.sizeBytes || 0;
+    if (v.inUse) g.inUse += 1;
+    else { g.unused += 1; g.unusedBytes += v.sizeBytes || 0; }
+    g.volumes.push(v);
+    groups.set(key, g);
+  }
+  for (const g of groups.values()) g.volumes.sort((a, b) => (b.sizeBytes || 0) - (a.sizeBytes || 0));
+  return [...groups.values()].sort((a, b) => b.totalBytes - a.totalBytes);
+}
+
+/** Names of every container (running or stopped) that mounts the volume. */
+async function volumeUsers(name, options) {
+  const res = await runDocker(
+    ['ps', '-a', '--no-trunc', '--filter', `volume=${name}`, '--format', '{{.Names}}'],
+    { ...options, timeout: ENGINE_PROBE_MS * 2 }
+  );
+  if (!res.ok) return null;
+  return res.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Remove exactly one volume. Deliberately awkward:
+ *   - `options.confirm` must equal `name` exactly (the user typed or confirmed it);
+ *   - the context must be a local socket or pipe;
+ *   - the volume must exist and no container, running or stopped, may use it,
+ *     checked once and again immediately before removal;
+ *   - the only command run is `docker volume rm <name>`: no -f, no prune.
+ * There is no bulk form on purpose.
+ */
+async function removeVolume(name, options = {}) {
+  const refuse = (error, extra = {}) => ({ ok: false, name: typeof name === 'string' ? name : null, removed: false, error, ...extra });
+  if (typeof name !== 'string' || !VOLUME_NAME_RE.test(name)) return refuse('Not a valid volume name');
+  if (typeof options.confirm !== 'string' || options.confirm !== name) {
+    return refuse('The volume name was not confirmed exactly, so nothing was removed');
+  }
+
+  const st = options.status || (await status({ ...options, force: true }));
+  if (!st.running) return refuse('Docker is not running, so nothing was removed');
+
+  const endpoint = await currentEndpoint(options);
+  if (!endpoint) return refuse('Could not tell which Docker host is selected, so nothing was removed');
+  if (!isLocalEndpoint(endpoint)) {
+    return refuse(`Docker is pointed at a remote host (${endpoint}). Switch to a local context to remove volumes`);
+  }
+
+  const found = await runDocker(['volume', 'inspect', name], { ...options, timeout: ENGINE_PROBE_MS * 2 });
+  if (!parseVolumeInspect(found.stdout).some((v) => v.Name === name)) {
+    return refuse(`No volume named ${name}`);
+  }
+
+  const users = await volumeUsers(name, options);
+  if (users === null) return refuse('Could not check which containers use this volume, so nothing was removed');
+  if (users.length) return refuse(`In use by ${users.join(', ')}`, { inUse: true, containers: users });
+
+  // Last look right before removing: a compose up in another terminal may
+  // have attached a container since the first check.
+  const again = await volumeUsers(name, options);
+  if (again === null) return refuse('Could not check which containers use this volume, so nothing was removed');
+  if (again.length) return refuse(`In use by ${again.join(', ')}`, { inUse: true, containers: again });
+
+  const res = await runDocker(['volume', 'rm', name], { ...options, timeout: VOLUME_RM_TIMEOUT_MS });
+  inventoryCache = null;
+  if (!res.ok) return refuse(res.error || 'docker volume rm failed');
+  return { ok: true, name, removed: true, error: null };
+}
+
+// ---------------------------------------------------------------------------
+// Restarting a wedged Docker Desktop
+// ---------------------------------------------------------------------------
+
+const QUIT_TIMEOUT_MS = 60000;
+const START_TIMEOUT_MS = 5 * 60000;
+const TERM_TIMEOUT_MS = 15000;
+const KILL_TIMEOUT_MS = 5000;
+const POLL_MS = 2000;
+// Processes that run the Docker VM on macOS. The Apple Virtualization XPC
+// service is not Docker specific, but a running one may be Docker's VM, and
+// killing the backend under a live VM is exactly what must not happen.
+const VM_PROCESS_RE = /^(com\.docker\.virtualization|com\.docker\.krun|com\.docker\.hyperkit|hyperkit|vfkit|krunkit|qemu-system-[\w.-]+|com\.apple\.Virtualization\.VirtualMachine)$/;
+
+/** Run a non-docker command. Never rejects; carries the exit code. */
+function runProcess(cmd, args, options = {}, timeout = 10000) {
+  const exec = options.processExec || execFile;
+  return new Promise((resolve) => {
+    try {
+      exec(cmd, args, { timeout }, (err, stdout, stderr) => {
+        resolve({
+          ok: !err,
+          // A timeout must never look like an exit code (lsof's 1 means "clear").
+          code: !err ? 0 : err.killed ? 'TIMEOUT' : (err.code != null ? err.code : 'FAILED'),
+          stdout: String(stdout || ''),
+          stderr: String(stderr || ''),
+        });
+      });
+    } catch (err) {
+      resolve({ ok: false, code: 'ENOENT', stdout: '', stderr: err.message });
+    }
+  });
+}
+
+/** macOS: pids of every com.docker.backend (Desktop 4.81 runs three). */
+async function backendPids(options) {
+  const res = await runProcess('pgrep', ['-x', 'com.docker.backend'], options, 3000);
+  if (!res.ok) return res.code === 1 ? [] : null;
+  return res.stdout.split('\n').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
+}
+
+/** Parse `ps -axo pid=,comm=` into Docker VM processes. */
+function parseVmProcesses(stdout) {
+  const out = [];
+  for (const line of String(stdout || '').split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(.+?)\s*$/);
+    if (!m) continue;
+    const base = m[2].split('/').pop();
+    if (VM_PROCESS_RE.test(base)) out.push({ pid: Number(m[1]), command: base });
+  }
+  return out;
+}
+
+/** Parse `lsof -w -Fpc` field output into [{ pid, command }]. */
+function parseLsof(stdout) {
+  const out = [];
+  let cur = null;
+  for (const line of String(stdout || '').split('\n')) {
+    if (line[0] === 'p') { cur = { pid: Number(line.slice(1)), command: null }; out.push(cur); }
+    else if (line[0] === 'c' && cur) cur.command = line.slice(1);
+  }
+  return out;
+}
+
+/**
+ * Is it safe to kill the backend? Only when the disk image is held open by
+ * nothing and no VM process runs. Any probe that cannot answer counts as unsafe.
+ * `options.safetyProbe` replaces the whole check in tests.
+ */
+async function killSafety(options) {
+  if (typeof options.safetyProbe === 'function') {
+    try {
+      const r = await options.safetyProbe();
+      return { safe: Boolean(r && r.safe), holders: (r && r.holders) || [], vms: (r && r.vms) || [], reason: (r && r.reason) || null };
+    } catch (err) { return { safe: false, holders: [], vms: [], reason: err.message }; }
+  }
+  const disks = options.diskPaths
+    || desktopDiskPaths('darwin', options.home || os.homedir()).filter((p) => { try { return fs.statSync(p).isFile(); } catch { return false; } });
+  if (!disks.length) return { safe: false, holders: [], vms: [], reason: 'Could not find the Docker disk image to check' };
+
+  const lsof = await runProcess('lsof', ['-w', '-Fpc', '--', ...disks], options, 10000);
+  // lsof exits 1 with no output when nothing has the file open.
+  let holders;
+  if (lsof.ok) holders = parseLsof(lsof.stdout);
+  else if (lsof.code === 1 && !lsof.stdout.trim() && !lsof.stderr.trim()) holders = [];
+  else return { safe: false, holders: [], vms: [], reason: 'Could not check what has the Docker disk image open' };
+
+  const ps = await runProcess('ps', ['-axo', 'pid=,comm='], options, 5000);
+  if (!ps.ok) return { safe: false, holders, vms: [], reason: 'Could not list running processes' };
+  const vms = parseVmProcesses(ps.stdout);
+
+  const reason = holders.length
+    ? `The Docker disk image is still open (${holders.map((h) => `${h.command || 'process'} ${h.pid}`).join(', ')})`
+    : vms.length ? `A virtual machine process is still running (${vms.map((v) => `${v.command} ${v.pid}`).join(', ')})` : null;
+  return { safe: !holders.length && !vms.length, holders, vms, reason };
+}
+
+function clock(options) {
+  const now = options.now || Date.now;
+  const sleep = options.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  return { now, sleep };
+}
+
+/** Poll `check` until it is truthy or `timeoutMs` passes. */
+async function waitUntil(check, timeoutMs, options, onTick) {
+  const { now, sleep } = clock(options);
+  const pollMs = options.pollMs || POLL_MS;
+  const start = now();
+  for (;;) {
+    if (await check()) return true;
+    const elapsed = now() - start;
+    if (elapsed >= timeoutMs) return false;
+    if (onTick) onTick(elapsed);
+    await sleep(Math.min(pollMs, timeoutMs - elapsed));
+  }
+}
+
+/**
+ * Quit and relaunch Docker Desktop the way a careful human would, then wait
+ * for the engine. Never force-kills on Windows, never touches a Linux engine
+ * that is not Docker Desktop, and on macOS only kills a backend that ignored
+ * the quit request when neither the disk image nor a VM is still in use.
+ * Result (serialisable): { ok, platform, state, killed, steps, message, reason? }.
+ */
+async function restartDesktop(options = {}) {
+  const platform = options.platform || process.platform;
+  const steps = [];
+  const step = (name, ok, detail = null) => { steps.push({ step: name, ok, detail }); };
+  const progress = (phase, message, extra = {}) => {
+    if (typeof options.onProgress !== 'function') return;
+    try { options.onProgress({ phase, message, ...extra }); } catch { /* the UI's problem */ }
+  };
+  const done = (ok, message, extra = {}) => ({ ok, platform, state: null, killed: 'none', steps, message, ...extra });
+
+  // Restarting local Desktop would not fix a remote engine, and waiting on it
+  // would report the wrong machine.
+  const endpoint = await currentEndpoint(options);
+  if (endpoint && !isLocalEndpoint(endpoint)) {
+    return done(false, `Docker is pointed at a remote host (${endpoint}). Restarting Docker Desktop here would not change that.`, { reason: 'remote' });
+  }
+
+  const waitForEngine = async () => {
+    progress('starting', 'Waiting for the Docker engine to answer');
+    const timeoutMs = options.startTimeoutMs || START_TIMEOUT_MS;
+    let last = null;
+    const up = await waitUntil(async () => {
+      last = await status({ ...options, force: true });
+      return last.running;
+    }, timeoutMs, options, (elapsedMs) => progress('starting', 'Waiting for the Docker engine to answer', { elapsedMs, timeoutMs }));
+    step('wait-engine', up, last && last.state);
+    return { up, state: last ? last.state : null };
+  };
+
+  if (platform === 'darwin') {
+    progress('quitting', 'Asking Docker Desktop to quit');
+    const quit = await runProcess('osascript', ['-e', 'quit app "Docker"'], options, 30000);
+    step('quit', quit.ok, quit.ok ? null : quit.stderr.trim() || null);
+
+    const quitTimeoutMs = options.quitTimeoutMs || QUIT_TIMEOUT_MS;
+    let pids = [];
+    const exited = await waitUntil(async () => {
+      pids = await backendPids(options);
+      return Array.isArray(pids) && pids.length === 0;
+    }, quitTimeoutMs, options, (elapsedMs) => progress('quitting', 'Waiting for Docker Desktop to quit', { elapsedMs, timeoutMs: quitTimeoutMs }));
+    step('wait-quit', exited, exited ? null : pids === null ? 'could not list processes' : `still running: ${pids.join(', ')}`);
+
+    let killed = 'none';
+    if (!exited) {
+      if (pids === null) return done(false, 'Could not tell whether Docker Desktop quit, so nothing was killed. Quit it from the menu bar and try again.', { reason: 'probe-failed' });
+      progress('checking', 'Docker Desktop did not quit. Checking it is safe to stop its backend');
+      const safety = await killSafety(options);
+      step('safety-check', safety.safe, safety.reason);
+      if (!safety.safe) {
+        return done(false, `${safety.reason || 'It is not safe to stop the Docker backend'}. Spaci did not force it to stop, to protect your Docker data. Quit Docker Desktop from its menu, or restart your Mac.`, { reason: 'unsafe-to-kill', holders: safety.holders, vms: safety.vms });
+      }
+      const kill = options.kill || ((pid, sig) => process.kill(pid, sig));
+      const signal = (list, sig) => { for (const pid of list) { try { kill(pid, sig); } catch { /* already gone */ } } };
+
+      progress('terminating', 'Stopping the Docker backend');
+      signal(pids, 'SIGTERM');
+      killed = 'sigterm';
+      step('sigterm', true, pids.join(', '));
+      let gone = await waitUntil(async () => {
+        pids = await backendPids(options);
+        return Array.isArray(pids) && pids.length === 0;
+      }, options.termTimeoutMs || TERM_TIMEOUT_MS, options);
+
+      if (!gone) {
+        if (!Array.isArray(pids)) return done(false, 'Could not tell whether the Docker backend stopped. Nothing more was done.', { reason: 'probe-failed', killed });
+        // Things may have changed while we waited; check again before SIGKILL.
+        const again = await killSafety(options);
+        step('safety-recheck', again.safe, again.reason);
+        if (!again.safe) {
+          return done(false, `${again.reason || 'It is not safe to stop the Docker backend'}. Spaci stopped short of force-killing it.`, { reason: 'unsafe-to-kill', killed, holders: again.holders, vms: again.vms });
+        }
+        signal(pids, 'SIGKILL');
+        killed = 'sigkill';
+        step('sigkill', true, pids.join(', '));
+        gone = await waitUntil(async () => {
+          pids = await backendPids(options);
+          return Array.isArray(pids) && pids.length === 0;
+        }, options.killTimeoutMs || KILL_TIMEOUT_MS, options);
+        if (!gone) return done(false, 'The Docker backend would not stop. Restart your Mac to recover Docker.', { reason: 'kill-failed', killed });
+      }
+    }
+
+    progress('launching', 'Opening Docker Desktop');
+    const open = await runProcess('open', ['-a', 'Docker'], options, 30000);
+    step('launch', open.ok, open.ok ? null : open.stderr.trim() || null);
+    if (!open.ok) return done(false, 'Docker Desktop could not be opened. Open it from Applications.', { reason: 'launch-failed', killed });
+    const engine = await waitForEngine();
+    return done(engine.up, engine.up ? 'Docker Desktop restarted and the engine is answering.' : 'Docker Desktop was opened but the engine has not answered after 5 minutes.', { state: engine.state, killed, reason: engine.up ? undefined : 'start-timeout' });
+  }
+
+  if (platform === 'win32') {
+    const env = options.env || process.env;
+    const exe = path.win32.join(env.ProgramFiles || 'C:\\Program Files', 'Docker', 'Docker', 'Docker Desktop.exe');
+    progress('quitting', 'Asking Docker Desktop to quit');
+    // No /F: this asks the window to close, it does not kill anything.
+    const quit = await runProcess('taskkill', ['/IM', 'Docker Desktop.exe'], options, 30000);
+    step('quit', quit.ok, quit.ok ? null : quit.stderr.trim() || null);
+    const quitTimeoutMs = options.quitTimeoutMs || QUIT_TIMEOUT_MS;
+    const exited = await waitUntil(async () => !(await backendRunning(options, 'win32')), quitTimeoutMs, options,
+      (elapsedMs) => progress('quitting', 'Waiting for Docker Desktop to quit', { elapsedMs, timeoutMs: quitTimeoutMs }));
+    step('wait-quit', exited);
+    if (!exited) {
+      return done(false, 'Docker Desktop did not quit within a minute. Spaci never force-closes it on Windows. Quit it from the tray icon, or restart Windows.', { reason: 'quit-timeout' });
+    }
+    // Older and Hyper-V installs run a helper service. Restarting it needs
+    // admin rights; a refusal is recorded, not fatal.
+    const svc = await runProcess('sc', ['query', 'com.docker.service'], options, 10000);
+    if (svc.ok) {
+      const stop = await runProcess('sc', ['stop', 'com.docker.service'], options, 30000);
+      step('service-stop', stop.ok, stop.ok ? null : (stop.stdout + stop.stderr).trim().split('\n')[0] || null);
+      const start = await runProcess('sc', ['start', 'com.docker.service'], options, 30000);
+      step('service-start', start.ok, start.ok ? null : (start.stdout + start.stderr).trim().split('\n')[0] || null);
+    }
+    progress('launching', 'Opening Docker Desktop');
+    const launched = launchDetached(exe, [], options);
+    step('launch', launched.ok, launched.error);
+    if (!launched.ok) return done(false, 'Docker Desktop could not be opened. Start it from the Start menu.', { reason: 'launch-failed' });
+    const engine = await waitForEngine();
+    return done(engine.up, engine.up ? 'Docker Desktop restarted and the engine is answering.' : 'Docker Desktop was opened but the engine has not answered after 5 minutes.', { state: engine.state, reason: engine.up ? undefined : 'start-timeout' });
+  }
+
+  if (platform === 'linux') {
+    const unit = await runProcess('systemctl', ['--user', 'cat', 'docker-desktop.service'], options, 10000);
+    if (!unit.ok) {
+      return done(false, 'Docker here runs as a system service, not Docker Desktop, so Spaci does not restart it. Run `sudo systemctl restart docker` yourself if it is stuck.', { reason: 'engine-only' });
+    }
+    progress('restarting', 'Restarting Docker Desktop');
+    const restart = await runProcess('systemctl', ['--user', 'restart', 'docker-desktop'], options, 120000);
+    step('restart', restart.ok, restart.ok ? null : restart.stderr.trim() || null);
+    if (!restart.ok) return done(false, 'systemd could not restart Docker Desktop. Check `systemctl --user status docker-desktop`.', { reason: 'restart-failed' });
+    const engine = await waitForEngine();
+    return done(engine.up, engine.up ? 'Docker Desktop restarted and the engine is answering.' : 'Docker Desktop restarted but the engine has not answered after 5 minutes.', { state: engine.state, reason: engine.up ? undefined : 'start-timeout' });
+  }
+
+  return done(false, 'Restarting Docker is not supported on this platform.', { reason: 'unsupported' });
+}
+
+/** Start a long-lived GUI process without waiting on it. */
+function launchDetached(cmd, args, options = {}) {
+  try {
+    const spawn = options.spawn || require('child_process').spawn;
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+    child?.on?.('error', () => { /* reported through the engine wait */ });
+    child?.unref?.();
+    return { ok: true, error: null };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
 /** Drop the status/inventory caches (used after a prune or an explicit rescan). */
 function resetCache() {
   statusCache = null;
@@ -907,4 +1431,7 @@ module.exports = {
   // exported for tests
   parseSize, parseReclaimable, parseLabels, parseInventory, parseSummary,
   parseReclaimed, summarise, totalsOf, candidateBinaries, isDockerfile, resetCache, backendRunning, isLocalEndpoint, currentEndpoint,
+  // volumes and Desktop recovery
+  listVolumes, groupVolumesByProject, removeVolume, restartDesktop,
+  buildVolumeList, parseVolumeInspect, parseLsof, parseVmProcesses, isAnonymousVolume,
 };
