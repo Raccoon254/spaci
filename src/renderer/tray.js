@@ -86,11 +86,12 @@ function actionRow(icon, label, onclick) {
     ic(icon, 17, { color: 'var(--text-2)' }), el('span', { style: 'flex:1;font-size:13.5px;font-weight:500', text: label })
   ]);
 }
-function winRow(r) {
-  return el('button', { style: 'display:flex;align-items:center;gap:10px;width:100%;padding:7px 10px;border:none;border-radius:10px;background:transparent;color:var(--text);font-family:inherit;text-align:left;cursor:pointer', hov: 'background:var(--panel)', onclick: () => openMain('recommendations') }, [
-    el('span', { style: 'width:26px;height:26px;border-radius:8px;background:var(--panel);display:grid;place-items:center;flex:none' }, [recMark(r, 16)]),
-    el('span', { style: 'flex:1;min-width:0;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: String(r.title || '').replace(/\s+·\s+.*$/, '') || 'Cleanable' }),
-    el('span', { style: 'font-size:12.5px;font-weight:700;color:var(--accent-fg);flex:none;font-variant-numeric:tabular-nums', text: fmt(recBytes(r)) })
+// One compact chip per top win: the logo of what it belongs to and its size.
+function winChip(r) {
+  const name = String(r.title || '').replace(/\s+·\s+.*$/, '') || 'Cleanable';
+  return el('button', { title: name, 'aria-label': name + ', ' + fmt(recBytes(r)), style: 'flex:1;min-width:0;display:flex;align-items:center;justify-content:center;gap:7px;height:34px;padding:0 8px;border:1px solid var(--border);border-radius:10px;background:var(--panel);color:var(--text);font-family:inherit;cursor:pointer', hov: 'border-color:var(--border-2)', onclick: () => openMain('recommendations') }, [
+    recMark(r, 16),
+    el('span', { style: 'font-size:12px;font-weight:700;color:var(--accent-fg);white-space:nowrap;font-variant-numeric:tabular-nums', text: fmt(recBytes(r)) })
   ]);
 }
 
@@ -142,12 +143,12 @@ function render() {
     ]),
 
     // top wins, each with the logo of what it belongs to
-    wins.length && !sc ? el('div', { style: 'padding:8px 8px 4px' }, wins.map(winRow)) : null,
+    wins.length && !sc ? el('div', { style: 'display:flex;gap:7px;padding:10px 18px 2px' }, wins.map(winChip)) : null,
 
     el('div', { style: 'flex:1' }),
 
     // actions
-    el('div', { style: 'border-top:1px solid var(--border);padding:7px 8px 9px' }, [
+    el('div', { style: 'border-top:1px solid var(--border);padding:7px 8px 9px;display:grid;grid-template-columns:1fr 1fr;gap:2px' }, [
       actionRow('scanner', 'Open Smart Scan', () => openMain('dashboard')),
       actionRow('dashboard', 'Open Spaci', () => openMain()),
       actionRow('settings', 'Settings', () => openMain('settings')),
