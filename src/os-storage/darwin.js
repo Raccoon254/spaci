@@ -4,7 +4,8 @@
 // sections 0 and 2. Nothing here needs admin rights, and nothing here deletes
 // or cleans: tier D items only carry the command macOS offers, as text.
 
-const path = require('path');
+// POSIX joins whatever the host: these are macOS paths (as win32.js pins path.win32).
+const path = require('path').posix;
 const { item } = require('./tiers');
 const { json } = require('./exec');
 
