@@ -1,5 +1,6 @@
 'use strict';
 
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { buildBrowserTargets } = require('./browsers');
@@ -100,7 +101,7 @@ function buildDeveloperTargets(ctx) {
     return [
       makeTarget('npm', 'npm cache', 'Developer', 'node', [join('.npm', '_cacache')], 'Downloaded npm package tarballs. Rebuilds on next install.'),
       makeTarget('yarn', 'Yarn cache', 'Developer', 'node', [lib('Caches', 'Yarn'), join('.yarn', 'cache')], 'Yarn package cache.'),
-      makeTarget('pnpm', 'pnpm store', 'Developer', 'node', [lib('pnpm', 'store'), join('.pnpm-store')], 'pnpm content-addressable store.'),
+      makeTarget('pnpm', 'pnpm store', 'Developer', 'node', [lib('pnpm', 'store'), join('.pnpm-store')], 'pnpm content-addressable store. Packages your projects still use are hard-linked into them, so those free space only once no project uses them.'),
       makeTarget('bun', 'Bun cache', 'Developer', 'flash', [join('.bun', 'install', 'cache')], 'Bun install cache.'),
       makeTarget('gradle', 'Gradle cache', 'Developer', 'gradle', [join('.gradle', 'caches')], 'Global Gradle build cache & downloaded deps.'),
       makeTarget('gradle-wrapper', 'Gradle wrapper downloads', 'Developer', 'gradle', [join('.gradle', 'wrapper', 'dists')], 'Gradle distributions fetched by project wrappers. Re-downloads on the next build.'),
@@ -121,7 +122,7 @@ function buildDeveloperTargets(ctx) {
     return [
       makeTarget('npm', 'npm cache', 'Developer', 'node', [join('.npm', '_cacache')], 'Downloaded npm package tarballs. Rebuilds on next install.'),
       makeTarget('yarn', 'Yarn cache', 'Developer', 'node', [xdgCache(ctx, 'yarn')], 'Yarn package cache.'),
-      makeTarget('pnpm', 'pnpm store', 'Developer', 'node', [join('.local', 'share', 'pnpm', 'store')], 'pnpm content-addressable store.'),
+      makeTarget('pnpm', 'pnpm store', 'Developer', 'node', [join('.local', 'share', 'pnpm', 'store')], 'pnpm content-addressable store. Packages your projects still use are hard-linked into them, so those free space only once no project uses them.'),
       makeTarget('gradle', 'Gradle cache', 'Developer', 'gradle', [join('.gradle', 'caches')], 'Global Gradle build cache & downloaded deps.'),
       makeTarget('gradle-wrapper', 'Gradle wrapper downloads', 'Developer', 'gradle', [join('.gradle', 'wrapper', 'dists')], 'Gradle distributions fetched by project wrappers. Re-downloads on the next build.'),
       makeTarget('maven', 'Maven repository', 'Developer', 'java', [join('.m2', 'repository')], 'Downloaded Maven artifacts. Re-downloads on build.'),
@@ -141,7 +142,7 @@ function buildDeveloperTargets(ctx) {
   return [
     makeTarget('npm', 'npm cache', 'Developer', 'node', [from(local, 'npm-cache')], 'Downloaded npm package tarballs. Rebuilds on next install.'),
     makeTarget('yarn', 'Yarn cache', 'Developer', 'node', [from(local, 'Yarn', 'Cache')], 'Yarn package cache.'),
-    makeTarget('pnpm', 'pnpm store', 'Developer', 'node', [from(local, 'pnpm', 'store')], 'pnpm content-addressable store.'),
+    makeTarget('pnpm', 'pnpm store', 'Developer', 'node', [from(local, 'pnpm', 'store')], 'pnpm content-addressable store. Packages your projects still use are hard-linked into them, so those free space only once no project uses them.'),
     makeTarget('gradle', 'Gradle cache', 'Developer', 'gradle', [winJoin('.gradle', 'caches')], 'Global Gradle build cache & downloaded deps.'),
     makeTarget('gradle-wrapper', 'Gradle wrapper downloads', 'Developer', 'gradle', [winJoin('.gradle', 'wrapper', 'dists')], 'Gradle distributions fetched by project wrappers. Re-downloads on the next build.'),
     makeTarget('maven', 'Maven repository', 'Developer', 'java', [winJoin('.m2', 'repository')], 'Downloaded Maven artifacts. Re-downloads on build.'),
@@ -188,7 +189,11 @@ function buildSystemTargets(options = {}) {
     // %TEMP% is usually %LOCALAPPDATA%\Temp, which would be sized and counted
     // twice. Only list it separately when it really is somewhere else.
     const localTemp = from(local, 'Temp');
-    const sameFolder = (a, b) => Boolean(a && b) && ctx.pathApi.resolve(a).toLowerCase() === ctx.pathApi.resolve(b).toLowerCase();
+    // Windows often writes TEMP as an 8.3 short name (C:\Users\JOHNSM~1\...),
+    // so compare the real paths too when the folders exist.
+    const real = (p) => { try { return fs.realpathSync.native(p); } catch { return p; } };
+    const norm = (p) => ctx.pathApi.resolve(p).toLowerCase();
+    const sameFolder = (a, b) => Boolean(a && b) && (norm(a) === norm(b) || norm(real(a)) === norm(real(b)));
     if (temp && !sameFolder(temp, localTemp)) {
       targets.push(makeTarget('windows-temp', 'Windows temp files', 'System', 'trash', [temp], 'Temporary files from %TEMP%.', { storyCategory: 'caches' }));
     }
