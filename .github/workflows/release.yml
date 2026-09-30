@@ -71,7 +71,12 @@ jobs:
         run: |
           npx electron-builder ${{ matrix.args }} --publish never
           if [ "${{ matrix.platform }}" = linux ]; then
+            # The deb pass rewrites latest-linux.yml with only the .deb, which
+            # would hide the AppImage from its auto-updater. Keep the AppImage one.
+            cp release/latest-linux.yml "$RUNNER_TEMP/latest-linux.yml"
             npx electron-builder --linux deb --publish never
+            cp "$RUNNER_TEMP/latest-linux.yml" release/latest-linux.yml
+            grep -q 'AppImage' release/latest-linux.yml || { echo "latest-linux.yml lost the AppImage"; exit 1; }
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
