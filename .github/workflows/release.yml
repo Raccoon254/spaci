@@ -19,11 +19,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          # Pinned: electron-builder 24's temporary keychain step fails on the
+          # macos-26 image from 26.6 on ("SecKeychainUnlock: The user name or
+          # passphrase you entered is not correct"). Signing is gated on
+          # `platform`, never on the runner label, so a label change can never
+          # silently skip signing and notarization.
+          - os: macos-15
+            platform: mac
             args: '--mac --x64 --arm64'
           - os: windows-latest
+            platform: win
             args: '--win'
           - os: ubuntu-latest
+            platform: linux
             args: '--linux'
     runs-on: ${{ matrix.os }}
     steps:
@@ -44,7 +52,7 @@ jobs:
       # ONLY set here; passing an empty CSC_LINK to Windows/Linux makes
       # electron-builder treat it as a bad cert path, so they get their own step.
       - name: Build and package (macOS, signed + notarized)
-        if: matrix.os == 'macos-latest'
+        if: matrix.platform == 'mac'
         run: npx electron-builder ${{ matrix.args }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -55,14 +63,17 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Build and package (Windows / Linux)
-        if: matrix.os != 'macos-latest'
+        if: matrix.platform != 'mac'
         run: npx electron-builder ${{ matrix.args }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # A tag with a suffix (v2.2.0-rc.1) is a release candidate: it becomes a
+      # GitHub prerelease for testing and is never synced to the update feed.
       - name: Publish installers to the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             release/*.dmg
             release/*.zip
@@ -82,6 +93,8 @@ jobs:
   sync-feed:
     name: Sync release to the website
     needs: build
+    # Release candidates never reach the website or anyone's auto-updater.
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

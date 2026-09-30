@@ -1,4 +1,4 @@
-// donut.js — vanilla SVG disk-usage visualizations for the Electron renderer.
+// donut.js: vanilla SVG disk-usage visualizations for the Electron renderer.
 // Defines window.diskDonut and window.diskBar. No imports, no framework.
 (function () {
   'use strict';

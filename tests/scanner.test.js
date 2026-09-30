@@ -180,3 +180,419 @@ test('directory sizing agrees with a plain walk', async () => {
   // differ by allocation overhead rather than by an order of magnitude.
   assert.ok(fast >= walked, 'block usage should not be below apparent size for plain files');
 });
+
+// ---------------------------------------------------------------------------
+// Build-output verification: a name alone never makes a directory cleanable.
+// Safe needs positive evidence from the innermost repo: git ignores the folder
+// and tracks nothing inside it. Every fixture is a real repo under os.tmpdir().
+// ---------------------------------------------------------------------------
+
+const { execFileSync } = require('node:child_process');
+
+const GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: 'Spaci Test', GIT_AUTHOR_EMAIL: 'test@example.com',
+  GIT_COMMITTER_NAME: 'Spaci Test', GIT_COMMITTER_EMAIL: 'test@example.com',
+};
+function git(cwd, ...args) {
+  execFileSync('git', [
+    '-C', cwd, '-c', 'init.defaultBranch=main', '-c', 'commit.gpgsign=false',
+    '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.file.allow=always', ...args,
+  ], { stdio: 'ignore', env: GIT_ENV });
+}
+const gitOut = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { env: GIT_ENV, encoding: 'utf8' });
+
+const TMP_ROOTS = [];
+test.after(() => { for (const r of TMP_ROOTS) fs.rmSync(r, { recursive: true, force: true }); });
+function tmpRoot() {
+  const r = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-git-'));
+  TMP_ROOTS.push(r);
+  return r;
+}
+function write(base, rel, body = 'x') {
+  const full = path.join(base, rel);
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  fs.writeFileSync(full, body);
+  return full;
+}
+
+/** Scan `root` and return the items of the project at `proj`. */
+async function itemsAt(root, proj) {
+  const { projects } = await scanner.scanProjects(root, null, new AbortController().signal);
+  const p = projects.find((x) => x.path === proj);
+  assert.ok(p, `project ${proj} is detected`);
+  return p.items;
+}
+const safeAt = (items, full) => items.some((i) => i.path === full && i.safe);
+
+/** Throwaway project, optionally a git repo with everything staged. */
+function makeRepo({ git: isGit, files, ignore }) {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{"name":"proj"}');
+  if (ignore) write(proj, '.gitignore', ignore);
+  for (const [rel, body] of Object.entries(files)) write(proj, rel, body);
+  if (isGit) { git(proj, 'init', '-q'); git(proj, 'add', '-A'); }
+  return { root, proj };
+}
+const scanOne = ({ root, proj }) => itemsAt(root, proj);
+
+test('a git-tracked build/ is never offered', async () => {
+  const items = await scanOne(makeRepo({ git: true, files: { 'build/entitlements.mac.plist': '<plist/>' } }));
+  assert.equal(items.find((i) => i.name === 'build'), undefined);
+});
+
+test('a gitignored build/ with output is offered and safe', async () => {
+  const items = await scanOne(makeRepo({
+    git: true, ignore: 'build/\n', files: { 'build/out.bin': 'y'.repeat(2048) },
+  }));
+  const build = items.find((i) => i.name === 'build');
+  assert.ok(build, 'ignored build output is offered');
+  assert.equal(build.safe, true);
+});
+
+test('an ignored node_modules/ is safe', async () => {
+  const items = await scanOne(makeRepo({
+    git: true, ignore: 'node_modules/\n', files: { 'node_modules/left-pad/index.js': 'y' },
+  }));
+  assert.equal(items.find((i) => i.name === 'node_modules')?.safe, true);
+});
+
+test('a git-tracked vendor/ is never offered', async () => {
+  const items = await scanOne(makeRepo({ git: true, files: { 'vendor/lib.go': 'package lib' } }));
+  assert.equal(items.find((i) => i.name === 'vendor'), undefined);
+});
+
+test('a tracked file deep inside a candidate blocks it, siblings stay offered', async () => {
+  const items = await scanOne(makeRepo({
+    git: true, ignore: 'dist/\n',
+    files: { 'build/a/b/keep.txt': 'k', 'dist/bundle.js': 'z' },
+  }));
+  assert.deepEqual(items.map((i) => i.name), ['dist']);
+});
+
+test('reviewer: repo with no commits, never-added build/entitlements.mac.plist is not safe', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, 'build/entitlements.mac.plist', '<plist/>');
+  git(proj, 'init', '-q');
+  const items = await itemsAt(root, proj);
+  const build = items.find((i) => i.name === 'build');
+  assert.ok(build, 'listed for review');
+  assert.equal(build.safe, false);
+  assert.match(build.note, /could not verify/i);
+});
+
+test('reviewer: source added but not committed is not offered', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, 'build/main.js', 'new source');
+  write(proj, 'dist/new-idea.js', 'never added, not ignored');
+  git(proj, 'init', '-q');
+  git(proj, 'add', 'build/main.js');
+  const items = await itemsAt(root, proj);
+  assert.equal(items.find((i) => i.name === 'build'), undefined, 'staged content blocks it');
+  assert.equal(items.find((i) => i.name === 'dist')?.safe, false, 'untracked is not build output');
+});
+
+test('reviewer: a nested independent repo decides for its own dist/', async () => {
+  const root = tmpRoot();
+  const a = path.join(root, 'A');
+  write(a, 'package.json', '{}');
+  write(a, '.gitignore', 'dist/\n');
+  write(a, 'dist/out.js', 'output');
+  git(a, 'init', '-q'); git(a, 'add', '-A'); git(a, 'commit', '-qm', 'a');
+  const inner = path.join(a, 'libs', 'inner');
+  write(inner, 'dist/index.js', 'published library entry');
+  git(inner, 'init', '-q'); git(inner, 'add', '-A'); git(inner, 'commit', '-qm', 'inner');
+
+  const items = await itemsAt(root, a);
+  assert.equal(safeAt(items, path.join(inner, 'dist')), false);
+  assert.equal(items.find((i) => i.path === path.join(inner, 'dist')), undefined, 'tracked in inner');
+  assert.equal(safeAt(items, path.join(a, 'dist')), true, 'the parent repo still owns its own dist/');
+});
+
+test('reviewer: a submodule with tracked dist/ is not offered', async () => {
+  const lib = path.join(tmpRoot(), 'lib');
+  write(lib, 'dist/index.js', 'library build, committed');
+  git(lib, 'init', '-q'); git(lib, 'add', '-A'); git(lib, 'commit', '-qm', 'lib');
+
+  const root = tmpRoot();
+  const p = path.join(root, 'P');
+  write(p, 'package.json', '{}');
+  write(p, '.gitignore', 'dist/\n');
+  git(p, 'init', '-q'); git(p, 'add', '-A'); git(p, 'commit', '-qm', 'p');
+  git(p, 'submodule', 'add', '-q', lib, 'libs/sub');
+  git(p, 'commit', '-qm', 'sub');
+  const sub = path.join(p, 'libs', 'sub');
+  assert.ok(fs.statSync(path.join(sub, '.git')).isFile(), 'submodule uses a .git file');
+
+  const items = await itemsAt(root, p);
+  assert.equal(safeAt(items, path.join(sub, 'dist')), false);
+});
+
+test('reviewer: a parent repo ignoring the whole project tells us nothing', async () => {
+  const root = tmpRoot();
+  write(root, '.gitignore', '*\n');
+  git(root, 'init', '-q');
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, '.gitignore', 'build/\nnode_modules/\n');
+  write(proj, 'build/entitlements.mac.plist', '<plist/>');
+  write(proj, 'node_modules/x/index.js', 'x');
+
+  const items = await itemsAt(root, proj);
+  assert.ok(items.length >= 2);
+  assert.ok(items.every((i) => i.safe === false), 'no candidate may be safe');
+});
+
+test('reviewer: NFD names on the path still find the tracked dist/', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'Café'.normalize('NFD'));
+  const sub = path.join(proj, 'Résumé'.normalize('NFD'));
+  write(proj, 'package.json', '{}');
+  write(proj, '.gitignore', 'dist/\n');
+  write(sub, 'dist/app.js', 'force-added');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A');
+  git(proj, 'add', '-f', path.relative(proj, path.join(sub, 'dist', 'app.js')));
+  git(proj, 'commit', '-qm', 'nfd');
+  assert.match(gitOut(proj, 'ls-files'), /dist\/app\.js/, 'fixture really tracks the file');
+
+  const { projects } = await scanner.scanProjects(root, null, new AbortController().signal);
+  const p = projects.find((x) => x.path.normalize('NFC') === proj.normalize('NFC'));
+  assert.ok(p, 'NFD project detected');
+  assert.ok(!p.items.some((i) => i.name === 'dist' && i.safe), 'tracked dist/ under NFD must not be safe');
+});
+
+test('reviewer: with git unavailable, committed Pods/ and target/ are not safe', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, 'Cargo.toml', '[package]\nname = "x"\n');
+  write(proj, 'Pods/Manifest.lock', 'committed');
+  write(proj, 'target/keep.rs', 'committed');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A'); git(proj, 'commit', '-qm', 'c');
+
+  const empty = fs.mkdtempSync(path.join(root, 'nopath-'));
+  const saved = process.env.PATH;
+  process.env.PATH = empty;
+  let items;
+  try { items = await itemsAt(root, proj); } finally { process.env.PATH = saved; }
+  for (const name of ['Pods', 'target']) {
+    const it = items.find((i) => i.name === name);
+    assert.ok(it, `${name} listed for review`);
+    assert.equal(it.safe, false, `${name} must not be safe without git`);
+    assert.match(it.note, /could not verify/i);
+  }
+});
+
+test('reviewer: a force-added file inside an ignored build/ blocks it', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, '.gitignore', 'build/\n');
+  write(proj, 'build/out.bin', 'output');
+  write(proj, 'build/entitlements.mac.plist', '<plist/>');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A');
+  git(proj, 'add', '-f', 'build/entitlements.mac.plist');
+  git(proj, 'commit', '-qm', 'c');
+  const items = await itemsAt(root, proj);
+  assert.equal(safeAt(items, path.join(proj, 'build')), false);
+  assert.equal(items.find((i) => i.name === 'build'), undefined);
+});
+
+test('a .git-file worktree with an ignored dist/ is safe', async () => {
+  const root = tmpRoot();
+  const main = path.join(root, 'main');
+  write(main, 'package.json', '{}');
+  write(main, '.gitignore', 'dist/\n');
+  git(main, 'init', '-q'); git(main, 'add', '-A'); git(main, 'commit', '-qm', 'c');
+  const wt = path.join(root, 'wt');
+  git(main, 'worktree', 'add', '-q', '-b', 'wt', wt);
+  assert.ok(fs.statSync(path.join(wt, '.git')).isFile(), 'worktree uses a .git file');
+  write(wt, 'dist/bundle.js', 'output');
+  const items = await itemsAt(root, wt);
+  assert.equal(safeAt(items, path.join(wt, 'dist')), true);
+});
+
+test('outside git, every candidate is offered but not marked safe', async () => {
+  const items = await scanOne(makeRepo({
+    git: false,
+    files: { 'build/out.bin': 'y', '.svelte-kit/output/a.js': 'x', 'pkg/__pycache__/m.pyc': 'x' },
+  }));
+  assert.deepEqual(items.map((i) => i.name).sort(), ['.svelte-kit', '__pycache__', 'build']);
+  assert.ok(items.every((i) => i.safe === false));
+  assert.ok(items.every((i) => /could not verify/i.test(i.note)));
+});
+
+test('.svelte-kit and __pycache__ are detected and safe when ignored', async () => {
+  const items = await scanOne(makeRepo({
+    git: true, ignore: '.svelte-kit/\n__pycache__/\n',
+    files: { '.svelte-kit/output/a.js': 'x', 'pkg/__pycache__/m.pyc': 'x' },
+  }));
+  assert.deepEqual(items.map((i) => i.name).sort(), ['.svelte-kit', '__pycache__']);
+  assert.ok(items.every((i) => i.safe === true));
+});
+
+test('revalidateArtifact re-checks one path at clean time', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, '.gitignore', 'build/\n');
+  write(proj, 'build/out.bin', 'output');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A'); git(proj, 'commit', '-qm', 'c');
+  const build = path.join(proj, 'build');
+
+  assert.deepEqual(await scanner.revalidateArtifact(build), { ok: true, verified: true });
+
+  write(proj, 'build/new-entitlements.plist', '<plist/>');
+  git(proj, 'add', '-f', 'build/new-entitlements.plist');
+  const tracked = await scanner.revalidateArtifact(build);
+  assert.equal(tracked.ok, false);
+  assert.match(tracked.reason, /tracked/i);
+
+  const plain = path.join(tmpRoot(), 'plain');
+  write(plain, 'build/out.bin', 'output');
+  const notRepo = await scanner.revalidateArtifact(path.join(plain, 'build'));
+  assert.equal(notRepo.ok, false);
+  assert.ok(notRepo.reason);
+
+  const gone = await scanner.revalidateArtifact(path.join(proj, 'gone', 'dist'));
+  assert.equal(gone.ok, false);
+  assert.match(gone.reason, /no longer exists/i);
+  fs.rmSync(build, { recursive: true, force: true });
+  assert.equal((await scanner.revalidateArtifact(build)).ok, false);
+});
+
+// ---------------------------------------------------------------------------
+// Round two: nested clones, case mismatch, the rule itself at clean time,
+// non-git projects and personal global excludes.
+// ---------------------------------------------------------------------------
+
+/** A committed repo at `dir`, so it has history that deleting would lose. */
+function makeClone(dir) {
+  write(dir, 'src/lib.php', '<?php // unpushed work');
+  git(dir, 'init', '-q'); git(dir, 'add', '-A'); git(dir, 'commit', '-qm', 'unpushed');
+}
+
+test('an ignored vendor/ holding a git clone deeper down is not safe', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'J');
+  write(proj, 'composer.json', '{}');
+  write(proj, '.gitignore', '/vendor/\n');
+  write(proj, 'vendor/autoload.php', '<?php');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A'); git(proj, 'commit', '-qm', 'c');
+  makeClone(path.join(proj, 'vendor', 'acme', 'lib'));
+
+  const vendor = path.join(proj, 'vendor');
+  const item = (await itemsAt(root, proj)).find((i) => i.path === vendor);
+  assert.ok(item, 'listed for review');
+  assert.equal(item.safe, false);
+  assert.match(item.note, /git repository/);
+  const re = await scanner.revalidateArtifact(vendor);
+  assert.equal(re.ok, false);
+  assert.match(re.reason, /git repository/);
+});
+
+test('a hand-cloned repo (a .git file) inside an ignored node_modules/ is not safe', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, '.gitignore', 'node_modules/\n');
+  write(proj, 'node_modules/fork/index.js', 'x');
+  write(proj, 'node_modules/fork/.git', 'gitdir: /somewhere/else\n');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A'); git(proj, 'commit', '-qm', 'c');
+  const nm = path.join(proj, 'node_modules');
+  assert.equal((await itemsAt(root, proj)).find((i) => i.path === nm)?.safe, false);
+  assert.equal((await scanner.revalidateArtifact(nm)).ok, false);
+});
+
+test('a tracked Dist/ read back as dist/ on a case-insensitive disk is not offered', async (t) => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, 'Dist/keep.js', 'tracked source');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A'); git(proj, 'commit', '-qm', 'c');
+  if (!fs.existsSync(path.join(proj, 'DIST'))) { t.skip('this disk is case-sensitive'); return; }
+  fs.renameSync(path.join(proj, 'Dist'), path.join(proj, 'tmp-rename'));
+  fs.renameSync(path.join(proj, 'tmp-rename'), path.join(proj, 'dist'));
+  write(proj, '.gitignore', 'dist/\n');
+  assert.ok(fs.readdirSync(proj).includes('dist'), 'folder reads as lowercase');
+  assert.match(gitOut(proj, 'ls-files'), /^Dist\/keep\.js$/m, 'index still says Dist/');
+
+  const dist = path.join(proj, 'dist');
+  assert.equal((await itemsAt(root, proj)).find((i) => i.path === dist), undefined);
+  const re = await scanner.revalidateArtifact(dist);
+  assert.equal(re.ok, false);
+  assert.match(re.reason, /tracked/);
+});
+
+test('revalidateArtifact reapplies the rule, not just git', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, '.gitignore', '.venv/\ntarget/\nnotes/\n');
+  write(proj, '.venv/bin/python', 'x');
+  write(proj, 'target/debug/app', 'x');
+  write(proj, 'notes/a.txt', 'x');
+  write(proj, 'rs/Cargo.toml', '[package]\nname = "x"\n');
+  write(proj, 'rs/target/debug/app', 'x');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A'); git(proj, 'commit', '-qm', 'c');
+
+  const venv = await scanner.revalidateArtifact(path.join(proj, '.venv'));
+  assert.equal(venv.ok, false, 'a safe:false rule stays unsafe even when ignored');
+  const bare = await scanner.revalidateArtifact(path.join(proj, 'target'));
+  assert.equal(bare.ok, false);
+  assert.match(bare.reason, /Cargo\.toml/);
+  const unknown = await scanner.revalidateArtifact(path.join(proj, 'notes'));
+  assert.equal(unknown.ok, false, 'an ignored folder with an unknown name is not an artifact');
+  assert.deepEqual(await scanner.revalidateArtifact(path.join(proj, 'rs', 'target')), { ok: true, verified: true });
+});
+
+test('outside git, revalidateArtifact allows only unambiguous names, unverified', async () => {
+  const proj = path.join(tmpRoot(), 'plain');
+  write(proj, 'package.json', '{}');
+  for (const d of ['node_modules', '__pycache__', 'build', 'dist', 'out', 'vendor', 'coverage', 'obj', '.output']) {
+    write(proj, `${d}/f`, 'x');
+  }
+  write(proj, 'cloned/node_modules/dep/.git/HEAD', 'ref: refs/heads/main\n');
+
+  assert.deepEqual(await scanner.revalidateArtifact(path.join(proj, 'node_modules')), { ok: true, verified: false });
+  assert.deepEqual(await scanner.revalidateArtifact(path.join(proj, '__pycache__')), { ok: true, verified: false });
+  for (const d of ['build', 'dist', 'out', 'vendor', 'coverage', 'obj', '.output']) {
+    const r = await scanner.revalidateArtifact(path.join(proj, d));
+    assert.equal(r.ok, false, `${d} outside git must never be deletable`);
+  }
+  const clone = await scanner.revalidateArtifact(path.join(proj, 'cloned', 'node_modules'));
+  assert.equal(clone.ok, false, 'a repository inside still blocks it outside git');
+});
+
+test('personal global excludes are not proof of build output', async () => {
+  const home = tmpRoot();
+  write(home, '.config/git/ignore', 'build/\n');
+  write(home, 'excludes', 'build/\n');
+  // Backslashes are escape characters in git config files; use forward slashes,
+  // which git accepts on every platform.
+  write(home, '.gitconfig', `[core]\n\texcludesFile = ${path.join(home, 'excludes').replace(/\\/g, '/')}\n`);
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, 'build/entitlements.mac.plist', '<plist/>');
+  git(proj, 'init', '-q');
+
+  const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  process.env.HOME = home;
+  process.env.XDG_CONFIG_HOME = path.join(home, '.config');
+  try {
+    const seen = execFileSync('git', ['-C', proj, 'check-ignore', 'build/'], { encoding: 'utf8', env: { ...process.env } });
+    assert.match(seen, /build/, 'fixture: git itself would call build/ ignored');
+    const build = path.join(proj, 'build');
+    const item = (await itemsAt(root, proj)).find((i) => i.path === build);
+    assert.equal(item?.safe, false);
+    assert.equal((await scanner.revalidateArtifact(build)).ok, false);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+});

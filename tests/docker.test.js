@@ -213,7 +213,7 @@ test('compose services are read without a yaml dependency', async () => {
 });
 
 test('status reports installed, running and neither', async () => {
-  const up = await docker.status({ force: true, exec: fakeExec({ 'version --format': { stdout: VERSION_OK } }) });
+  const up = await docker.status({ force: true, backendRunning: () => true, exec: fakeExec({ 'version --format': { stdout: VERSION_OK } }) });
   assert.equal(up.installed, true);
   assert.equal(up.running, true);
   assert.equal(up.clientVersion, '29.5.2');
@@ -222,6 +222,7 @@ test('status reports installed, running and neither', async () => {
   docker.resetCache();
   const daemonDown = await docker.status({
     force: true,
+    backendRunning: () => false,
     exec: fakeExec({
       'version --format': {
         error: Object.assign(new Error('daemon'), { code: 1 }),
@@ -235,10 +236,44 @@ test('status reports installed, running and neither', async () => {
   docker.resetCache();
   const missing = await docker.status({
     force: true,
+    backendRunning: () => true,
     exec: fakeExec({ 'version --format': { error: Object.assign(new Error('nope'), { code: 'ENOENT' }) } }),
   });
   assert.equal(missing.installed, false);
   assert.equal(missing.running, false);
+  assert.equal(missing.state, 'not-installed', 'no CLI wins over a backend process');
+  assert.equal(up.state, 'running');
+  assert.equal(daemonDown.state, 'stopped');
+});
+
+const NO_ANSWER = { 'version --format': { error: Object.assign(new Error('t'), { killed: true }) } };
+
+test('status tells a running Desktop with a dead engine from a stopped Desktop', async () => {
+  const wedged = await docker.status({ force: true, backendRunning: () => true, exec: fakeExec(NO_ANSWER) });
+  assert.equal(wedged.state, 'engine-down');
+  assert.equal(wedged.installed, true, 'a timeout proves the CLI exists');
+  assert.equal(wedged.running, false);
+  assert.equal(wedged.error, 'docker timed out');
+
+  docker.resetCache();
+  const off = await docker.status({ force: true, backendRunning: () => false, exec: fakeExec(NO_ANSWER) });
+  assert.equal(off.state, 'stopped');
+  assert.equal(off.installed, true);
+});
+
+test('the backend probe reads pgrep and survives a missing pgrep', async () => {
+  const found = await docker.backendRunning({ processExec: (c, a, o, cb) => cb(null, '4242 com.docker.backend\n', '') }, 'darwin');
+  assert.equal(found, true);
+  const none = await docker.backendRunning({ processExec: (c, a, o, cb) => cb(Object.assign(new Error('1'), { code: 1 }), '', '') }, 'darwin');
+  assert.equal(none, false);
+  const thrown = await docker.backendRunning({ processExec: () => { throw new Error('nope'); } }, 'linux');
+  assert.equal(thrown, false);
+});
+
+test('the engine states surface on the inventory too', async () => {
+  const inv = await docker.inventory({ force: true, backendRunning: () => true, exec: fakeExec(NO_ANSWER) });
+  assert.equal(inv.ok, false);
+  assert.equal(inv.state, 'engine-down');
 });
 
 test('inventory prefers docker deduplicated totals over summing the detail', async () => {
@@ -318,16 +353,77 @@ test('suggestions cover the regenerable categories and skip small change', () =>
 
 test('prune refuses unknown kinds without running anything', async () => {
   let called = false;
-  const res = await docker.prune('volumes', { exec: () => { called = true; } });
-  assert.equal(res.ok, false);
-  assert.equal(res.freed, 0);
+  for (const kind of ['nope', '__proto__', 'constructor', undefined]) {
+    const res = await docker.prune(kind, { exec: () => { called = true; } });
+    assert.equal(res.ok, false);
+    assert.equal(res.freed, 0);
+  }
   assert.equal(called, false, 'an unknown kind must never reach the CLI');
+});
+
+// Records every argv the runner sees, answering the status probe as a live engine.
+function recordingExec(argvs) {
+  return (file, args, opts, cb) => {
+    if (args[0] === 'version') return cb(null, VERSION_OK, '');
+    if (args[0] === 'context') return cb(null, 'unix:///var/run/docker.sock\n', '');
+    argvs.push(args);
+    cb(null, 'Total reclaimed space: 1MB', '');
+  };
+}
+
+test('every prune kind builds exactly the argv it promises', async () => {
+  const expected = {
+    'build-cache': ['builder', 'prune', '-f'],
+    'dangling-images': ['image', 'prune', '-f'],
+    'stopped-containers': ['container', 'prune', '-f'],
+  };
+  for (const [kind, argv] of Object.entries(expected)) {
+    const seen = [];
+    docker.resetCache();
+    const res = await docker.prune(kind, { exec: recordingExec(seen) });
+    assert.equal(res.ok, true, kind);
+    assert.deepEqual(seen, [argv], kind);
+  }
+});
+
+test('volumes are never pruned without the explicit opt-in', async () => {
+  for (const options of [{}, { confirmVolumes: false }, { confirmVolumes: 'yes' }, { confirmVolumes: 1 }]) {
+    const seen = [];
+    docker.resetCache();
+    const res = await docker.prune('volumes', { ...options, exec: recordingExec(seen) });
+    assert.equal(res.ok, false);
+    assert.deepEqual(seen, [], 'nothing may reach the CLI');
+  }
+  // No other kind can smuggle volumes in, even with the flag set.
+  for (const kind of Object.keys(docker.PRUNE_KINDS)) {
+    const seen = [];
+    docker.resetCache();
+    await docker.prune(kind, { confirmVolumes: true, exec: recordingExec(seen) });
+    assert.ok(seen.every((a) => !a.includes('volume')), kind);
+  }
+  const seen = [];
+  docker.resetCache();
+  const res = await docker.prune('volumes', { confirmVolumes: true, exec: recordingExec(seen) });
+  assert.equal(res.ok, true);
+  assert.deepEqual(seen, [['volume', 'prune', '-f']], 'no -a, so named volumes are not swept up');
+});
+
+test('prune does nothing while the engine is down and says why', async () => {
+  const seen = [];
+  const res = await docker.prune('build-cache', {
+    backendRunning: () => true,
+    exec: (f, a, o, cb) => { seen.push(a); cb(Object.assign(new Error('t'), { killed: true }), '', ''); },
+  });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /engine/);
+  assert.deepEqual(seen.filter((a) => a[0] !== 'version'), []);
 });
 
 test('prune reports the space docker says it reclaimed', async () => {
   const res = await docker.prune('build-cache', {
     exec: fakeExec({
       'version --format': { stdout: VERSION_OK },
+      'context inspect': { stdout: 'unix:///var/run/docker.sock\n' },
       'builder prune': { stdout: 'deleted: sha256:x\n\nTotal reclaimed space: 5.765GB\n' },
     }),
   });
@@ -351,4 +447,190 @@ test('the CLI is looked for outside PATH, which a GUI launch does not have', () 
   assert.ok(mac.includes('/opt/homebrew/bin/docker'));
   assert.ok(mac.some((p) => p.includes('Docker.app')));
   assert.ok(docker.candidateBinaries('win32', 'C:\\Users\\Demo').every((p) => p.endsWith('.exe')));
+});
+
+// NTFS only makes a file sparse when it is explicitly flagged, so truncate
+// cannot build this fixture on Windows.
+test('desktopDisk reports allocated bytes for a sparse image, not its apparent size', { skip: process.platform === 'win32' && 'NTFS files are not sparse unless flagged' }, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-disk-'));
+  try {
+    const file = docker.desktopDiskPaths('darwin', home)[0];
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '');
+    fs.truncateSync(file, 1024 ** 3); // 1 GiB apparent, nothing written
+
+    const disk = await docker.desktopDisk('darwin', home);
+    assert.equal(disk.path, file);
+    assert.equal(disk.apparentBytes, 1024 ** 3);
+    assert.equal(disk.bytes, disk.allocatedBytes);
+    assert.ok(disk.allocatedBytes < 64 * 1024 * 1024, 'allocated ' + disk.allocatedBytes + ' should be far below 1 GiB');
+    assert.equal(disk.sparse, true);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('desktopDisk is null where there is no disk image', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-disk-'));
+  try {
+    assert.equal(await docker.desktopDisk('linux', home), null);
+    assert.equal(await docker.desktopDisk('darwin', home), null);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+const DISK = { path: '/x/Docker.raw', bytes: 54e9, allocatedBytes: 54e9, apparentBytes: 460e9 };
+
+test('with the engine down the disk image is still reported, with guidance', () => {
+  for (const state of ['engine-down', 'stopped']) {
+    const out = docker.reclaimSuggestions({ ok: false, reason: 'daemon-not-running', status: { state }, desktopDisk: DISK, platform: 'darwin' });
+    assert.equal(out.length, 1, state);
+    const s = out[0];
+    assert.equal(s.kind, 'desktop-disk');
+    assert.equal(s.bytes, 54e9, 'allocated, not the 460 GB the file claims');
+    assert.equal(s.apparentBytes, 460e9);
+    assert.equal(s.savings, 0);
+    assert.match(s.message, state === 'engine-down' ? /not answering/ : /not running/);
+    assert.match(s.guidance, /will not shrink right away/);
+  }
+  assert.deepEqual(docker.reclaimSuggestions({ ok: false, status: { state: 'not-installed' } }), []);
+});
+
+test('prune suggestions carry the note that the disk image lags behind', () => {
+  const info = { ok: true, categories: docker.parseSummary(DF_SUMMARY), desktopDisk: DISK };
+  for (const s of docker.reclaimSuggestions(info)) assert.equal(s.note, docker.DISK_NOTE);
+  const linux = docker.reclaimSuggestions({ ok: true, categories: docker.parseSummary(DF_SUMMARY) });
+  assert.ok(linux.every((s) => s.note === null), 'no disk image, no note');
+});
+
+// ---- reviewer fixes ----
+
+const LOCAL_ENV = {};
+const CTX = (host) => ({ 'context inspect': { stdout: host + '\n' } });
+
+test('backend probe matches the process name exactly, not any command line', async () => {
+  let seen;
+  await docker.backendRunning({ processExec: (c, a, o, cb) => { seen = [c, a]; cb(null, '1\n', ''); } }, 'darwin');
+  assert.deepEqual(seen, ['pgrep', ['-x', 'com.docker.backend']]);
+  let win;
+  await docker.backendRunning({ processExec: (c, a, o, cb) => { win = c; cb(null, 'com.docker.backend.exe 12 Console', ''); } }, 'win32');
+  assert.equal(win, 'tasklist');
+});
+
+test('a timed out probe is cached for seconds, a clean answer for a minute', async (t) => {
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  let calls = 0;
+  const slow = (f, a, o, cb) => { calls++; cb(Object.assign(new Error('t'), { killed: true }), '', ''); };
+  await docker.status({ backendRunning: () => true, exec: slow, env: LOCAL_ENV });
+  await docker.status({ backendRunning: () => true, exec: slow, env: LOCAL_ENV });
+  assert.equal(calls, 1, 'fresh timeout is served from cache');
+  now += 6000;
+  await docker.status({ backendRunning: () => true, exec: slow, env: LOCAL_ENV });
+  assert.equal(calls, 2, 'a timeout is asked again after about 5 s');
+
+  docker.resetCache();
+  let ok = 0;
+  const good = fakeExec({ 'version --format': { stdout: VERSION_OK }, ...CTX('unix:///var/run/docker.sock') });
+  const counting = (f, a, o, cb) => { if (a[0] === 'version') ok++; good(f, a, o, cb); };
+  await docker.status({ exec: counting, env: LOCAL_ENV });
+  now += 30000;
+  await docker.status({ exec: counting, env: LOCAL_ENV });
+  assert.equal(ok, 1, 'a clean answer is still cached at 30 s');
+  now += 31000;
+  await docker.status({ exec: counting, env: LOCAL_ENV });
+  assert.equal(ok, 2, 'and expires after 60 s');
+});
+
+test('status exposes the endpoint and flags a remote context', async () => {
+  const local = await docker.status({ force: true, env: LOCAL_ENV, exec: fakeExec({ 'version --format': { stdout: VERSION_OK }, ...CTX('unix:///var/run/docker.sock') }) });
+  assert.equal(local.remote, false);
+  assert.equal(local.endpoint, 'unix:///var/run/docker.sock');
+  const pipe = await docker.status({ force: true, env: LOCAL_ENV, exec: fakeExec({ 'version --format': { stdout: VERSION_OK }, ...CTX('npipe:////./pipe/docker_engine') }) });
+  assert.equal(pipe.remote, false);
+  for (const host of ['ssh://me@build-box', 'tcp://10.0.0.5:2376']) {
+    const st = await docker.status({ force: true, env: LOCAL_ENV, exec: fakeExec({ 'version --format': { stdout: VERSION_OK }, ...CTX(host) }) });
+    assert.equal(st.remote, true, host);
+    assert.equal(st.endpoint, host);
+  }
+  const viaEnv = await docker.status({ force: true, env: { DOCKER_HOST: 'tcp://1.2.3.4:2375' }, exec: fakeExec({ 'version --format': { stdout: VERSION_OK } }) });
+  assert.equal(viaEnv.remote, true, 'DOCKER_HOST overrides the context');
+});
+
+test('prune refuses on a remote or unknown endpoint and runs nothing', async () => {
+  for (const ctx of [CTX('ssh://me@build-box'), CTX('tcp://10.0.0.5:2376'), { 'context inspect': { error: new Error('no') } }]) {
+    const seen = [];
+    docker.resetCache();
+    const exec = (f, a, o, cb) => {
+      if (a[0] === 'version') return cb(null, VERSION_OK, '');
+      seen.push(a);
+      fakeExec(ctx)(f, a, o, cb);
+    };
+    const res = await docker.prune('build-cache', { exec, env: LOCAL_ENV });
+    assert.equal(res.ok, false);
+    assert.equal(res.freed, 0);
+    assert.deepEqual(seen.filter((a) => a[0] !== 'context'), [], 'no prune reaches the CLI');
+  }
+  docker.resetCache();
+  const res = await docker.prune('build-cache', { env: LOCAL_ENV, exec: fakeExec({ 'version --format': { stdout: VERSION_OK }, ...CTX('ssh://x') }) });
+  assert.match(res.error, /remote host/);
+});
+
+test('no suggestions are offered against a remote context', () => {
+  const info = { ok: true, categories: docker.parseSummary(DF_SUMMARY), status: { remote: true } };
+  assert.deepEqual(docker.reclaimSuggestions(info), []);
+});
+
+test('a socket permission error is its own state, not stopped', async () => {
+  const msg = 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.47/version": dial unix /var/run/docker.sock: connect: permission denied';
+  const st = await docker.status({
+    force: true,
+    backendRunning: () => false,
+    exec: fakeExec({ 'version --format': { error: Object.assign(new Error('x'), { code: 1 }), stderr: msg } }),
+  });
+  assert.equal(st.state, 'no-permission');
+  assert.equal(st.installed, true);
+  assert.equal(st.running, false);
+
+  docker.resetCache();
+  const inv = await docker.inventory({ force: true, exec: fakeExec({ 'version --format': { error: Object.assign(new Error('x'), { code: 1 }), stderr: msg } }) });
+  assert.equal(inv.reason, 'no-permission');
+
+  docker.resetCache();
+  const res = await docker.prune('build-cache', { exec: fakeExec({ 'version --format': { error: Object.assign(new Error('x'), { code: 1 }), stderr: msg } }) });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /docker group/);
+  assert.match(res.error, /rootless/);
+
+  // Unrelated permission errors are not this state.
+  docker.resetCache();
+  const other = await docker.status({ force: true, backendRunning: () => false, exec: fakeExec({ 'version --format': { error: new Error('x'), stderr: 'permission denied: /etc/foo' } }) });
+  assert.equal(other.state, 'stopped');
+});
+
+test('disk copy is worded per platform', () => {
+  assert.match(docker.diskNote('darwin'), /Mac/);
+  assert.match(docker.diskNote('darwin'), /Docker\.raw/);
+  assert.match(docker.diskNote('win32'), /WSL2/);
+  assert.match(docker.diskNote('win32'), /sparse VHDX/);
+  assert.doesNotMatch(docker.diskNote('win32'), /Mac/);
+  assert.doesNotMatch(docker.diskNote('linux'), /Mac|VHDX/);
+  assert.ok(!/\u2014/.test(['darwin', 'win32', 'linux'].map(docker.diskNote).join('')));
+
+  const down = (state, platform) => docker.reclaimSuggestions({ ok: false, platform, status: { state }, desktopDisk: DISK })[0];
+  assert.match(down('engine-down', 'win32').guidance, /^Restart Docker Desktop/);
+  assert.match(down('engine-down', 'win32').guidance, /WSL2/);
+  assert.doesNotMatch(down('engine-down', 'win32').guidance, /Mac/);
+  assert.match(down('stopped', 'darwin').guidance, /^Start Docker Desktop/);
+  assert.match(down('stopped', 'darwin').guidance, /Mac/);
+  const ok = docker.reclaimSuggestions({ ok: true, platform: 'win32', categories: docker.parseSummary(DF_SUMMARY), desktopDisk: DISK });
+  assert.ok(ok.every((s) => s.note === docker.diskNote('win32')));
+});
+
+test('on Linux the backend probe matches the executable path, since procps truncates names to 15 chars', async () => {
+  let seen;
+  await docker.backendRunning({ processExec: (c, a, o, cb) => { seen = [c, a]; cb(null, '1\n', ''); } }, 'linux');
+  assert.equal(seen[0], 'pgrep');
+  assert.equal(seen[1][0], '-f');
+  const re = new RegExp(seen[1][1]);
+  assert.ok(re.test('/opt/docker-desktop/bin/com.docker.backend'));
+  assert.ok(re.test('/opt/docker-desktop/bin/com.docker.backend run'));
+  assert.ok(!re.test('tail -f /home/b/.docker/desktop/log/host/com.docker.backend.log'));
 });

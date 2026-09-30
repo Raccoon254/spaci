@@ -409,7 +409,13 @@
       const chosen = projectsNow().filter((p) => sel.has(p.path));
       const n = chosen.length;
       if (!n) { SP.setActionBar(null); return; }
-      const bytes = chosen.reduce((s, p) => s + (p.cleanableSize || 0), 0);
+      // Bulk clean only ever takes items the scan verified as safe. The rest
+      // are cleaned one at a time from the project detail view.
+      const bytes = chosen.reduce((s, p) => s + safeItems(p).reduce((a, it) => a + (it.size || 0), 0), 0);
+      if (!bytes && !chosen.some((p) => safeItems(p).length)) {
+        SP.setActionBar({ count: n + ' project' + (n > 1 ? 's' : ''), size: 'nothing safe to bulk clean', action: 'Review ' + (n > 1 ? 'first project' : 'project'), danger: false, onClear: () => { selSet().clear(); paint(); }, onClean: () => openDetail(chosen[0]) });
+        return;
+      }
       SP.setActionBar({
         count: n + ' project' + (n > 1 ? 's' : ''),
         size: fmt(bytes),
@@ -424,26 +430,32 @@
     // job shape and api.clean call the detail screen builds (safe / reversible,
     // so no confirm modal). Mirrors the detail's post-clean bookkeeping.
     async function cleanSelectedProjects(chosen) {
-      if (S.cleaning || !chosen.length) return;
+      if (S.projCleaning || !chosen.length) return;
       const jobs = [];
-      chosen.forEach((p) => (p.items || []).forEach((it) => jobs.push({ path: it.path, isDir: it.isDir, size: it.size })));
+      chosen.forEach((p) => safeItems(p).forEach((it) => jobs.push({ path: it.path, isDir: it.isDir, size: it.size })));
       if (!jobs.length) return;
-      S.cleaning = true;
+      const sent = new Set(jobs.map((j) => j.path));
+      S.projCleaning = true;
       try {
         const res = await api.clean(jobs, { scope: 'projects', label: chosen.length + ' project' + (chosen.length === 1 ? '' : 's'), reversible: true });
-        if (res && res.ok !== false) {
-          const freed = res.totalFreed != null ? res.totalFreed : jobs.reduce((s, j) => s + (j.size || 0), 0);
+        const sum = SP.reportClean(res, {
+          fallbackFreed: jobs.reduce((s, j) => s + (j.size || 0), 0),
+          burstLabel: 'across ' + chosen.length + ' project' + (chosen.length === 1 ? '' : 's')
+        });
+        if (sum.ok) {
           // Drop cleaned items from each selected project and recompute sizes.
+          // Anything refused or reported as failed stays listed and selected.
           chosen.forEach((p) => {
-            p.items = [];
-            p.cleanableSize = 0;
-            delete (S.itemSel || {})[p.path];
+            p.items = (p.items || []).filter((it) => !sent.has(it.path) || sum.blocked(it.path));
+            p.cleanableSize = p.items.reduce((s, it) => s + (it.size || 0), 0);
+            if (!p.items.length) delete (S.itemSel || {})[p.path];
           });
-          selSet().clear();
-          SP.burst(fmt(freed), 'across ' + chosen.length + ' project' + (chosen.length === 1 ? '' : 's'));
+          chosen.forEach((p) => { if (!p.items.length) selSet().delete(p.path); });
         }
-      } catch (_) { /* ignore */ }
-      S.cleaning = false;
+      } catch (err) {
+        SP.reportClean({ ok: false, error: (err && err.message) || 'Clean failed' });
+      }
+      S.projCleaning = false;
       paint();
     }
 
@@ -572,7 +584,7 @@
     const items = (p.items || []).slice();
     const sel = (S.itemSel = S.itemSel || {});
     const selKey = p.path;
-    const chosen = (sel[selKey] = sel[selKey] || new Set(items.map((i) => i.path))); // default: all selected
+    const chosen = (sel[selKey] = sel[selKey] || new Set(items.filter((i) => i.safe === true).map((i) => i.path))); // default: safe items only
 
     // ----- back button -----
     host.appendChild(el('button', {
@@ -657,10 +669,11 @@
       hov: 'background:var(--panel);color:var(--text)',
     }, []);
     function renderSelectAllLabel() {
-      const allOn = items.length && chosen.size === items.length;
+      const pick = items.filter((it) => it.safe === true);
+      const allOn = pick.length > 0 && pick.every((it) => chosen.has(it.path));
       selectAllBtn.innerHTML = '';
       selectAllBtn.appendChild(ic('check-circle', 15));
-      selectAllBtn.appendChild(document.createTextNode(allOn ? 'Deselect all' : 'Select all'));
+      selectAllBtn.appendChild(document.createTextNode(allOn ? 'Deselect all' : (pick.length < items.length ? 'Select all safe' : 'Select all')));
     }
     host.appendChild(el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin:26px 0 12px' }, [
       el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600', text: 'Cleanable items (' + items.length + ')' }),
@@ -679,9 +692,10 @@
     }
 
     selectAllBtn.addEventListener('click', () => {
-      const allOn = chosen.size === items.length;
+      const pick = items.filter((it) => it.safe === true);
+      const allOn = pick.length > 0 && pick.every((it) => chosen.has(it.path));
       chosen.clear();
-      if (!allOn) items.forEach((it) => chosen.add(it.path));
+      if (!allOn) pick.forEach((it) => chosen.add(it.path));
       itemRows.forEach((r) => r.sync());
       updateAfterToggle();
     });
@@ -710,17 +724,21 @@
     }
 
     async function doClean() {
-      if (S.cleaning) return;
+      if (S.projCleaning) return;
       const chosenItems = selectedItems();
       if (!chosenItems.length) return;
-      S.cleaning = true;
+      S.projCleaning = true;
       try {
-        const jobs = chosenItems.map((it) => ({ path: it.path, isDir: it.isDir, size: it.size }));
+        const jobs = chosenItems.filter((it) => it.safe === true).map((it) => ({ path: it.path, isDir: it.isDir, size: it.size }));
         const res = await api.clean(jobs, { scope: 'projects', label: p.name, reversible: true });
-        if (res && res.ok !== false) {
-          const freed = res.totalFreed != null ? res.totalFreed : chosenItems.reduce((s, i) => s + (i.size || 0), 0);
-          // drop cleaned items from the project and recompute
-          const cleaned = new Set(chosenItems.map((i) => i.path));
+        const sum = SP.reportClean(res, {
+          fallbackFreed: chosenItems.reduce((s, i) => s + (i.size || 0), 0),
+          burstLabel: 'from ' + p.name
+        });
+        if (sum.ok) {
+          // drop cleaned items from the project and recompute; refused or
+          // failed items stay listed
+          const cleaned = new Set(chosenItems.filter((i) => !sum.blocked(i.path)).map((i) => i.path));
           p.items = (p.items || []).filter((i) => !cleaned.has(i.path));
           p.cleanableSize = (p.items || []).reduce((s, i) => s + (i.size || 0), 0);
           delete (S.itemSel || {})[p.path];
@@ -729,10 +747,11 @@
             const idx = S.projects.findIndex((x) => x.path === p.path);
             if (idx >= 0) S.projects[idx] = p;
           }
-          SP.burst(fmt(freed), 'from ' + p.name);
         }
-      } catch (_) { /* ignore */ }
-      S.cleaning = false;
+      } catch (err) {
+        SP.reportClean({ ok: false, error: (err && err.message) || 'Clean failed' });
+      }
+      S.projCleaning = false;
       if (S.route === 'project') SP.go('project');
     }
 
@@ -740,16 +759,19 @@
     syncDetailActionBar();
   };
 
+  function safeItems(p) { return (p.items || []).filter((it) => it.safe === true); }
+
   function buildItemRow(it, chosen, onToggle) {
     const badgeSafe = it.safe;
-    const check = el('div', {
+    const locked = it.safe !== true; // unverified: information only, never cleaned by Spaci
+    const check = locked ? el('div', { style: 'width:24px;flex:none' }) : el('div', {
       class: chosen.has(it.path) ? 'sp-check-on' : '',
       style: 'width:24px;height:24px;border-radius:50%;border:1.5px solid var(--border-2);flex:none;display:grid;place-items:center;color:transparent;transition:.14s',
     }, [ic('tick', 14)]);
 
     const node = el('div', {
       class: chosen.has(it.path) ? 'sp-row-sel' : '',
-      style: 'display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border);cursor:pointer',
+      style: 'display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border);' + (locked ? '' : 'cursor:pointer'),
     }, [
       check,
       el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic(itemIcon(it), 22)]),
@@ -762,9 +784,16 @@
             text: badgeSafe ? 'Safe' : 'Caution',
           }),
         ]),
-        el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px', text: it.note || it.path }),
+        el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px;line-height:1.5', text: it.note || it.path }),
+        locked ? el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:3px', text: 'Spaci will not clean this. Reveal it and delete it yourself if you are sure.' }) : null,
       ]),
       el('div', { style: 'font-weight:700;font-size:14.5px;flex:none', text: fmt(it.size || 0) }),
+      locked ? el('button', {
+        style: 'width:34px;height:34px;border-radius:9px;border:1px solid var(--border);background:var(--panel-2);color:var(--text-3);display:grid;place-items:center;flex:none;cursor:pointer',
+        hov: 'border-color:var(--border-2);color:var(--text)',
+        title: 'Reveal in file manager',
+        onclick: (e) => { e.stopPropagation(); try { api.reveal(it.path); } catch (_) {} },
+      }, [ic('folder-open', 16)]) : null,
     ]);
 
     function sync() {
@@ -772,6 +801,7 @@
       node.className = chosen.has(it.path) ? 'sp-row-sel' : '';
     }
     node.addEventListener('click', () => {
+      if (locked) return;
       if (chosen.has(it.path)) chosen.delete(it.path);
       else chosen.add(it.path);
       sync();

@@ -1,91 +1,75 @@
 // Auto-update for Spaci, backed by electron-updater and the generic feed served
 // at https://spaci.kentom.co.ke/updates (see package.json build.publish).
 //
-// On a packaged build the updater checks the feed shortly after launch and every
-// six hours, downloads any newer release in the background, and installs it on
-// quit (or immediately when the user clicks "Restart to update"). In dev it does
-// nothing real, it just reports a "dev" status so the UI can say so.
+// This file is only the Electron wiring. Every decision (when to check, what
+// to accept from the feed, what to tell the user, when to retry) lives in
+// update-policy.js, which is tested without Electron.
 //
-// Note for macOS: silent auto-install requires the app to be code-signed and
-// notarized. The check and download work without signing, but quitAndInstall on
-// an unsigned mac build will be blocked by Gatekeeper.
+// On a packaged build: first check about 20 seconds after launch, then every
+// six hours from the last completed check (re-evaluated after sleep). An
+// update is downloaded only if it is a newer stable version with sha512
+// checksums; the user is told when it is ready and chooses when to restart
+// (otherwise it installs on the next quit). The "Check for updates
+// automatically" setting (prefs.autoCheckUpdates) turns the periodic check
+// off; the manual button keeps working. In dev it reports a "dev" status.
+//
+// Note for macOS: Squirrel.Mac also refuses to install a bundle whose code
+// signature does not match the running app, so an unsigned or foreign build
+// can never be installed even if it reached the feed.
 
-const { app, ipcMain } = require('electron');
-const { autoUpdater } = require('electron-updater');
+const { app, ipcMain, net } = require('electron');
+const { createUpdateController } = require('./update-policy');
 
-let getWin = () => null;
-let lastStatus = { state: 'idle' };
+let controller = null;
 
-function send(payload) {
-  lastStatus = { ...payload, at: Date.now() };
-  const w = getWin();
-  if (w && !w.isDestroyed()) w.webContents.send('update:status', lastStatus);
-}
-
-function wireEvents() {
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.on('checking-for-update', () => send({ state: 'checking' }));
-  autoUpdater.on('update-available', (info) =>
-    send({ state: 'available', version: info && info.version })
-  );
-  autoUpdater.on('update-not-available', (info) =>
-    send({ state: 'current', version: (info && info.version) || app.getVersion() })
-  );
-  autoUpdater.on('error', (err) =>
-    send({ state: 'error', message: String((err && err.message) || err) })
-  );
-  autoUpdater.on('download-progress', (p) =>
-    send({
-      state: 'downloading',
-      percent: Math.round(p.percent || 0),
-      bytesPerSecond: p.bytesPerSecond,
-      transferred: p.transferred,
-      total: p.total,
-    })
-  );
-  autoUpdater.on('update-downloaded', (info) =>
-    send({ state: 'ready', version: info && info.version })
-  );
-}
-
-async function check() {
-  try {
-    return await autoUpdater.checkForUpdates();
-  } catch (e) {
-    send({ state: 'error', message: String((e && e.message) || e) });
-    return null;
+/**
+ * @param {() => Electron.BrowserWindow|null} winGetter
+ * @param {object} [opts]
+ * @param {() => object} [opts.getPrefs]
+ * @param {() => void} [opts.beforeInstall]  mark the app as quitting so windows close
+ * @param {(version:string) => void} [opts.onReady]  tell the user (notification, tray)
+ */
+function initUpdater(winGetter, opts = {}) {
+  const getWin = winGetter || (() => null);
+  let updater = null;
+  if (app.isPackaged) {
+    try {
+      updater = require('electron-updater').autoUpdater;
+    } catch (e) {
+      console.error('[update] electron-updater failed to load:', e);
+    }
   }
-}
 
-function initUpdater(winGetter) {
-  getWin = winGetter || getWin;
+  controller = createUpdateController({
+    updater,
+    currentVersion: app.getVersion(),
+    isPackaged: app.isPackaged && Boolean(updater),
+    isOnline: () => {
+      try { return typeof net.isOnline === 'function' ? net.isOnline() : true; } catch (_) { return true; }
+    },
+    getPrefs: opts.getPrefs || (() => ({})),
+    send: (status) => {
+      const w = getWin();
+      if (w && !w.isDestroyed()) w.webContents.send('update:status', status);
+    },
+    notifyReady: opts.onReady || (() => {}),
+    beforeInstall: opts.beforeInstall || (() => {}),
+    onReadyWithdrawn: opts.onReadyWithdrawn || (() => {}),
+    onInstallAbandoned: opts.onInstallAbandoned || (() => {}),
+    // MacUpdater emits update-downloaded before Squirrel.Mac has the zip; only
+    // the resolved download means the update can really be installed.
+    readyOn: process.platform === 'darwin' ? 'resolve' : 'event',
+  });
 
   ipcMain.handle('app:version', () => app.getVersion());
-  ipcMain.handle('update:status', () => lastStatus);
-  ipcMain.handle('update:check', async () => {
-    if (!app.isPackaged) {
-      send({ state: 'dev', version: app.getVersion() });
-      return lastStatus;
-    }
-    await check();
-    return lastStatus;
-  });
-  ipcMain.handle('update:install', () => {
-    if (!app.isPackaged) return false;
-    // Give the download a moment to settle, then relaunch into the new version.
-    setImmediate(() => autoUpdater.quitAndInstall(false, true));
-    return true;
-  });
+  ipcMain.handle('update:status', () => controller.status());
+  ipcMain.handle('update:check', () => controller.checkNow());
+  ipcMain.handle('update:install', () => controller.install());
 
-  if (!app.isPackaged) {
-    send({ state: 'dev', version: app.getVersion() });
-    return;
-  }
-
-  wireEvents();
-  setTimeout(() => check(), 8000);
-  setInterval(() => check(), 6 * 60 * 60 * 1000);
+  controller.start();
+  return controller;
 }
 
-module.exports = { initUpdater };
+function getUpdateController() { return controller; }
+
+module.exports = { initUpdater, getUpdateController };

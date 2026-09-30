@@ -34,7 +34,7 @@
   const COLORS = {
     developer: '#3b6fd0', media: '#8b6bd9', applications: '#d96a8a', documents: '#2fb8a8',
     downloads: '#e0954f', caches: '#e6b85c', appdata: '#5e93dd', mail: '#7fb5c9',
-    browsers: '#46b58d', xcode: '#6c7ae0',
+    browsers: '#46b58d', xcode: '#6c7ae0', aitools: '#c77dff',
     system: '#7a8a99', other: '#8b867f'
   };
   const PALETTE = ['#3b6fd0', '#8b6bd9', '#d96a8a', '#2fb8a8', '#e0954f', '#5e93dd', '#7fb5c9', '#7a8a99'];
@@ -68,6 +68,48 @@
     }).finally(() => { S._storageLoading = false; if (S.route === 'storage' || S.route === 'storagecat') SP.go(S.route); });
   }
 
+  // "What macOS calls System Data". macOS files developer data, caches, app
+  // data, swap and snapshots under one System Data figure; diskbreakdown
+  // attributes the parts it can see. macOS only (systemData is null elsewhere).
+  const SD_COLORS = {
+    docker: '#5e93dd', aitools: '#c77dff', devcaches: '#3b6fd0', dotcache: '#e6b85c',
+    swap: '#e0954f', appdata: '#46b58d', os: '#7a8a99'
+  };
+  function systemDataPanel(sd) {
+    if (!sd || !Array.isArray(sd.pieces) || !sd.pieces.length) return null;
+    const total = sd.estimate || sd.pieces.reduce((a, p) => a + p.bytes, 0);
+    const bar = el('div', { style: 'display:flex;height:12px;border-radius:99px;overflow:hidden;background:var(--track);margin:18px 0 6px' },
+      sd.pieces.map((p) => el('div', { title: p.label, style: 'height:100%;flex:none;border-right:2px solid var(--panel);background:' + (SD_COLORS[p.key] || '#8b867f') + ';width:' + (total ? (p.bytes / total) * 100 : 0) + '%' })));
+    const line = (color, label, hint, value, pct) => el('div', { style: 'display:flex;align-items:center;gap:13px;padding:11px 0;border-top:1px solid var(--border)' }, [
+      el('span', { style: 'width:11px;height:11px;border-radius:4px;flex:none;background:' + color }),
+      el('div', { style: 'flex:1;min-width:0' }, [
+        el('div', { style: 'font-weight:600;font-size:13.5px', text: label }),
+        hint ? el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:1px;line-height:1.45', text: hint }) : null
+      ]),
+      el('div', { style: 'text-align:right;flex:none' }, [
+        el('div', { style: 'font-weight:700;font-size:14px;font-variant-numeric:tabular-nums', text: value }),
+        pct ? el('div', { style: 'font-size:11px;color:var(--text-4);margin-top:1px', text: pct }) : null
+      ])
+    ]);
+    const rows = sd.pieces.map((p) => line(SD_COLORS[p.key] || '#8b867f', p.label, p.hint, fmt(p.bytes), total ? (p.bytes / total * 100).toFixed(0) + '%' : ''));
+    if (sd.snapshots) {
+      const n = sd.snapshots.count;
+      rows.push(line('var(--track-bright)', 'Local snapshots', 'APFS does not report their size, so they are counted under macOS and other system files. macOS removes them when it needs the space.', n + (n === 1 ? ' snapshot' : ' snapshots'), ''));
+    }
+    return el('div', { style: 'padding:20px 22px;border-radius:16px;background:var(--panel);border:1px solid var(--border);margin-top:26px' }, [
+      el('div', { style: 'display:flex;align-items:center;gap:14px' }, [
+        el('div', { style: 'width:46px;height:46px;border-radius:13px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic('info', 24)]),
+        el('div', { style: 'flex:1;min-width:0' }, [
+          el('div', { style: 'font-weight:700;font-size:15px', text: 'What macOS calls System Data' }),
+          el('div', { style: 'color:var(--text-2);font-size:13px;margin-top:2px;line-height:1.55', text: 'Storage settings shows one large System Data figure. On this Mac it comes to about ' + fmt(total) + ', and this is what it is made of.' })
+        ])
+      ]),
+      bar,
+      el('div', { style: 'margin-top:8px' }, rows),
+      el('div', { style: 'color:var(--text-3);font-size:11.5px;line-height:1.5;margin-top:10px', text: 'This is an estimate. Apple does not publish exactly what counts as System Data, so the total can differ from the number in Storage settings.' })
+    ]);
+  }
+
   // ---------- STORAGE ----------
   SP.screens.storage = function (host) {
     const { total, used, free, cats } = disk();
@@ -75,7 +117,7 @@
 
     const hover = S.storageHover;
     const maxCat = cats.reduce((m, c) => Math.max(m, c.bytes), 0) || 1;
-    const reclaim = (S.recs || []).reduce((a, r) => a + recBytes(r), 0);
+    const reclaim = (S.recs || []).filter((r) => !(r.action && r.action.type === 'none')).reduce((a, r) => a + recBytes(r), 0);
 
     host.appendChild(el('div', { style: 'font-size:31px;font-weight:700;letter-spacing:-1.1px', text: 'Storage' }));
     host.appendChild(el('div', { style: 'color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px;margin-bottom:30px', text: 'A clear picture of where your ' + fmt(total) + ' has gone. Hover any segment to inspect it.' }));
@@ -148,6 +190,10 @@
           ic('chevron-right', 18, { color: 'var(--text-4)' })
         ]);
       })));
+
+    // what macOS calls System Data (macOS only, absent on older cached scans)
+    const sdPanel = systemDataPanel(S.breakdown && S.breakdown.systemData);
+    if (sdPanel) host.appendChild(sdPanel);
 
     // reclaimable banner
     if (reclaim) {

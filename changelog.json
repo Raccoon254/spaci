@@ -1,8 +1,36 @@
 [
   {
+    "version": "2.2.0",
+    "date": "2026-09-30",
+    "tag": "Latest",
+    "major": false,
+    "summary": "Spaci now finds the space AI coding tools and developer caches take up, explains what macOS calls System Data, and never deletes a folder it cannot prove is build output.",
+    "added": [
+      "AI tools: session history, logs and caches from Claude Code, Codex, opencode, Cursor, Windsurf, Gemini CLI, Grok, Zed, GitHub Copilot and Continue. Settings, credentials and memory are never touched. History is opt-in, and a tool's data is left alone while that tool is running.",
+      "What macOS calls System Data: the Storage screen breaks that figure down into what it really is on your Mac, including the Docker disk image, AI tools, developer caches, swap and snapshots.",
+      "Caches Spaci used to miss: NuGet on macOS and Linux, Gradle wrapper downloads, the Dart analysis server, the whole Go module cache, Hugging Face models (opt-in), and the command-line cache folder (opt-in, with model stores always kept).",
+      "Docker: Spaci now tells apart Docker not installed, stopped, open with its engine not responding, and running, and it shows the disk image's real size instead of the much larger number Finder reports.",
+      "An optional anonymous daily usage count: a random install ID, the app version and your operating system. Never file names, paths or sizes. Switch it off in Settings."
+    ],
+    "improved": [
+      "Every clean is checked again in Spaci's background process before anything is deleted, so safety no longer depends on which screen you cleaned from.",
+      "A project folder is offered as build output only when git says it is ignored. Scans are cached, so each folder is checked again at the moment you clean it.",
+      "Cleaning a broad cache folder never reaches into a cache that is listed separately, so the size shown is the space you get back.",
+      "Linux: caches follow XDG_CACHE_HOME. Windows: temporary files are no longer counted twice."
+    ],
+    "fixed": [
+      "Spaci 2.1 could delete a folder named build, dist, out or vendor that held source files, including files never committed to git. This is the most important fix in this release.",
+      "Read-only folders such as Go's module cache now clean completely instead of stopping partway.",
+      "Symbolic links are removed as links and never followed out of the folder being cleaned.",
+      "A clean that was partly refused or partly failed now says so, instead of reporting success.",
+      "Freed space no longer counts hard-linked files, which free nothing when one link is removed.",
+      "Docker cleanup refuses to run against a remote Docker host."
+    ]
+  },
+  {
     "version": "2.1.0",
     "date": "2026-08-17",
-    "tag": "Latest",
+    "tag": "Feature",
     "major": false,
     "summary": "Spaci now sees Docker, and scans your projects about ten times faster.",
     "added": [

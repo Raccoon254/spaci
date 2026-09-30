@@ -30,6 +30,9 @@ const PRUNE_TIMEOUT_MS = 120000;
 // How long a status/inventory result stays fresh. Docker sizes move slowly and
 // the UI polls on every screen paint, so a short cache avoids a CLI storm.
 const CACHE_MS = 60000;
+// A probe that timed out is not an answer: a big build can make a healthy engine
+// slow for a moment. Remember it only briefly so the UI recovers fast.
+const TIMEOUT_CACHE_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // Finding the binary
@@ -193,19 +196,88 @@ function parseLabels(value) {
 // ---------------------------------------------------------------------------
 
 let statusCache = null;
+let statusTtl = CACHE_MS;
+
+// The engine probe must fail fast: on a wedged Docker Desktop `docker version`
+// can hang for minutes, and the UI polls this.
+const ENGINE_PROBE_MS = 4000;
+
+/**
+ * Is a Docker Desktop backend process alive? Separates "Desktop is starting or
+ * wedged" from "Desktop is not running at all". Best-effort: any failure to ask
+ * counts as "no", which degrades to the `stopped` state.
+ */
+function backendRunning(options = {}, platform = process.platform) {
+  if (typeof options.backendRunning === 'function') {
+    return Promise.resolve(options.backendRunning()).then(Boolean, () => false);
+  }
+  return new Promise((resolve) => {
+    const exec = options.processExec || execFile;
+    // macOS pgrep -x matches the full process name. Linux procps truncates
+    // the name it matches to 15 characters ("com.docker.back"), so -x can never
+    // match there; match the executable path in the command line instead,
+    // anchored so a `tail -f .../com.docker.backend.log` does not count.
+    const [cmd, args] = platform === 'win32'
+      ? ['tasklist', ['/FI', 'IMAGENAME eq com.docker.backend.exe', '/NH']]
+      : platform === 'linux'
+        ? ['pgrep', ['-f', '(^|/)com\\.docker\\.backend( |$)']]
+        : ['pgrep', ['-x', 'com.docker.backend']];
+    try {
+      exec(cmd, args, { timeout: 3000 }, (err, stdout) => {
+        if (platform === 'win32') return resolve(/com\.docker\.backend/i.test(String(stdout || '')));
+        resolve(!err && String(stdout || '').trim().length > 0);
+      });
+    } catch { resolve(false); }
+  });
+}
+
+/** Only a local socket or pipe means the engine runs on this machine. */
+function isLocalEndpoint(host) {
+  return /^(unix|npipe):\/\//i.test(String(host || '').trim());
+}
+
+/**
+ * The endpoint the CLI will talk to: DOCKER_HOST wins (the CLI honours it over
+ * the context), else the current context's host. null when it cannot be read.
+ */
+async function currentEndpoint(options = {}) {
+  const env = options.env || process.env;
+  if (env.DOCKER_HOST && String(env.DOCKER_HOST).trim()) return String(env.DOCKER_HOST).trim();
+  const res = await runDocker(['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], {
+    ...options,
+    timeout: ENGINE_PROBE_MS,
+  });
+  const host = res.ok ? res.stdout.trim() : '';
+  return host || null;
+}
+
+/** Linux without the docker group: the socket exists but may not be opened. */
+function isPermissionError(message) {
+  return /permission denied/i.test(String(message || '')) && /docker\.sock/i.test(String(message || ''));
+}
 
 /**
  * Is Docker usable right now? `docker version` answers both questions in one
  * call: the client block proves it is installed, the server block proves the
  * daemon is up. It costs ~0.2s, unlike `docker info` which can take seconds.
+ *
+ * `state` is the field to branch on:
+ *   not-installed  no docker CLI
+ *   stopped        CLI present, no Desktop backend process
+ *   engine-down    Desktop backend running but the engine does not answer
+ *   running        engine answered
+ *   no-permission  engine socket exists but this user may not open it (Linux)
+ * `installed` and `running` stay for existing callers. `remote` is true when
+ * the current context points at another host (ssh://, tcp://); the answer then
+ * describes that host, not this machine.
  */
 async function status(options = {}) {
-  if (!options.force && statusCache && Date.now() - statusCache.checkedAt < CACHE_MS) {
+  if (!options.force && statusCache && Date.now() - statusCache.checkedAt < statusTtl) {
     return statusCache;
   }
   const res = await runDocker(['version', '--format', '{{json .}}'], {
     ...options,
-    timeout: options.timeout || PROBE_TIMEOUT_MS,
+    timeout: options.timeout || ENGINE_PROBE_MS,
   });
 
   let parsed = null;
@@ -213,19 +285,34 @@ async function status(options = {}) {
 
   const client = parsed && parsed.Client;
   const server = parsed && parsed.Server;
+  const running = Boolean(server && server.Version);
+  // Only a missing binary means "not installed". A timeout or a refusing daemon
+  // proves a CLI exists.
+  const installed = res.error !== 'docker CLI not found';
+
+  let state = 'running';
+  if (!running) {
+    if (!installed) state = 'not-installed';
+    else if (isPermissionError(res.error)) state = 'no-permission';
+    else state = (await backendRunning(options)) ? 'engine-down' : 'stopped';
+  }
+
+  const endpoint = running ? await currentEndpoint(options) : null;
+
   const value = {
-    installed: Boolean(client) || res.ok || /Cannot connect|daemon/i.test(res.error || ''),
-    running: Boolean(server && server.Version),
+    state,
+    installed,
+    running,
     clientVersion: client ? client.Version : null,
     serverVersion: server ? server.Version : null,
     platform: server && server.Platform ? server.Platform.Name : null,
-    // 'docker CLI not found' means not installed at all; anything else means it
-    // is installed but the daemon did not answer.
     error: res.ok ? null : res.error,
+    endpoint,
+    remote: Boolean(endpoint) && !isLocalEndpoint(endpoint),
     checkedAt: Date.now(),
   };
-  if (value.error === 'docker CLI not found') value.installed = false;
   statusCache = value;
+  statusTtl = res.error === 'docker timed out' ? TIMEOUT_CACHE_MS : CACHE_MS;
   return value;
 }
 
@@ -393,7 +480,7 @@ async function inventory(options = {}) {
   }
   const st = options.status || (await status(options));
   if (!st.running) {
-    const value = { ok: false, reason: st.installed ? 'daemon-not-running' : 'not-installed', status: st };
+    const value = { ok: false, reason: !st.installed ? 'not-installed' : st.state === 'no-permission' ? 'no-permission' : 'daemon-not-running', state: st.state, status: st };
     inventoryCache = { at: Date.now(), value };
     return value;
   }
@@ -473,19 +560,28 @@ function desktopDiskPaths(platform = process.platform, home = os.homedir()) {
   return [];
 }
 
-/** Size of the VM disk image, or null when there is not one (Linux). */
+/**
+ * The VM disk image, or null when there is not one (Linux). `bytes` and
+ * `allocatedBytes` are what it occupies on the host; `apparentBytes` is the
+ * size the file claims, which the UI should only use to explain the gap.
+ */
 async function desktopDisk(platform = process.platform, home = os.homedir()) {
   for (const p of desktopDiskPaths(platform, home)) {
     try {
       const st = await fs.promises.stat(p);
       if (st.isFile()) {
+        // Never `size`: a sparse 460 GB image can occupy 54 GB. Only fall back
+        // to size where the platform reports no block count at all.
+        const allocated = typeof st.blocks === 'number' ? st.blocks * 512 : st.size;
         return {
           path: p,
           // Apparent size is the disk the VM believes it has; blocks*512 is what
           // the sparse file actually occupies on the host, which is the honest
           // number to show.
-          bytes: st.blocks != null ? st.blocks * 512 : st.size,
+          bytes: allocated,
+          allocatedBytes: allocated,
           apparentBytes: st.size,
+          sparse: allocated < st.size,
         };
       }
     } catch { /* next candidate */ }
@@ -667,8 +763,39 @@ const SUGGEST_HIGH = 5 * 1024 ** 3;
  * to PRUNE_KINDS so the two can never drift; the caller owns the wording.
  */
 function reclaimSuggestions(info) {
-  if (!info || !info.ok || !info.categories) return [];
+  if (!info) return [];
+  // Prune refuses on a remote context, so do not offer it.
+  if (info.status && info.status.remote) return [];
   const out = [];
+  const platform = info.platform || process.platform;
+  const disk = info.desktopDisk || info.disk || null;
+
+  if (!info.ok || !info.categories) {
+    // Engine unreachable: pruning is impossible, but the disk image is still
+    // the biggest thing Docker owns and the user deserves the real number.
+    if (disk && disk.path) {
+      const state = (info.status && info.status.state) || info.state || null;
+      out.push({
+        kind: 'desktop-disk',
+        savings: 0,
+        bytes: disk.allocatedBytes != null ? disk.allocatedBytes : disk.bytes,
+        apparentBytes: disk.apparentBytes,
+        state,
+        severity: 'info',
+        message: state === 'engine-down'
+          ? 'Docker is open but its engine is not answering. Its disk image is still using space.'
+          : 'Docker is not running. Its disk image is still using space.',
+        guidance: (state === 'engine-down'
+          ? 'Restart Docker Desktop and let it finish starting to clean it from inside. '
+          : 'Start Docker Desktop and let it finish starting to clean it from inside. ') + diskNote(platform),
+        sizeNote: disk.apparentBytes > (disk.allocatedBytes != null ? disk.allocatedBytes : disk.bytes)
+          ? 'The file claims a larger size, but only the space it really uses counts.'
+          : null,
+      });
+    }
+    return out;
+  }
+
   const { buildCache, images } = info.categories;
 
   if (buildCache && buildCache.reclaimable >= SUGGEST_MIN_BUILD_CACHE) {
@@ -678,6 +805,7 @@ function reclaimSuggestions(info) {
       total: buildCache.count,
       unused: buildCache.count - buildCache.active,
       severity: buildCache.reclaimable > SUGGEST_HIGH ? 'high' : 'normal',
+      note: disk ? diskNote(platform) : null,
     });
   }
   if (images && images.reclaimable >= SUGGEST_MIN_IMAGES) {
@@ -687,6 +815,7 @@ function reclaimSuggestions(info) {
       total: images.count,
       unused: images.count - images.active,
       severity: images.reclaimable > SUGGEST_HIGH ? 'high' : 'normal',
+      note: disk ? diskNote(platform) : null,
     });
   }
   // Volumes are never suggested, however large: they are the only Docker
@@ -700,35 +829,82 @@ function parseReclaimed(stdout) {
   return m ? parseSize(m[1]) : 0;
 }
 
-/** Run one allowlisted prune. Unknown kinds are refused, never passed through. */
+// Volumes are not in PRUNE_KINDS so nothing that lists the allowlist can offer
+// them. They are reachable only through prune('volumes', { confirmVolumes: true }).
+// No `-a`: on current Docker that would also remove named volumes.
+const VOLUME_PRUNE = {
+  id: 'volumes',
+  name: 'Unused volumes',
+  args: ['volume', 'prune', '-f'],
+  safe: false,
+  description: 'Removes volumes no container uses. Databases and uploads live here and cannot be recovered.',
+};
+
+/** Why freed space may not show up on the host, worded for each platform. */
+function diskNote(platform = process.platform) {
+  if (platform === 'win32') {
+    return 'Docker keeps its data in a WSL2 disk image (VHDX) that will not shrink by itself unless sparse VHDX is enabled in Docker Desktop. Freed space stays reserved on your drive until then.';
+  }
+  if (platform === 'linux') {
+    return 'Docker on Linux stores its data directly on your disk, so freed space comes back right away.';
+  }
+  return 'The Docker disk image (Docker.raw) on your Mac will not shrink right away. Docker hands the space back over time, or when it restarts.';
+}
+
+const DISK_NOTE = diskNote();
+
+/**
+ * Run one prune. Unknown kinds are refused, never passed through. Volumes need
+ * an explicit `options.confirmVolumes === true` on top of naming the kind.
+ */
 async function prune(kind, options = {}) {
-  const spec = PRUNE_KINDS[kind];
+  let spec = Object.prototype.hasOwnProperty.call(PRUNE_KINDS, kind) ? PRUNE_KINDS[kind] : null;
+  if (kind === 'volumes') {
+    if (options.confirmVolumes !== true) {
+      return { ok: false, error: 'Removing volumes needs explicit confirmation', freed: 0 };
+    }
+    spec = VOLUME_PRUNE;
+  }
   if (!spec) return { ok: false, error: `Unknown prune kind: ${kind}`, freed: 0 };
 
   const st = options.status || (await status(options));
   if (!st.running) {
-    return { ok: false, error: st.installed ? 'Docker is not running' : 'Docker is not installed', freed: 0 };
+    const error = st.state === 'engine-down' ? 'Docker is open but its engine is not answering. Restart Docker Desktop.'
+      : st.state === 'no-permission' ? 'Docker refused access to its socket. Add your user to the docker group or use rootless Docker.'
+      : st.installed ? 'Docker is not running' : 'Docker is not installed';
+    return { ok: false, error, freed: 0 };
+  }
+
+  // Prune acts on the current context, so make sure that is this machine. Checked
+  // fresh: the context can change inside the status cache window.
+  const endpoint = await currentEndpoint(options);
+  if (!endpoint) {
+    return { ok: false, error: 'Could not tell which Docker host is selected, so nothing was removed', freed: 0 };
+  }
+  if (!isLocalEndpoint(endpoint)) {
+    return { ok: false, error: `Docker is pointed at a remote host (${endpoint}). Switch to a local context to clean up`, freed: 0 };
   }
 
   const res = await runDocker(spec.args, { ...options, timeout: options.timeout || PRUNE_TIMEOUT_MS });
   // Sizes changed underneath us.
   inventoryCache = null;
   if (!res.ok) return { ok: false, error: res.error, freed: 0 };
-  return { ok: true, kind, freed: parseReclaimed(res.stdout), output: res.stdout.trim() };
+  return { ok: true, kind, freed: parseReclaimed(res.stdout), output: res.stdout.trim(), note: diskNote(options.platform) };
 }
 
 /** Drop the status/inventory caches (used after a prune or an explicit rescan). */
 function resetCache() {
   statusCache = null;
+  statusTtl = CACHE_MS;
   inventoryCache = null;
   binaryCache = undefined;
 }
 
 module.exports = {
-  PRUNE_KINDS,
+  PRUNE_KINDS, DISK_NOTE, diskNote,
   status, inventory, prune, desktopDisk, desktopDiskPaths,
   detect, composeServices, usageByProject, reclaimSuggestions,
   // exported for tests
   parseSize, parseReclaimable, parseLabels, parseInventory, parseSummary,
-  parseReclaimed, summarise, totalsOf, candidateBinaries, isDockerfile, resetCache,
+  parseReclaimed, summarise, totalsOf, candidateBinaries, isDockerfile, resetCache, backendRunning, isLocalEndpoint, currentEndpoint,
 };

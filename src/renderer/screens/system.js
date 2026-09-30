@@ -49,6 +49,12 @@
     sel.clear();
     targets.forEach((t) => { if (t.safe) sel.add(t.id); });
   }
+  // Irreversible data (AI tool session history, SQLite databases). Never
+  // preselected, never swept up by Select all, and confirmed before deleting.
+  function isPermanent(t) {
+    return t.reversible === false || (t.storyCategory === 'aitools' && !t.safe);
+  }
+  const isAiTools = (cat) => cat === 'AI tools';
   function groupByCategory(targets) {
     const order = [];
     const map = new Map();
@@ -118,26 +124,50 @@
         (paths || []).forEach((p) => jobs.push({ path: p, mode: t.mode || 'contents' }));
       });
       if (!jobs.length) return;
+      const permanent = chosen.filter(isPermanent);
+      const risky = chosen.filter((t) => !t.safe || isPermanent(t));
+      if (risky.length) {
+        // Each target says in its own words what deleting it means.
+        const body = risky.slice(0, 4).map((t) => t.name + ': ' + (t.description || 'Review before deleting.') + (isPermanent(t) ? ' This cannot be undone.' : '')).join('\n')
+          + (risky.length > 4 ? '\nand ' + (risky.length - 4) + ' more.' : '');
+        const ok = await SP.confirm({
+          title: permanent.length ? 'Permanently delete ' + risky.length + (risky.length === 1 ? ' item?' : ' items?') : 'Clean ' + risky.length + ' item' + (risky.length === 1 ? '' : 's') + ' marked Review?',
+          body,
+          confirmLabel: 'Delete',
+          danger: true,
+          icon: 'trash'
+        });
+        if (!ok) return;
+      }
+      const nameOf = (id) => { const t = targets.find((x) => x.id === id); return t ? t.name : ''; };
+      const noun = permanent.length ? 'item' : 'cache';
       S.systemCleaning = true; paint();
+      let needsRescan = false;
       try {
         const res = await api.clean(jobs, {
           scope: 'system',
-          label: chosen.length + ' system ' + (chosen.length === 1 ? 'cache' : 'caches'),
-          reversible: true
+          label: chosen.length + ' system ' + (chosen.length === 1 ? noun : noun + 's'),
+          reversible: permanent.length === 0
         });
-        if (res && res.ok) {
-          const cleanedIds = new Set(chosen.map((t) => t.id));
+        const sum = SP.reportClean(res, {
+          fallbackFreed: chosen.reduce((a, t) => a + (t.size || 0), 0),
+          names: nameOf,
+          burstLabel: 'across ' + chosen.length + ' ' + noun + (chosen.length === 1 ? '' : 's')
+        });
+        if (sum.ok) {
+          // Only targets that were actually cleaned leave the list. Anything
+          // refused or failed stays, still selected, so it can be retried.
+          const cleaned = chosen.filter((t) => !sum.refusedTargets.has(t.id) && !(t.paths || []).some((p) => sum.blocked(p)));
+          const cleanedIds = new Set(cleaned.map((t) => t.id));
           S.sysTargets = targetsNow().filter((t) => !cleanedIds.has(t.id));
           cleanedIds.forEach((id) => sel.delete(id));
-          const freed = res.totalFreed != null ? res.totalFreed : chosen.reduce((a, t) => a + (t.size || 0), 0);
-          SP.burst(fmt(freed), 'across ' + chosen.length + ' cache' + (chosen.length === 1 ? '' : 's'));
-        } else {
-          S.systemError = (res && res.error) || 'Clean failed';
+          needsRescan = sum.issues > 0;
         }
       } catch (err) {
-        S.systemError = (err && err.message) || 'Clean failed';
+        SP.reportClean({ ok: false, error: (err && err.message) || 'Clean failed' });
       }
       S.systemCleaning = false; paint();
+      if (needsRescan) runScan(); // refresh sizes of anything partly cleaned
     }
 
     function header() {
@@ -145,7 +175,7 @@
       return el('div', { style: 'display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:24px' }, [
         el('div', {}, [
           el('div', { style: 'font-size:31px;font-weight:700;letter-spacing:-1.1px', text: 'System Cleaner' }),
-          el('div', { style: 'color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px', text: 'Developer and system caches. Everything here is regenerable, clearing it is safe and reversible.' })
+          el('div', { style: 'color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px', text: 'Developer, AI tool and system data. Caches rebuild on their own. Items marked Permanent are never selected for you and cannot be recovered.' })
         ]),
         el('button', {
           style: 'height:44px;padding:0 20px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none' + (scanning ? ';opacity:.7;pointer-events:none' : ''),
@@ -168,6 +198,9 @@
       const sel = selSet();
       const on = sel.has(t.id);
       const badgeSafe = t.safe;
+      const permanent = isPermanent(t);
+      const badgeClass = badgeSafe ? 'sp-badge-safe' : 'sp-badge-warn';
+      const badgeText = permanent ? 'Permanent' : (badgeSafe ? 'Safe' : 'Review');
       return el('div', {
         class: 'sp-hov',
         style: 'display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border);cursor:pointer;box-shadow:var(--shadow-sm)',
@@ -183,12 +216,15 @@
           el('div', { style: 'font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px' }, [
             el('span', { text: t.name }),
             el('span', {
-              class: badgeSafe ? 'sp-badge-safe' : 'sp-badge-warn',
+              class: badgeClass,
               style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700',
-              text: badgeSafe ? 'Safe' : 'Review'
+              text: badgeText
             })
           ]),
-          el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px', text: t.description || '' })
+          el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px;line-height:1.5', text: t.description || '' }),
+          permanent ? el('div', { style: 'color:var(--danger-fg);font-size:12px;font-weight:600;margin-top:4px;display:flex;align-items:center;gap:6px' }, [
+            ic('lock', 13), 'Permanent loss of history. This cannot be undone.'
+          ]) : null
         ]),
         el('div', { style: 'font-weight:700;font-size:15px;color:var(--accent-fg);flex:none', text: fmt(t.size || 0) })
       ]);
@@ -201,6 +237,7 @@
     async function loadDocker(force) {
       if (S.dockerLoading || !api.dockerStatus) return;
       S.dockerLoading = true;
+      if (force) paint(); // show the checking state
       try { S.docker = await api.dockerStatus(force); }
       catch (_) { S.docker = null; }
       finally { S.dockerLoading = false; paint(); }
@@ -247,51 +284,133 @@
       }, [busy ? ring('elastic', 15) : ic('broom', 15), busy ? 'Reclaiming…' : label]);
     }
 
+    // not-installed | stopped | engine-down | running. Older cached results
+    // carry no `state`, so derive it from what they do have.
+    function dockerState(d) {
+      const st = d.status || {};
+      const given = st.state || d.state;
+      if (given === 'running' && !d.ok) return 'unreadable'; // engine answers, inventory does not
+      if (!given && !d.ok && !d.status && d.reason === 'error') return 'unavailable';
+      return given || d.state || (d.ok ? 'running' : (st.installed ? 'stopped' : 'not-installed'));
+    }
+
+    // The VM disk image is a sparse file: Finder shows the size it reserves, but
+    // only `allocatedBytes` is on disk. Say so only when the gap is large.
+    function diskImageStat(disk) {
+      const real = disk.allocatedBytes != null ? disk.allocatedBytes : (disk.bytes || 0);
+      return el('div', { style: 'flex:1;min-width:126px' }, [
+        el('div', { style: 'font-size:11.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-3);font-weight:600', text: 'Disk image' }),
+        el('div', { style: 'font-size:16px;font-weight:700;margin-top:4px', text: fmt(real) }),
+        el('div', { style: 'font-size:12px;margin-top:2px;color:var(--text-3)', text: 'used on disk' }),
+      ]);
+    }
+    function diskImageNote(disk) {
+      const real = disk.allocatedBytes != null ? disk.allocatedBytes : (disk.bytes || 0);
+      const apparent = disk.apparentBytes || 0;
+      if (!(apparent >= real * 1.5 && apparent - real >= 5 * 1024 ** 3)) return null;
+      return el('div', {
+        style: 'color:var(--text-3);font-size:11.5px;line-height:1.5',
+        text: 'Finder shows ' + fmt(apparent) + ' for the Docker disk image because it reserves room it has not used. Only the ' + fmt(real) + ' it really occupies counts.',
+      });
+    }
+
     function dockerCard() {
       const d = S.docker;
       if (!d) return null;
-      const st = d.status || {};
-      if (!d.ok && !st.installed) return null; // nothing to say without Docker
+      const disk = d.desktopDisk || null;
+      // Refresh failed outright and we know nothing about Docker: neutral card,
+      // unless nothing points to Docker being installed at all.
+      // A remote Docker context is never managed here, whatever its state.
+      const remote = Boolean((d.status && d.status.remote) || d.remote);
+      const state = remote ? 'remote' : dockerState(d);
+      // No Docker and nothing left behind: nothing to say.
+      if (state === 'not-installed' && !disk) return null;
 
       const shell = (children) => el('div', {
         style: 'display:flex;flex-direction:column;gap:14px;padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid var(--border);margin:26px 0 0;box-shadow:var(--shadow-sm)',
       }, children);
 
+      const running = state === 'running' && d.ok;
+      const SUB = {
+        running: 'Images, volumes and build cache' + (d.projects ? ` · ${d.projects} scanned project${d.projects === 1 ? '' : 's'} using Docker` : ''),
+        stopped: 'Docker Desktop is not running',
+        'engine-down': 'Docker Desktop is open, but its engine is not responding',
+        'no-permission': 'Docker is running, but Spaci cannot talk to it',
+        remote: 'Docker is pointed at a remote host',
+        unreadable: 'Docker is running, but Spaci could not read its usage',
+        'not-installed': 'Docker is not installed',
+      };
+      const BADGE = {
+        stopped: ['sp-badge-caution', 'Stopped'],
+        'engine-down': ['sp-badge-warn', 'Not responding'],
+        'no-permission': ['sp-badge-warn', 'No access'],
+        remote: ['sp-badge-caution', 'Remote'],
+        unreadable: ['sp-badge-caution', 'Unreadable'],
+        'not-installed': ['sp-badge-caution', 'Not installed'],
+      };
+      const known = Object.prototype.hasOwnProperty.call(SUB, state);
+      const badge = BADGE[state];
+
       const title = el('div', { style: 'display:flex;align-items:center;gap:13px' }, [
         el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' },
           [ic('docker', 24, { kind: 'logo' })]),
         el('div', { style: 'flex:1;min-width:0' }, [
-          el('div', { style: 'font-weight:700;font-size:15px', text: 'Docker' }),
-          el('div', {
-            style: 'color:var(--text-3);font-size:12px;margin-top:2px',
-            text: d.ok
-              ? 'Images, volumes and build cache' + (d.projects ? ` · ${d.projects} scanned project${d.projects === 1 ? '' : 's'} using Docker` : '')
-              : 'Installed, but the daemon is not running',
-          }),
+          el('div', { style: 'font-weight:700;font-size:15px;display:flex;align-items:center;gap:9px' }, [
+            el('span', { text: 'Docker' }),
+            !running && badge ? el('span', { class: badge[0], style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700', text: badge[1] }) : null,
+          ]),
+          el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px', text: known ? SUB[state] : 'Docker status unavailable' }),
         ]),
-        d.ok ? el('div', { style: 'text-align:right;flex:none' }, [
+        running ? el('div', { style: 'text-align:right;flex:none' }, [
           el('div', { style: 'font-weight:700;font-size:15px', text: fmt(d.totals.size || 0) }),
           el('div', { style: 'font-size:12px;color:var(--accent-fg);font-weight:600', text: fmt(d.totals.reclaimable || 0) + ' reclaimable' }),
         ]) : null,
       ]);
 
-      if (!d.ok) {
-        return shell([
+      if (!running) {
+        const COPY = {
+          stopped: 'Start Docker Desktop and check again to see how much space images, volumes and build cache are holding.',
+          'engine-down': 'Restart Docker Desktop, then check again. Nothing inside Docker can be cleaned until its engine responds.',
+          'no-permission': 'Spaci does not have permission to use Docker. Add your user to the docker group or use rootless Docker, then check again.',
+          unreadable: 'Docker may still be starting or busy. Check again in a moment.',
+          remote: 'Spaci only manages Docker on this Mac, so it shows no cleanup for a remote host.',
+          'not-installed': 'Its disk image is still on this Mac and still using space. Spaci does not delete it.',
+        };
+        const kids = [
           title,
-          el('div', { style: 'color:var(--text-3);font-size:12.5px', text: 'Start Docker and rescan to see how much space images, volumes and build cache are holding.' }),
-        ]);
+          el('div', { style: 'color:var(--text-3);font-size:12.5px;line-height:1.5', text: known ? COPY[state] : 'Spaci could not tell whether Docker is running. Check again in a moment.' }),
+        ];
+        if (disk) {
+          kids.push(el('div', { style: 'display:flex;flex-wrap:wrap;gap:14px 20px;padding-top:14px;border-top:1px solid var(--border)' }, [diskImageStat(disk)]));
+          const note = diskImageNote(disk);
+          if (note) kids.push(note);
+        }
+        if (state !== 'not-installed') {
+          kids.push(el('div', { style: 'display:flex;gap:9px' }, [
+            el('button', {
+              style: 'height:38px;padding:0 16px;border-radius:10px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:650;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit' + (S.dockerLoading ? ';opacity:.55;pointer-events:none' : ''),
+              hov: 'border-color:var(--accent);color:var(--accent-fg)',
+              onclick: () => loadDocker(true),
+            }, [S.dockerLoading ? ring('elastic', 15) : ic('refresh', 15), S.dockerLoading ? 'Checking…' : 'Check again']),
+          ]));
+        }
+        return shell(kids);
       }
 
       const c = d.categories;
+      const stats = [
+        dockerStat('Images', c.images),
+        dockerStat('Build cache', c.buildCache),
+        dockerStat('Volumes', c.volumes),
+        dockerStat('Containers', c.containers),
+      ];
+      if (disk) stats.push(diskImageStat(disk));
       const rows = [
         title,
-        el('div', { style: 'display:flex;flex-wrap:wrap;gap:14px 20px;padding-top:14px;border-top:1px solid var(--border)' }, [
-          dockerStat('Images', c.images),
-          dockerStat('Build cache', c.buildCache),
-          dockerStat('Volumes', c.volumes),
-          dockerStat('Containers', c.containers),
-        ]),
+        el('div', { style: 'display:flex;flex-wrap:wrap;gap:14px 20px;padding-top:14px;border-top:1px solid var(--border)' }, stats),
       ];
+      const gapNote = disk ? diskImageNote(disk) : null;
+      if (gapNote) rows.push(gapNote);
 
       if (S.dockerResult) {
         rows.push(el('div', {
@@ -318,20 +437,24 @@
           el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600', text: grp.cat }),
           el('div', { style: 'font-size:12.5px;color:var(--text-3);font-weight:600', text: fmt(total) })
         ]),
+        isAiTools(grp.cat) ? el('div', { style: 'color:var(--text-3);font-size:12.5px;line-height:1.5;margin:-4px 0 12px;max-width:620px', text: 'Quit a tool completely before cleaning its data. Spaci leaves a tool alone while it is running. History, databases and undo snapshots are permanent and start unselected.' }) : null,
         el('div', { class: 'sp-stagger', style: 'display:flex;flex-direction:column;gap:9px' }, grp.items.map(row))
       ]);
     }
 
     function selectAllRow(targets) {
       const sel = selSet();
-      const allOn = targets.length > 0 && targets.every((t) => sel.has(t.id));
+      // Select all only takes the safe ones. Permanent items are opt-in one by one.
+      const pickable = targets.filter((t) => t.safe);
+      const hasOptIn = pickable.length < targets.length;
+      const allOn = pickable.length > 0 && pickable.every((t) => sel.has(t.id));
       return el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin:26px 0 0' }, [
         el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600', text: targets.length + (targets.length === 1 ? ' cleanable item' : ' cleanable items') }),
         el('button', {
           style: 'height:34px;padding:0 13px;border-radius:9px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer;font-family:inherit',
           hov: 'background:var(--panel);color:var(--text)',
-          onclick: () => { if (allOn) sel.clear(); else targets.forEach((t) => sel.add(t.id)); paint(); }
-        }, [ic('check-circle', 15), allOn ? 'Clear all' : 'Select all'])
+          onclick: () => { if (allOn) sel.clear(); else pickable.forEach((t) => sel.add(t.id)); paint(); }
+        }, [ic('check-circle', 15), allOn ? 'Clear all' : (hasOptIn ? 'Select all safe' : 'Select all')])
       ]);
     }
 
@@ -355,11 +478,14 @@
       const n = chosen.length;
       if (!n) { SP.setActionBar(null); return; }
       const bytes = chosen.reduce((a, t) => a + (t.size || 0), 0);
+      const permanent = chosen.some(isPermanent);
+      const risky = chosen.some((t) => !t.safe);
+      const noun = permanent ? 'item' : 'cache';
       SP.setActionBar({
-        count: n + ' cache' + (n > 1 ? 's' : ''),
+        count: n + ' ' + noun + (n > 1 ? 's' : ''),
         size: fmt(bytes),
-        action: 'Clean ' + fmt(bytes),
-        danger: false,
+        action: (risky || permanent ? 'Delete ' : 'Clean ') + fmt(bytes),
+        danger: risky || permanent,
         onClear: () => { selSet().clear(); paint(); },
         onClean: () => cleanSelected(),
       });

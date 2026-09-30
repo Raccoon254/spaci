@@ -49,7 +49,7 @@ async function scanLargeFiles(root, minBytes, onProgress, signal) {
     try {
       entries = await fsp.readdir(dir, { withFileTypes: true });
     } catch {
-      // permission denied, gone, etc. — skip this directory.
+      // permission denied, gone, etc.: skip this directory.
       continue;
     }
 

@@ -15,6 +15,10 @@
   const { el, ic, ring, fmt } = SP;
   const S = SP.state;
 
+  // Informational cards (the Docker disk image explanation) carry action 'none':
+  // nothing to clean, nothing to open, and no reclaimable size.
+  function isInfo(r) { return !!(r && r.action && r.action.type === 'none'); }
+
   function recSize(r) {
     return Number(r && (r.savings != null ? r.savings : r.bytes != null ? r.bytes : r.size) || 0) || 0;
   }
@@ -47,6 +51,8 @@
   function resolveAction(rec) {
     if (!rec) return null;
     const act = rec.action || {};
+    // Informational cards (the Docker disk image explanation) have nothing to run.
+    if (act.type === 'none') return null;
     // Docker is reclaimed by the daemon, not by deleting paths, so it carries a
     // prune kind instead of clean jobs. Everything else on this screen is
     // path-based.
@@ -70,8 +76,10 @@
     if (rec.kind === 'project' || act.type === 'open-project') {
       const proj = (S.recsProjects || []).find((p) => p.path === act.path) || null;
       const items = (proj && proj.items) || [];
-      const reversible = items.every((i) => i.reversible !== false);
-      const safe = items.every((i) => i.safe);
+      // Unverified items are never cleaned by Spaci, so they are not offered.
+      const safeOnly = items.filter((i) => i.safe === true);
+      const reversible = safeOnly.every((i) => i.reversible !== false);
+      const safe = true;
       return {
         kind: 'project',
         rec,
@@ -79,12 +87,12 @@
         name: (proj && proj.name) || rec.title || 'Project',
         body: rec.body || '',
         savings: recSize(rec),
-        count: items.length,
+        count: safeOnly.length,
         safe,
         reversible,
         // remove the whole artifact folder (cleaner: no 'contents' = remove path)
-        jobs: items.map((i) => ({ path: i.path })),
-        items: items.map((i) => ({ icon: i.isDir ? 'folder-2' : 'file', path: i.path, name: i.name, note: i.note, size: i.size })),
+        jobs: safeOnly.map((i) => ({ path: i.path })),
+        items: safeOnly.map((i) => ({ icon: i.isDir ? 'folder-2' : 'file', path: i.path, name: i.name, note: i.note, size: i.size })),
         meta: { scope: 'projects', label: (proj && proj.name) || rec.title || '', reversible },
       };
     }
@@ -180,7 +188,27 @@
       body.appendChild(list);
     }
 
+    function infoRow(r) {
+      return el('div', {
+        style: 'display:flex;align-items:center;gap:16px;padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid var(--border)',
+      }, [
+        el('div', { style: 'width:48px;height:48px;border-radius:13px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic(r.icon || 'info', 25)]),
+        el('div', { style: 'flex:1;min-width:0' }, [
+          el('div', { style: 'font-weight:700;font-size:15.5px;display:flex;align-items:center;gap:10px' }, [
+            el('span', { style: 'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', text: r.title || 'Information' }),
+            el('span', {
+              class: 'sp-badge-accent',
+              style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700',
+              text: 'Info',
+            }),
+          ]),
+          el('div', { style: 'color:var(--text-2);font-size:13px;margin-top:4px;line-height:1.55', text: r.body || '' }),
+        ]),
+      ]);
+    }
+
     function recRow(r) {
+      if (isInfo(r)) return infoRow(r);
       const high = r.severity === 'high';
       const tagSafe = !high; // high severity = stale/permanent-ish flag; normal = safe to clean
       const borderColor = high ? 'var(--border-2)' : 'var(--border)';
@@ -308,15 +336,32 @@
       host.appendChild(el('div', { style: 'color:var(--text-3);font-size:13.5px;margin-bottom:24px', text: 'The scan no longer lists files for this action. Re-scan to refresh.' }));
     }
 
-    // result banner (after applying)
+    // result banner (after applying). A refused or failed clean never reads as
+    // success: only state 'done' is green.
     if (S.actionResult) {
-      const ok = S.actionResult.ok;
+      const r = S.actionResult;
+      const done = r.state === 'done';
+      const partial = r.state === 'partial';
+      const title = done ? 'Cleaned ' + fmt(r.totalFreed || 0)
+        : partial ? 'Cleaned ' + fmt(r.totalFreed || 0) + ', with some items left'
+          : r.state === 'blocked' ? 'Nothing was cleaned'
+            : r.state === 'empty' ? 'Nothing was freed' : 'Could not clean';
+      const reasons = Array.from(new Set((r.refused || []).map((x) => x.reason).filter(Boolean)));
+      const lines = [];
+      if (done) lines.push('Space reclaimed. The artifacts will rebuild when you next need them.');
+      else if (r.state === 'empty') lines.push('The selected items were already empty or gone.');
+      else if (r.state === 'failed') lines.push((r.error || 'Something went wrong while removing files.') + '.');
+      else {
+        if (reasons.length) lines.push(reasons.slice(0, 2).join(' '));
+        if ((r.refused || []).length > 1) lines.push(r.refused.length + ' items were left alone.');
+        if ((r.errors || []).length) lines.push(r.errors.length + ' item' + (r.errors.length === 1 ? '' : 's') + ' could not be removed: ' + (r.errors[0].error || 'unknown error') + '.');
+      }
       host.appendChild(
-        el('div', { style: `display:flex;align-items:center;gap:14px;padding:18px 20px;border-radius:16px;background:${ok ? 'var(--success-soft)' : 'var(--danger-soft)'};border:1px solid var(--border);margin-bottom:20px` }, [
-          ic(ok ? 'check' : 'warning', 24, { color: ok ? 'var(--success-fg)' : 'var(--danger-fg)' }),
+        el('div', { style: `display:flex;align-items:center;gap:14px;padding:18px 20px;border-radius:16px;background:${done ? 'var(--success-soft)' : partial ? 'var(--warn-soft)' : 'var(--danger-soft)'};border:1px solid var(--border);margin-bottom:20px` }, [
+          ic(done ? 'check' : 'warning', 24, { color: done ? 'var(--success-fg)' : partial ? 'var(--warn-fg)' : 'var(--danger-fg)' }),
           el('div', { style: 'flex:1' }, [
-            el('div', { style: 'font-weight:700;font-size:14.5px', text: ok ? 'Cleaned ' + fmt(S.actionResult.totalFreed || 0) : 'Could not clean' }),
-            el('div', { style: 'color:var(--text-2);font-size:13px;margin-top:2px', text: ok ? 'Space reclaimed. The artifacts will rebuild when you next need them.' : (S.actionResult.error || 'Something went wrong while removing files.') }),
+            el('div', { style: 'font-weight:700;font-size:14.5px', text: title }),
+            ...lines.map((t) => el('div', { style: 'color:var(--text-2);font-size:13px;margin-top:2px;line-height:1.55', text: t })),
           ]),
         ])
       );
@@ -325,20 +370,21 @@
     // apply bar. A Docker action has no clean jobs: the daemon does the work.
     const cleaning = S.actionCleaning;
     const applicable = a.kind === 'docker' ? Boolean(a.dockerKind) : a.jobs.length > 0;
+    const spent = !!S.actionResult && (S.actionResult.state === 'done' || S.actionResult.state === 'empty');
     const applyBtn = el('button', {
       class: safe ? 'sp-ab-accent' : 'sp-ab-danger',
-      style: 'height:46px;padding:0 22px;border-radius:12px;border:none;color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer;flex:none' + ((cleaning || !applicable || S.actionResult) ? ';opacity:.6;pointer-events:none' : ''),
+      style: 'height:46px;padding:0 22px;border-radius:12px;border:none;color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer;flex:none' + ((cleaning || !applicable || spent) ? ';opacity:.6;pointer-events:none' : ''),
       onclick: () => apply(),
     }, [
       cleaning ? ic('spaci-ring', 16, { anim: 'elastic' }) : ic('trash', 16),
-      cleaning ? 'Cleaning…' : S.actionResult ? 'Cleaned' : (safe ? 'Clean ' + fmt(a.savings) : 'Remove ' + fmt(a.savings)),
+      cleaning ? 'Cleaning…' : spent ? 'Cleaned' : S.actionResult ? 'Try again' : (safe ? 'Clean ' + fmt(a.savings) : 'Remove ' + fmt(a.savings)),
     ]);
 
     const cancelBtn = el('button', {
       style: 'height:46px;padding:0 18px;border-radius:12px;border:1px solid var(--border);background:var(--panel);color:var(--text-2);font-weight:600;font-size:13.5px;cursor:pointer',
       hov: 'background:var(--panel-2);color:var(--text)',
       onclick: () => SP.go('recommendations'),
-    }, [S.actionResult ? 'Back to list' : 'Cancel']);
+    }, [spent ? 'Back to list' : 'Cancel']);
 
     host.appendChild(
       el('div', { style: 'display:flex;align-items:center;gap:13px;margin-top:6px' }, [
@@ -356,18 +402,23 @@
         const res = a.kind === 'docker'
           ? await api.dockerPrune(a.dockerKind).then((r) => (r && r.ok ? { ok: true, totalFreed: r.freed } : r))
           : await api.clean(a.jobs, a.meta);
-        if (res && res.ok) {
-          S.actionResult = { ok: true, totalFreed: res.totalFreed };
-          // Celebratory success overlay, same as the other clean surfaces.
-          const freed = res.totalFreed != null ? res.totalFreed : (a.savings != null ? a.savings : a.size || 0);
-          SP.burst(SP.fmt(freed), (a.meta && a.meta.label) || a.title || 'across cleaned items');
+        if (a.kind !== 'docker' && res && res.ok !== false) {
+          // Try again resends only what was not removed.
+          const sumR = SP.summariseClean(res);
+          a.jobs = a.jobs.filter((j) => sumR.blocked(j.path));
+        }
+        if (res && res.ok !== false) {
+          const sum = SP.summariseClean(res, { fallbackFreed: a.savings != null ? a.savings : 0 });
+          S.actionResult = { state: sum.state, totalFreed: sum.freed, refused: sum.refused, errors: sum.errors };
+          // Celebratory success overlay only when everything was removed.
+          if (sum.state === 'done') SP.burst(SP.fmt(sum.freed), (a.meta && a.meta.label) || a.title || 'across cleaned items');
         } else {
-          S.actionResult = { ok: false, error: (res && res.error) || 'Clean failed' };
+          S.actionResult = { state: 'failed', error: (res && res.error) || 'Clean failed' };
         }
         // this action is spent; refresh recommendations on next visit
         S.recsLoaded = false;
       } catch (err) {
-        S.actionResult = { ok: false, error: (err && err.message) || 'Clean failed' };
+        S.actionResult = { state: 'failed', error: (err && err.message) || 'Clean failed' };
       } finally {
         S.actionCleaning = false;
         if (S.route === 'action') SP.go('action');

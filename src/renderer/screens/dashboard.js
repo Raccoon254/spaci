@@ -30,7 +30,8 @@
   SP.screens.dashboard = function (host) {
     const d = S.disk || { total: 0, used: 0, free: 0 };
     const cats = (S.breakdown && S.breakdown.categories) || [];
-    const recs = S.recs || [];
+    // Informational recommendations (action 'none') are not something to clean.
+    const recs = (S.recs || []).filter((r) => !(r.action && r.action.type === 'none'));
     const totalReclaim = recs.reduce((a, r) => a + recSize(r), 0);
 
     // header

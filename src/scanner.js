@@ -48,19 +48,25 @@ const DOCKER_TYPE = { id: 'docker', name: 'Docker', icon: 'box', markers: [], pr
 /**
  * Cleanable artifacts. `match` is a directory/file name; `safe` indicates it is a
  * pure build-artifact (always regenerable). `note` explains what it is.
+ * `ambiguous` names are also used for committed source (Go vendor/, a library's
+ * dist/, electron-builder's build/). `needsManifest` names are only safe beside
+ * a Cargo.toml or pom.xml. Whatever the rule says, a candidate is only marked
+ * safe when git ignores it and tracks nothing inside it (see classifyInRepo),
+ * and a directory holding a git-tracked file is never offered.
  */
 const CLEAN_RULES = [
   { match: 'node_modules',   kind: 'node',    safe: true,  note: 'Installed npm packages, restore with `npm install`.' },
-  { match: 'target',         kind: 'java',    safe: true,  note: 'Maven/Rust build output.' },
-  { match: 'build',          kind: 'gradle',  safe: true,  note: 'Build output (Gradle/Android/etc.).' },
-  { match: 'dist',           kind: 'box',     safe: true,  note: 'Bundled distribution output.' },
-  { match: 'out',            kind: 'box',     safe: true,  note: 'Compiler/bundler output.' },
+  { match: 'target',         kind: 'java',    safe: true,  needsManifest: true, note: 'Maven/Rust build output.' },
+  { match: 'build',          kind: 'gradle',  safe: true,  ambiguous: true,  note: 'Build output (Gradle/Android/etc.).' },
+  { match: 'dist',           kind: 'box',     safe: true,  ambiguous: true,  note: 'Bundled distribution output.' },
+  { match: 'out',            kind: 'box',     safe: true,  ambiguous: true,  note: 'Compiler/bundler output.' },
   // .NET and C/C++ intermediates. Worth naming explicitly: an obj/ tree buries
   // hundreds of tiny build/ folders that are far more useful counted as one.
   { match: 'obj',            kind: 'box',     safe: true,  note: '.NET/C build intermediates.' },
   { match: '.next',          kind: 'react',   safe: true,  note: 'Next.js build cache.' },
   { match: '.nuxt',          kind: 'react',   safe: true,  note: 'Nuxt build cache.' },
   { match: '.turbo',         kind: 'flash',   safe: true,  note: 'Turborepo cache.' },
+  { match: '.output',        kind: 'box',     safe: true,  note: 'Nuxt/Nitro build output.' },
   { match: '.parcel-cache',  kind: 'flash',   safe: true,  note: 'Parcel bundler cache.' },
   { match: '.svelte-kit',    kind: 'svelte',  safe: true,  note: 'SvelteKit build output.' },
   { match: '.angular',       kind: 'react',   safe: true,  note: 'Angular build cache.' },
@@ -68,9 +74,11 @@ const CLEAN_RULES = [
   { match: '__pycache__',    kind: 'python',  safe: true,  note: 'Python bytecode cache.' },
   { match: '.pytest_cache',  kind: 'python',  safe: true,  note: 'Pytest cache.' },
   { match: '.mypy_cache',    kind: 'python',  safe: true,  note: 'Mypy type-check cache.' },
+  { match: '.ruff_cache',    kind: 'python',  safe: true,  note: 'Ruff lint cache.' },
+  { match: '.dart_tool',     kind: 'flutter', safe: true,  note: 'Dart/Flutter tool cache, restore with `pub get`.' },
   { match: 'venv',           kind: 'python',  safe: false, note: 'Python virtualenv, recreate with your tooling.' },
   { match: '.venv',          kind: 'python',  safe: false, note: 'Python virtualenv, recreate with your tooling.' },
-  { match: 'vendor',         kind: 'php',     safe: true,  note: 'Composer/Go vendored deps, restore with install.' },
+  { match: 'vendor',         kind: 'php',     safe: true,  ambiguous: true,  note: 'Composer/Go vendored deps, restore with install.' },
   { match: 'Pods',           kind: 'apple',   safe: true,  note: 'CocoaPods deps, restore with `pod install`.' },
   { match: 'DerivedData',    kind: 'apple',   safe: true,  note: 'Xcode build cache.' },
   { match: 'coverage',       kind: 'file',    safe: true,  note: 'Test coverage reports.' },
@@ -359,6 +367,308 @@ async function dockerShellProject(dir, dockerFiles) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Build-output verification
+//
+// A folder name proves nothing: `build/` also holds signing entitlements, and a
+// brand new source folder is untracked before its first commit. So a candidate
+// is safe only when its innermost git repository gives positive evidence:
+//   1. git ignores the candidate itself, while no folder above it (up to the
+//      repo root) is ignored. An ignored ancestor, such as a dotfiles repo at ~
+//      ignoring `*`, says nothing about the project.
+//   2. git tracks nothing inside it (catches files force-added under an
+//      ignored folder, and submodule gitlinks).
+//   3. it is not itself a git repository.
+// Anything else, including git missing, erroring or timing out, is doubt, and
+// doubt is never safe.
+// ---------------------------------------------------------------------------
+
+const GIT_TIMEOUT = 15000;
+const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+// Keep each ls-files argv well below ARG_MAX, however many candidates there are.
+// Windows caps a whole command line at 32767 characters.
+const GIT_ARGV_BYTES = process.platform === 'win32' ? 24 * 1024 : 96 * 1024;
+
+const nfc = (s) => s.normalize('NFC');
+/** Both Unicode forms of a path: macOS can store NFD names while git prints NFC. */
+const bothForms = (s) => {
+  const a = s.normalize('NFC');
+  const b = s.normalize('NFD');
+  return a === b ? [a] : [a, b];
+};
+
+/** Git must answer about the folder we ask about, not a repo named by the environment. */
+function gitEnv() {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_')) env[k] = v;
+  env.GIT_OPTIONAL_LOCKS = '0';
+  return env;
+}
+
+/** Run git, never throwing. Resolves { err, stdout, stderr }. */
+function runGit(cwd, args, { input, signal, timeout = GIT_TIMEOUT } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = execFile('git', ['-C', cwd, ...args],
+        { timeout, signal, maxBuffer: GIT_MAX_BUFFER, env: gitEnv(), encoding: 'utf8' },
+        (err, stdout, stderr) => resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') }));
+    } catch (err) {
+      resolve({ err, stdout: '', stderr: '' });
+      return;
+    }
+    child.stdin?.on('error', () => { /* git exited early, the callback reports it */ });
+    child.stdin?.end(input || '');
+  });
+}
+
+function gitFailure(res, what) {
+  const err = res.err;
+  if (err && err.code === 'ENOENT') return 'git is not available';
+  if (err && err.killed) return `git took too long to ${what}`;
+  if (err && err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return `git produced too much output to ${what}`;
+  if (/not a git repository/i.test(res.stderr)) return 'it is not inside a git repository';
+  return `git could not ${what}`;
+}
+const isNotRepo = (res) => res.err && typeof res.err.code === 'number' && !res.err.killed
+  && /not a git repository/i.test(res.stderr);
+
+const exists = (p) => fsp.lstat(p).then(() => true, () => false);
+
+/** First `.git` entry (directory or file) below `dir`, walked in JS. */
+async function walkForGit(dir, signal) {
+  let found = false;
+  let unreadable = false;
+  await drain([dir], WALK_WORKERS, async (cur) => {
+    if (found || signal?.aborted) return null;
+    let ents;
+    try { ents = await fsp.readdir(cur, { withFileTypes: true }); }
+    catch { unreadable = true; return null; }
+    const subdirs = [];
+    for (const e of ents) {
+      if (e.name === '.git') { found = true; return null; }
+      if (e.isDirectory() && !e.isSymbolicLink()) subdirs.push(path.join(cur, e.name));
+    }
+    return subdirs;
+  }, signal);
+  if (found) return 'found';
+  return unreadable || signal?.aborted ? 'unknown' : 'none';
+}
+
+/**
+ * Is there a git repository anywhere inside `dir`? A clone under an ignored
+ * vendor/ or node_modules/ can hold unpushed commits. `find -quit` stops at the
+ * first hit and reads directories in C. Resolves 'found', 'none' or 'unknown'
+ * (unreadable folders or a failed search, which is doubt).
+ */
+// Its own ceiling, so the search runs beside sizing instead of queueing behind it.
+const withFindSlot = makeGate(SIZE_WORKERS);
+
+function findNestedGit(dir, signal) {
+  if (process.platform === 'win32') return withFindSlot(() => walkForGit(dir, signal));
+  return withFindSlot(() => new Promise((resolve) => {
+    execFile('find', [dir, '-mindepth', '1', '-name', '.git', '-print', '-quit'],
+      { timeout: 120000, signal, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+        if (String(stdout || '').trim()) return resolve('found');
+        if (err && err.code === 'ENOENT') return walkForGit(dir, signal).then(resolve);
+        resolve(err ? 'unknown' : 'none');
+      });
+  }));
+}
+
+async function nestedGitReason(c, signal) {
+  if (!c.isDir) return null;
+  // The scan hands over a search it already started right after sizing, while
+  // the folder's entries are still in the filesystem cache.
+  const res = await (c.nestedGit || findNestedGit(c.path, signal));
+  if (res === 'found') return 'it contains a git repository, which may hold unpushed work';
+  if (res === 'unknown') return 'Spaci could not look inside all of it for git repositories';
+  return null;
+}
+
+/**
+ * Resolve the innermost git repository git itself sees from `dir`. Returns
+ * { top, prefix } or { error }. A `.git` entry between `dir` and the repo root
+ * that git skipped (a broken nested repo) is doubt, not a pass.
+ */
+async function resolveRepo(dir, signal) {
+  const res = await runGit(dir, ['rev-parse', '--show-toplevel', '--show-prefix'], { signal, timeout: 5000 });
+  if (res.err) return { error: gitFailure(res, 'read this folder'), notRepo: isNotRepo(res) };
+  const lines = res.stdout.split('\n');
+  // Two lines plus the trailing newline. More means a newline in a path.
+  if (lines.length !== 3 || !lines[0]) return { error: 'git gave an unexpected answer' };
+  const prefix = nfc(lines[1]);
+  const depth = prefix.split('/').filter(Boolean).length;
+  let cur = dir;
+  for (let i = 0; i < depth; i++) {
+    if (await exists(path.join(cur, '.git'))) return { error: 'a nested .git folder here is not a repository git recognises' };
+    cur = path.dirname(cur);
+  }
+  return { top: lines[0], prefix };
+}
+
+/**
+ * Tracked files under the given repo-relative paths, as NFC paths. Matching is
+ * case-insensitive: on a case-insensitive disk the index can hold `Dist/keep.js`
+ * while the folder reads as `dist`. Over-matching on a case-sensitive disk only
+ * hides a folder, which is the safe direction.
+ */
+async function trackedFiles(top, rels, signal) {
+  // Per-pathspec magic: `literal` keeps `*` or `[a]` literal, `icase` ignores
+  // case. Git refuses the global --literal-pathspecs together with icase.
+  const specs = [...new Set(rels.flatMap(bothForms))].map((r) => `:(literal,icase)${r}`);
+  const chunks = [];
+  let chunk = [];
+  let bytes = 0;
+  for (const s of specs) {
+    const len = Buffer.byteLength(s) + 1;
+    if (chunk.length && bytes + len > GIT_ARGV_BYTES) { chunks.push(chunk); chunk = []; bytes = 0; }
+    chunk.push(s);
+    bytes += len;
+  }
+  if (chunk.length) chunks.push(chunk);
+  const files = [];
+  for (const c of chunks) {
+    const res = await runGit(top, ['ls-files', '-z', '--full-name', '--', ...c], { signal });
+    if (res.err) return { error: gitFailure(res, 'list tracked files') };
+    for (const f of res.stdout.split('\0')) if (f) files.push(nfc(f));
+  }
+  return { files };
+}
+
+/**
+ * Classify candidates that all share one innermost repository, resolved from
+ * `keyDir`. One rev-parse, one check-ignore (paths on stdin) and one ls-files
+ * (argv chunked by size) per repository. Returns Map(path -> verdict) where a
+ * verdict is { state, reason? } and state is 'safe', 'tracked', 'unverified'
+ * (doubt) or 'nogit' (git says it is outside any repo it can vouch for).
+ */
+async function classifyInRepo(keyDir, cands, signal) {
+  const out = new Map();
+  const failAll = (reason, state = 'unverified') => {
+    for (const c of cands) out.set(c.path, { state, reason });
+    return out;
+  };
+
+  const repo = await resolveRepo(keyDir, signal);
+  if (repo.error) return failAll(repo.error, repo.notRepo ? 'nogit' : 'unverified');
+
+  const rels = cands.map((c) => nfc(repo.prefix + path.relative(keyDir, c.path).split(path.sep).join('/')));
+  if (rels.some((r) => !r || r.startsWith('../') || r.includes('\n'))) return failAll('git gave an unexpected answer');
+
+  // Every folder between the repo root and each candidate, plus the candidates.
+  const ancestorsOf = (rel) => {
+    const parts = rel.split('/');
+    const list = [];
+    for (let i = 1; i < parts.length; i++) list.push(parts.slice(0, i).join('/'));
+    return list;
+  };
+  const dirs = new Set();
+  for (const rel of rels) for (const a of ancestorsOf(rel)) dirs.add(a);
+  const queries = [];
+  for (const d of dirs) for (const f of bothForms(d)) queries.push(f + '/');
+  cands.forEach((c, i) => { for (const f of bothForms(rels[i])) queries.push(c.isDir ? f + '/' : f); });
+
+  // The two questions are independent, so ask them at the same time.
+  const [ci, ls] = await Promise.all([
+    // Only the repo's own rules count as proof (.gitignore files and
+    // .git/info/exclude). An empty core.excludesFile turns off the personal
+    // global excludes, including the XDG default, on every platform.
+    runGit(repo.top, ['-c', 'core.excludesFile=', 'check-ignore', '--stdin', '-z'],
+      { input: queries.join('\0') + '\0', signal }),
+    trackedFiles(repo.top, rels, signal),
+  ]);
+  // Exit 1 is git's "nothing is ignored", a valid answer.
+  if (ci.err && !(ci.err.code === 1 && !ci.err.killed)) return failAll(gitFailure(ci, 'check ignore rules'));
+  if (ls.error) return failAll(ls.error);
+  const ignored = new Set(ci.stdout.split('\0').filter(Boolean).map((p) => nfc(p).replace(/\/+$/, '')));
+  const fold = (p) => p.toLowerCase();
+  const index = new Map();
+  rels.forEach((r, i) => {
+    const k = fold(r);
+    if (!index.has(k)) index.set(k, []);
+    index.get(k).push(i);
+  });
+  const tracked = new Set();
+  for (const f of ls.files) {
+    let p = fold(f);
+    for (;;) {
+      if (index.has(p)) for (const i of index.get(p)) tracked.add(i);
+      const k = p.lastIndexOf('/');
+      if (k < 0) break;
+      p = p.slice(0, k);
+    }
+  }
+
+  await Promise.all(cands.map(async (c, i) => {
+    const rel = rels[i];
+    let verdict;
+    if (tracked.has(i)) verdict = { state: 'tracked', reason: 'it contains files tracked by git' };
+    else if (ancestorsOf(rel).some((a) => ignored.has(a))) verdict = { state: 'nogit', reason: 'it sits inside a folder git ignores, so git cannot vouch for it' };
+    else if (!ignored.has(rel)) verdict = { state: 'unverified', reason: 'git does not ignore it' };
+    else {
+      const nested = await nestedGitReason(c, signal);
+      verdict = nested ? { state: 'unverified', reason: nested } : { state: 'safe' };
+    }
+    out.set(c.path, verdict);
+  }));
+  return out;
+}
+
+/**
+ * Names that are only ever regenerable output, whatever project holds them.
+ * Outside git these may still be cleaned, unverified. Ambiguous names (build,
+ * dist, out, vendor, target, .output, coverage, obj) can be committed source,
+ * so outside git they are never deletable.
+ */
+const UNAMBIGUOUS_NAMES = new Set([
+  'node_modules', '.next', '.svelte-kit', '.nuxt', '.turbo', '.parcel-cache', '__pycache__',
+  '.mypy_cache', '.pytest_cache', '.ruff_cache', '.gradle', '.dart_tool', 'Pods',
+]);
+
+/**
+ * Re-check one project artifact right before it is deleted. Scans are cached
+ * for days, and a folder can gain tracked files or lose its ignore rule in the
+ * meantime. The rule is reapplied in full: a known artifact name, its manifest
+ * where the rule needs one, then git. In git, only an ignored folder with no
+ * tracked content and no repository inside passes ({ ok: true, verified: true }).
+ * Outside git, only unambiguous names pass, unverified ({ ok: true, verified:
+ * false }). Any doubt fails with a short reason.
+ * @param {string} absPath
+ * @returns {Promise<{ok: boolean, verified?: boolean, reason?: string}>}
+ */
+async function revalidateArtifact(absPath) {
+  const no = (reason) => ({ ok: false, reason: reason.charAt(0).toUpperCase() + reason.slice(1) + '.' });
+  try {
+    if (typeof absPath !== 'string' || !path.isAbsolute(absPath)) return no('not an absolute path');
+    const name = path.basename(absPath);
+    const rule = Object.prototype.hasOwnProperty.call(CLEAN_BY_NAME, name) ? CLEAN_BY_NAME[name] : null;
+    if (!rule) return no('it is not a folder Spaci knows as build output');
+    if (!rule.safe) return no('this kind of folder is never removed without review');
+    let st;
+    try { st = await fsp.lstat(absPath); } catch { return no('it no longer exists'); }
+    if (st.isSymbolicLink()) return no('it is a symbolic link');
+    const parent = path.dirname(absPath);
+    if (rule.needsManifest
+      && !(await exists(path.join(parent, 'Cargo.toml')) || await exists(path.join(parent, 'pom.xml')))) {
+      return no('there is no Cargo.toml or pom.xml beside it');
+    }
+    const cand = { path: absPath, isDir: st.isDirectory() };
+    const verdicts = await classifyInRepo(parent, [cand]);
+    const v = verdicts.get(absPath);
+    if (v && v.state === 'safe') return { ok: true, verified: true };
+    if (v && v.state === 'nogit') {
+      if (!UNAMBIGUOUS_NAMES.has(name)) return no(`${v.reason}, and "${name}" can be source code`);
+      const nested = await nestedGitReason(cand);
+      if (nested) return no(nested);
+      return { ok: true, verified: false };
+    }
+    return no(v ? v.reason : 'Spaci could not check it');
+  } catch {
+    return no('Spaci could not check it');
+  }
+}
+
 /**
  * Directories the artifact hunt never enters. `.git` is the expensive one: a
  * long-lived repo holds tens of thousands of loose objects and cannot contain a
@@ -378,36 +688,85 @@ async function buildProject(dir, detected, signal, rootEntries) {
   // Find cleanable directories/files anywhere inside the project, walking
   // subtrees in parallel and sizing them afterwards so the walk is never
   // blocked behind a du.
+  // Each candidate remembers its innermost repo: the nearest folder holding a
+  // `.git` entry (a directory, or a file for worktrees and submodules), else
+  // the project folder, whose enclosing repo git resolves.
   const found = [];
-  await drain([{ cur: dir, depth: 0 }], WALK_WORKERS, async ({ cur, depth }) => {
+  await drain([{ cur: dir, depth: 0, repo: dir }], WALK_WORKERS, async ({ cur, depth, repo }) => {
     let ents;
     try { ents = await fsp.readdir(cur, { withFileTypes: true }); }
     catch { return null; }
+    const here = ents.some((e) => e.name === '.git') ? cur : repo;
     const subdirs = [];
     for (const e of ents) {
       if (e.isSymbolicLink()) continue;
       const full = path.join(cur, e.name);
       if (CLEAN_NAMES.has(e.name)) {
-        found.push({ name: e.name, path: full, isDir: e.isDirectory() });
+        found.push({
+          name: e.name, path: full, isDir: e.isDirectory(), repo: here,
+          hasManifest: ents.some((x) => x.name === 'Cargo.toml' || x.name === 'pom.xml'),
+        });
         continue; // do not descend into a cleanable dir
       }
       if (!e.isDirectory()) continue;
       if (ITEM_SKIP_DIRS.has(e.name)) continue;
       if (depth >= ITEM_MAX_DEPTH) continue;
-      subdirs.push({ cur: full, depth: depth + 1 });
+      subdirs.push({ cur: full, depth: depth + 1, repo: here });
     }
     return subdirs;
   }, signal);
 
-  const items = await mapPool(found, SIZE_WORKERS, async (f) => {
-    const rule = CLEAN_BY_NAME[f.name];
+  // The search for a git repository inside each folder starts once its du is
+  // done (see below), so it reads directories that are already cached.
+  for (const f of found) {
+    if (!f.isDir) continue;
+    let start;
+    f.nestedGit = new Promise((resolve) => { start = resolve; });
+    f.startNestedGit = () => start(findNestedGit(f.path, signal));
+  }
+
+  // Ask each innermost repo once about all of its candidates.
+  const byRepo = new Map();
+  for (const f of found) {
+    if (!byRepo.has(f.repo)) byRepo.set(f.repo, []);
+    byRepo.get(f.repo).push(f);
+  }
+  const verdicts = new Map();
+  const checked = Promise.all([...byRepo].map(async ([key, cands]) => {
+    let res;
+    try { res = await classifyInRepo(key, cands, signal); } catch { res = new Map(); }
+    for (const c of cands) verdicts.set(c.path, res.get(c.path) || { state: 'unverified', reason: 'git could not check it' });
+  }));
+
+  // Size while git answers. Every verdict is in before anything is returned.
+  const sized = await mapPool(found, SIZE_WORKERS, async (f) => {
     let size = 0;
     try { size = f.isDir ? await dirSize(f.path, signal) : (await fsp.stat(f.path)).size; }
     catch { /* unreadable, count it as zero */ }
-    return {
-      name: f.name, path: f.path, size, isDir: f.isDir,
-      kind: rule.kind, safe: rule.safe, reversible: rule.reversible !== false, note: rule.note,
-    };
+    finally { if (f.isDir) f.startNestedGit(); }
+    return size;
+  });
+  await checked;
+
+  const items = [];
+  found.forEach((f, idx) => {
+    const verdict = verdicts.get(f.path);
+    // Tracked content is never offered at all.
+    if (!verdict || verdict.state === 'tracked') return;
+    const rule = CLEAN_BY_NAME[f.name];
+    let safe = rule.safe;
+    let note = rule.note;
+    if (rule.needsManifest && !f.hasManifest) {
+      safe = false;
+      note = 'Could not verify this is build output (no Cargo.toml or pom.xml beside it).';
+    } else if (verdict.state !== 'safe') {
+      safe = false;
+      note = `${rule.note} Spaci could not verify it is build output: ${verdict.reason}.`;
+    }
+    items.push({
+      name: f.name, path: f.path, size: sized[idx], isDir: f.isDir,
+      kind: rule.kind, safe, reversible: rule.reversible !== false, note,
+    });
   });
   items.sort((a, b) => b.size - a.size);
   const cleanableSize = items.reduce((s, i) => s + i.size, 0);
@@ -534,5 +893,5 @@ async function enrichProject(dir, signal) {
 module.exports = {
   PROJECT_TYPES, CLEAN_RULES, SKIP_DELETE,
   scanProjects, dirSize, enrichProject, gitStatus, detectType, detectTypes,
-  attachDockerUsage, walkSize, drain, mapPool,
+  attachDockerUsage, walkSize, drain, mapPool, revalidateArtifact,
 };
