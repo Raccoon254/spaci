@@ -44,25 +44,31 @@
     if (!S.systemSel || !(S.systemSel instanceof Set)) S.systemSel = new Set();
     return S.systemSel;
   }
+  // Tiers come from main (src/clean-tiers.js) through SP.tiers: A Safe,
+  // B Review, C Permanent. Only A is preselected or swept up by Select all.
+  function tierOf(t) {
+    if (SP.tiers) return SP.tiers.target(t);
+    if (t.reversible === false || (t.storyCategory === 'aitools' && !t.safe)) return 'C';
+    return t.safe ? 'A' : 'B';
+  }
   function preselect(targets) {
     const sel = selSet();
     sel.clear();
-    targets.forEach((t) => { if (t.safe && !isPermanent(t)) sel.add(t.id); });
+    targets.forEach((t) => { if (tierOf(t) === 'A') sel.add(t.id); });
   }
-  // Irreversible data (AI tool session history, SQLite databases). Never
-  // preselected, never swept up by Select all, and confirmed before deleting.
-  function isPermanent(t) {
-    return t.reversible === false || (t.storyCategory === 'aitools' && !t.safe);
-  }
+  // Irreversible data (AI tool session history, SQLite databases, the Trash).
+  // Never selectable: each one is deleted on its own, from its own button,
+  // after its own confirm.
+  function isPermanent(t) { return tierOf(t) === 'C'; }
   const isAiTools = (cat) => cat === 'AI tools';
 
   // One three-tier risk scheme, shared in spirit with Recommendations, the
   // action page and project items: Safe (green), Review (amber), Permanent
   // (red). Permanent wins over Review.
   function riskOf(t) {
-    if (isPermanent(t)) return { cls: 'sp-badge-warn', text: 'Permanent' };
-    if (!t.safe) return { cls: 'sp-badge-caution', text: 'Review' };
-    return { cls: 'sp-badge-safe', text: 'Safe' };
+    const tier = tierOf(t);
+    if (SP.tiers) return SP.tiers.badge(tier);
+    return tier === 'C' ? { cls: 'sp-badge-warn', text: 'Permanent' } : tier === 'B' ? { cls: 'sp-badge-caution', text: 'Review' } : { cls: 'sp-badge-safe', text: 'Safe' };
   }
 
   // Row mark: the app's own logo when we know it (AI tools, browsers), then a
@@ -90,6 +96,7 @@
   function targetsNow() { return Array.isArray(S.sysTargets) ? S.sysTargets : []; }
 
   SP.screens.system = function (host) {
+    if (SP.tiers) SP.tiers.ensure();
     // Detach any live progress subscription so re-renders never leak listeners.
     function detach() {
       if (S.systemUnsub) { try { S.systemUnsub(); } catch (_) {} S.systemUnsub = null; }
@@ -120,7 +127,11 @@
           const hadSelection = selSet().size > 0;
           S.sysTargets = targets;
           S.lastScan = Date.now();
-          if (!hadSelection) preselect(targets);
+          // Preselection is a safety decision: wait for main's tiers, never the guess.
+          if (!hadSelection) {
+            if (SP.tiers) await SP.tiers.load();
+            preselect(targets);
+          }
         } else {
           S.systemError = (res && res.error) || 'Scan failed';
         }
@@ -137,7 +148,32 @@
     async function cleanSelected() {
       const targets = targetsNow();
       const sel = selSet();
-      const chosen = targets.filter((t) => sel.has(t.id));
+      // Permanent items never go in a bulk clean, even if an old selection has one.
+      const chosen = targets.filter((t) => sel.has(t.id) && !isPermanent(t));
+      return cleanTargets(chosen, {});
+    }
+
+    // One category's Review items (and any Safe ones beside them), with a
+    // confirm that says what each Review item is. Permanent items stay.
+    function cleanCategory(grp) {
+      const chosen = grp.items.filter((t) => !isPermanent(t));
+      const review = chosen.filter((t) => tierOf(t) === 'B');
+      return cleanTargets(chosen, {
+        title: 'Clean ' + grp.cat + ' (' + fmt(chosen.reduce((a, t) => a + (t.size || 0), 0)) + ')?',
+        lead: grp.cat + ': ' + chosen.length + (chosen.length === 1 ? ' item' : ' items') + '. Permanent items in this group are not included.',
+        review,
+      });
+    }
+
+    // One Permanent item, on its own, always confirmed.
+    function cleanOne(t) {
+      return cleanTargets([t], { title: 'Delete ' + t.name + ' (' + fmt(t.size || 0) + ')?' });
+    }
+
+    async function cleanTargets(chosen, opts) {
+      opts = opts || {};
+      const targets = targetsNow();
+      const sel = selSet();
       if (!chosen.length || S.systemCleaning) return;
       const jobs = [];
       chosen.forEach((t) => {
@@ -149,12 +185,15 @@
       const risky = chosen.filter((t) => !t.safe || isPermanent(t));
       const review = risky.filter((t) => !isPermanent(t));
       // Each Review target says in its own words what deleting it means.
-      const note = review.length
-        ? review.slice(0, 4).map((t) => t.name + ': ' + (t.description || 'Review before deleting.')).join('\n')
-          + (review.length > 4 ? '\nand ' + (review.length - 4) + ' more.' : '')
+      const reviewList = opts.review || review.filter((t) => tierOf(t) === 'B');
+      let note = reviewList.length
+        ? reviewList.slice(0, 4).map((t) => t.name + ': ' + (t.description || 'Review before deleting.')).join('\n')
+          + (reviewList.length > 4 ? '\nand ' + (reviewList.length - 4) + ' more.' : '')
         : undefined;
+      if (opts.lead) note = opts.lead + (note ? '\n\n' + note : '');
       const cf = await SP.confirmClean({
-        force: risky.length > 0,
+        title: opts.title,
+        force: risky.length > 0 || reviewList.length > 0 || !!opts.title,
         count: chosen.length,
         bytes: chosen.reduce((a, t) => a + (t.size || 0), 0),
         permanent: permanent.map((t) => t.name),
@@ -220,16 +259,19 @@
 
     function row(t) {
       const sel = selSet();
-      const on = sel.has(t.id);
       const permanent = isPermanent(t);
+      const on = !permanent && sel.has(t.id);
       const risk = riskOf(t);
+      const busy = S.systemCleaning;
       return el('div', {
         class: 'sp-hov',
-        style: 'display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border);cursor:pointer;box-shadow:var(--shadow-sm)',
+        'data-tier': tierOf(t),
+        style: 'display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border);box-shadow:var(--shadow-sm)' + (permanent ? '' : ';cursor:pointer'),
         hov: 'border-color:var(--border-2)',
-        onclick: () => { if (on) sel.delete(t.id); else sel.add(t.id); paint(); }
+        // Permanent items are never selected: they have their own Delete button.
+        onclick: permanent ? null : () => { if (on) sel.delete(t.id); else sel.add(t.id); paint(); }
       }, [
-        el('div', {
+        permanent ? el('div', { style: 'width:24px;flex:none' }) : el('div', {
           class: 'sp-check' + (on ? ' sp-check-on' : ''),
           style: 'width:24px;height:24px;border-radius:50%;border:1.5px solid var(--border-2);flex:none;display:grid;place-items:center;color:transparent;transition:.14s'
         }, [ic('tick', 14)]),
@@ -245,10 +287,16 @@
           ]),
           el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px;line-height:1.5', text: t.description || '' }),
           permanent ? el('div', { style: 'color:var(--danger-fg);font-size:12px;font-weight:600;margin-top:4px;display:flex;align-items:center;gap:6px' }, [
-            ic('lock', 13), 'Permanent loss of history. This cannot be undone.'
+            ic('lock', 13), 'Cannot be undone. Deleted on its own, never with other items.'
           ]) : null
         ]),
-        el('div', { style: 'font-weight:700;font-size:15px;color:var(--accent-fg);flex:none', text: fmt(t.size || 0) })
+        el('div', { style: 'font-weight:700;font-size:15px;color:var(--accent-fg);flex:none', text: fmt(t.size || 0) }),
+        permanent ? el('button', {
+          'aria-label': 'Delete ' + t.name,
+          style: 'height:34px;padding:0 13px;border-radius:9px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--danger-fg);font-weight:650;font-size:12.5px;display:flex;align-items:center;gap:6px;cursor:pointer;font-family:inherit;flex:none' + (busy ? ';opacity:.45;pointer-events:none' : ''),
+          hov: 'border-color:var(--danger);background:var(--danger-soft)',
+          onclick: (e) => { e.stopPropagation(); cleanOne(t); },
+        }, [ic('trash', 13), 'Delete…']) : null
       ]);
     }
 
@@ -510,6 +558,9 @@
 
     function dockerButton(label, kind) {
       const busy = S.dockerPruning === kind;
+      return el('div', { style: 'display:flex;align-items:center;gap:7px' }, [dockerButtonRaw(label, kind, busy), SP.tiers ? SP.tiers.pill(SP.tiers.docker(kind)) : null]);
+    }
+    function dockerButtonRaw(label, kind, busy) {
       return el('button', {
         style: 'height:38px;padding:0 16px;border-radius:10px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:650;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit'
           + (busy ? ';opacity:.55;pointer-events:none' : ''),
@@ -683,10 +734,23 @@
 
     function group(grp) {
       const total = grp.items.reduce((a, t) => a + (t.size || 0), 0);
+      // Review items are cleaned per category, with their own confirm.
+      const cleanable = grp.items.filter((t) => !isPermanent(t));
+      const hasReview = cleanable.some((t) => tierOf(t) === 'B');
+      const cleanBytes = cleanable.reduce((a, t) => a + (t.size || 0), 0);
       return el('div', {}, [
-        el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin:24px 0 12px' }, [
+        el('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:12px;margin:24px 0 12px' }, [
           el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600', text: grp.cat }),
-          el('div', { style: 'font-size:12.5px;color:var(--text-3);font-weight:600', text: fmt(total) })
+          el('div', { style: 'display:flex;align-items:center;gap:12px' }, [
+            el('div', { style: 'font-size:12.5px;color:var(--text-3);font-weight:600', text: fmt(total) }),
+            hasReview && cleanBytes > 0 ? el('button', {
+              'data-clean-category': grp.cat,
+              'aria-label': 'Clean ' + grp.cat,
+              style: 'height:30px;padding:0 12px;border-radius:8px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:650;font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer;font-family:inherit' + (S.systemCleaning ? ';opacity:.45;pointer-events:none' : ''),
+              hov: 'border-color:var(--accent);color:var(--accent-fg)',
+              onclick: () => cleanCategory(grp),
+            }, [ic('broom', 13), 'Clean ' + fmt(cleanBytes)]) : null,
+          ]),
         ]),
         isAiTools(grp.cat) ? el('div', { style: 'color:var(--text-3);font-size:12.5px;line-height:1.5;margin:-4px 0 12px;max-width:620px', text: 'Quit a tool completely before cleaning its data. Spaci leaves a tool alone while it is running. History, databases and undo snapshots are permanent and start unselected.' }) : null,
         el('div', { class: 'sp-stagger', style: 'display:flex;flex-direction:column;gap:9px' }, grp.items.map(row))
@@ -695,8 +759,9 @@
 
     function selectAllRow(targets) {
       const sel = selSet();
-      // Select all only takes the safe ones. Permanent items are opt-in one by one.
-      const pickable = targets.filter((t) => t.safe && !isPermanent(t));
+      // Select all only takes the Safe tier. Review items are picked by hand or
+      // per category; Permanent items are deleted one by one.
+      const pickable = targets.filter((t) => tierOf(t) === 'A');
       const hasOptIn = pickable.length < targets.length;
       const allOn = pickable.length > 0 && pickable.every((t) => sel.has(t.id));
       return el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin:26px 0 0' }, [
@@ -704,7 +769,13 @@
         el('button', {
           style: 'height:34px;padding:0 13px;border-radius:9px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer;font-family:inherit',
           hov: 'background:var(--panel);color:var(--text)',
-          onclick: () => { if (allOn) sel.clear(); else pickable.forEach((t) => sel.add(t.id)); paint(); }
+          onclick: async () => {
+            if (allOn) { sel.clear(); paint(); return; }
+            // Decide from main's tiers, not the placeholder shown before they arrive.
+            if (SP.tiers) await SP.tiers.load();
+            targetsNow().filter((t) => tierOf(t) === 'A').forEach((t) => sel.add(t.id));
+            paint();
+          }
         }, [ic('check-circle', 15), allOn ? 'Clear all' : (hasOptIn ? 'Select all safe' : 'Select all')])
       ]);
     }
@@ -725,12 +796,12 @@
 
     function syncActionBar(targets) {
       const sel = selSet();
-      const chosen = targets.filter((t) => sel.has(t.id));
+      const chosen = targets.filter((t) => sel.has(t.id) && !isPermanent(t));
       const n = chosen.length;
       if (!n) { SP.setActionBar(null); return; }
       const bytes = chosen.reduce((a, t) => a + (t.size || 0), 0);
-      const permanent = chosen.some(isPermanent);
-      const risky = chosen.some((t) => !t.safe);
+      const permanent = false;
+      const risky = chosen.some((t) => tierOf(t) !== 'A');
       const noun = permanent ? 'item' : 'cache';
       SP.setActionBar({
         count: n + ' ' + noun + (n > 1 ? 's' : ''),
