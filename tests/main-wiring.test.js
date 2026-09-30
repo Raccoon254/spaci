@@ -926,12 +926,21 @@ test('crash log: startup failures show a dialog and quit; crashes and rejections
 });
 
 test('every window denies window.open (https goes to the browser) and blocks navigation', async () => {
+  // Each OS in turn, whatever the host: macOS and Windows open a tray popover
+  // window next to the main one; Linux trays are a context menu only, so the
+  // main window is the only one there.
+  for (const [platform, windows] of [['darwin', 2], ['win32', 2], ['linux', 1]]) {
+    await asPlatform(platform, { XDG_CURRENT_DESKTOP: 'KDE', SPACI_TRAY: '' }, () => guardsEveryWindow(platform, windows));
+  }
+});
+
+async function guardsEveryWindow(platform, windows) {
   const opened = [];
   const m = loadMain(undefined, { shell: { openExternal: async (u) => { opened.push(u); } } });
   try {
     m.ready.resolve();
     await flush();
-    assert.ok(m.windows.length >= 2, 'main window and tray popover');
+    assert.equal(m.windows.length, windows, platform + ': ' + (windows === 2 ? 'main window and tray popover' : 'main window'));
     for (const w of m.windows) {
       const wc = w.webContents;
       assert.equal(typeof wc.openHandler, 'function');
@@ -947,7 +956,7 @@ test('every window denies window.open (https goes to the browser) and blocks nav
     assert.deepEqual(opened, m.windows.map(() => 'https://spaci.kentom.co.ke/docs'));
     m.appEvents.emit('before-quit');
   } finally { m.cleanup(); }
-});
+}
 
 /** Run `fn` with process.platform (and env keys) pretending to be another OS. */
 async function asPlatform(platform, env, fn) {
