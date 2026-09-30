@@ -438,7 +438,11 @@
 
   function itemNote(it) {
     if (it.outcome === 'failed') {
-      return { text: SP.plainError ? SP.plainError({ error: it.reason || '' }) : 'Could not be removed.', raw: it.reason || '' };
+      // A known error code gets plain English; otherwise the recorded reason is
+      // already written for people (interrupted, trash failed), so show it as is.
+      const mapped = SP.plainError ? SP.plainError({ code: it.code, error: it.reason || '' }) : '';
+      const text = mapped && mapped !== 'Could not be removed.' ? mapped : (it.reason || 'Could not be removed.');
+      return { text, raw: it.reason || '' };
     }
     if (it.outcome === 'refused') {
       return { text: it.reason === 'needs-confirmation' ? 'Needed your confirmation.' : (it.reason || 'Spaci left this alone.'), raw: '' };
@@ -513,6 +517,8 @@
 
     // stats strip: space freed / outcome counts / when
     const detailStats = [{ icon: 'hard-drive', label: 'Space freed', value: fmt(e.freed), color: 'var(--accent-fg)' }];
+    // Trashed files are not freed until the Trash is emptied; show them apart.
+    if (Number(e.trashedBytes) > 0) detailStats.push({ icon: 'trash', label: 'In your Trash', value: fmt(e.trashedBytes), color: 'var(--text)' });
     if (isV2(e)) {
       detailStats.push({ icon: 'check', label: 'Removed', value: String(c.removed), color: 'var(--text)' });
       if (c.trashed) detailStats.push({ icon: 'trash', label: 'Trashed', value: String(c.trashed), color: 'var(--text)' });

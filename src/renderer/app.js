@@ -282,18 +282,23 @@ function summariseClean(res, opts) {
   const refused = ok && Array.isArray(res.refused) ? res.refused.filter(Boolean) : [];
   const errors = ok && Array.isArray(res.errors) ? res.errors.filter(Boolean) : [];
   const freed = ok ? (res.totalFreed != null ? Number(res.totalFreed) || 0 : (opts.fallbackFreed || 0)) : 0;
+  // Files moved to the Trash still use the disk until it is emptied, so they
+  // are reported apart from freed space, never as reclaimed.
+  const trashedCount = ok && Array.isArray(res.trashed) ? res.trashed.length : 0;
+  const trashedBytes = ok ? Number(res.trashedBytes) || 0 : 0;
+  const moved = freed > 0 || trashedCount > 0;
   const issues = refused.length + errors.length;
   let state = 'done';
   if (!ok) state = 'failed';
-  else if (issues && freed > 0) state = 'partial';
+  else if (issues && moved) state = 'partial';
   else if (issues) state = 'blocked';
-  else if (freed <= 0) state = 'empty';
+  else if (!moved) state = 'empty';
   const refusedPaths = new Set(refused.map((r) => r.path));
   const refusedTargets = new Set(refused.map((r) => r.target).filter(Boolean));
   const errorPaths = errors.map((e) => e.path).filter(Boolean);
   const sep = /^[a-zA-Z]:[\\/]/.test(errorPaths[0] || '') ? '\\' : '/';
   return {
-    ok, state, freed, refused, errors, issues, refusedTargets,
+    ok, state, freed, trashedCount, trashedBytes, refused, errors, issues, refusedTargets,
     error: !ok ? ((res && res.error) || 'Clean failed') : null,
     // True when this path was refused or reported a failure at or below it.
     blocked: (p) => refusedPaths.has(p) || errorPaths.some((ep) => ep === p || ep.indexOf(p + sep) === 0)
@@ -309,7 +314,12 @@ function reportClean(res, opts) {
   const sum = summariseClean(res, opts);
   const noun = (n) => n + ' item' + (n === 1 ? '' : 's');
   if (sum.state === 'done') {
-    burst(fmt(sum.freed), opts.burstLabel);
+    if (sum.trashedCount && sum.freed <= 0) {
+      toast('Moved ' + sum.trashedCount + (sum.trashedCount === 1 ? ' file' : ' files') + ' (' + fmt(sum.trashedBytes) + ') to the Trash',
+        'The space comes back when you empty the Trash. Until then you can put them back.');
+    } else {
+      burst(fmt(sum.freed), opts.burstLabel);
+    }
     return sum;
   }
   if (sum.state === 'failed') {
@@ -329,7 +339,9 @@ function reportClean(res, opts) {
     if (sum.errors.length) lead.push(noun(sum.errors.length) + ' could not be removed.');
     S.reportCfg = {
       tone: sum.state === 'partial' ? 'accent' : 'danger',
-      title: sum.state === 'partial' ? 'Freed ' + fmt(sum.freed) + ', with some items left' : 'Nothing was cleaned',
+      title: sum.state === 'partial'
+        ? (sum.trashedCount && sum.freed <= 0 ? 'Moved ' + fmt(sum.trashedBytes) + ' to the Trash, with some items left' : 'Freed ' + fmt(sum.freed) + ', with some items left')
+        : 'Nothing was cleaned',
       lead: lead.join(' ') + (sum.state === 'partial' ? '' : ' No space was freed.'),
       groups: Array.from(byReason, ([reason, items]) => ({ reason, items })),
       errors: sum.errors.map((e) => ({ path: shortHome(e.path), message: plainError(e), raw: e.error || '' }))

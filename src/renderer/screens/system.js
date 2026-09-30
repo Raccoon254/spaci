@@ -47,7 +47,7 @@
   function preselect(targets) {
     const sel = selSet();
     sel.clear();
-    targets.forEach((t) => { if (t.safe) sel.add(t.id); });
+    targets.forEach((t) => { if (t.safe && !isPermanent(t)) sel.add(t.id); });
   }
   // Irreversible data (AI tool session history, SQLite databases). Never
   // preselected, never swept up by Select all, and confirmed before deleting.
@@ -202,7 +202,7 @@
       const on = sel.has(t.id);
       const badgeSafe = t.safe;
       const permanent = isPermanent(t);
-      const badgeClass = badgeSafe ? 'sp-badge-safe' : 'sp-badge-warn';
+      const badgeClass = badgeSafe && !permanent ? 'sp-badge-safe' : 'sp-badge-warn';
       const badgeText = permanent ? 'Permanent' : (badgeSafe ? 'Safe' : 'Review');
       return el('div', {
         class: 'sp-hov',
@@ -450,7 +450,7 @@
     function selectAllRow(targets) {
       const sel = selSet();
       // Select all only takes the safe ones. Permanent items are opt-in one by one.
-      const pickable = targets.filter((t) => t.safe);
+      const pickable = targets.filter((t) => t.safe && !isPermanent(t));
       const hasOptIn = pickable.length < targets.length;
       const allOn = pickable.length > 0 && pickable.every((t) => sel.has(t.id));
       return el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin:26px 0 0' }, [
