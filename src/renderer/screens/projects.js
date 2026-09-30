@@ -916,7 +916,7 @@
         el('div', { style: 'color:var(--text-3);font-size:12px;display:flex;gap:6px;align-items:center;margin-bottom:5px' }, [ic(g.icon, 15), g.k]),
         el('div', { style: 'font-weight:700;font-size:15px;color:' + g.color + ';overflow:hidden;text-overflow:ellipsis', text: g.v }),
       ]))),
-      usage ? el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:13px;line-height:1.5', text: 'Spaci never deletes Docker volumes or running containers. Reclaim images and build cache from the System screen.' }) : null,
+      usage ? el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:13px;line-height:1.5', text: 'Spaci never removes Docker volumes in bulk and never touches running containers. Reclaim images and build cache, and review volumes one at a time, in System Cleaner.' }) : null,
     ]);
   }
 

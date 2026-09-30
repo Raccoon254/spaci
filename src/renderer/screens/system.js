@@ -265,6 +265,7 @@
       finally { S.dockerLoading = false; paint(); }
     }
 
+    const PRUNE_NOUN = { 'build-cache': 'the build cache', 'dangling-images': 'untagged images' };
     async function runPrune(kind, label) {
       if (S.dockerPruning) return;
       const cf = await SP.confirmClean({ title: 'Run Docker cleanup?', count: 1, note: label + '. Docker rebuilds this cache the next time you build.' });
@@ -278,7 +279,7 @@
         // WSL2 VHDX): the note from main says so, after every prune.
         const note = (res && res.note) || (S.docker && S.docker.diskNote) || null;
         S.dockerResult = res && res.ok
-          ? { ok: true, text: `Reclaimed ${fmt(res.freed || 0)} from ${label.toLowerCase()}.`, note }
+          ? { ok: true, text: `Reclaimed ${fmt(res.freed || 0)} from ${PRUNE_NOUN[kind] || 'Docker'}.`, note }
           : { ok: false, text: (res && res.error) || 'Docker cleanup failed.' };
       } catch (err) {
         S.dockerResult = { ok: false, text: (err && err.message) || 'Docker cleanup failed.' };
