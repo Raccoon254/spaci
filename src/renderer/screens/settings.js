@@ -166,7 +166,140 @@
     }
 
     renderBody(host, store);
+    // Auto-clean state changes behind this screen (a run, an approval in
+    // History): refresh it on each visit, at most every few seconds.
+    if (api.autoCleanGet && !store.acFetching && Date.now() - (store.acAt || 0) > 3000) {
+      store.acFetching = true;
+      api.autoCleanGet().then((st) => {
+        store.acFetching = false;
+        store.acAt = Date.now();
+        const changed = JSON.stringify(st) !== JSON.stringify(store.autoClean);
+        store.autoClean = st;
+        if (changed && S.route === 'settings') rerenderKeepFocus();
+      }).catch(() => { store.acFetching = false; });
+    }
   };
+
+  // ---------- Auto-clean (opt-in, tier A only) ----------
+  // Main owns the settings (auto-clean.json, src/auto-clean.js): approval and
+  // the pending preview cannot be set from here. Every change goes through
+  // api.autoCleanSet, which clamps it and drops a stale preview.
+  const GBb = 1024 ** 3;
+  const MBb = 1024 ** 2;
+  async function acPatch(store, patch) {
+    try {
+      const next = await api.autoCleanSet(patch);
+      if (next) store.autoClean = next;
+    } catch (_) {}
+    store.acPreview = null;
+    rerenderKeepFocus();
+  }
+  function seg(label, options, current, onPick) {
+    return el('div', {
+      role: 'radiogroup', 'aria-label': label,
+      style: 'display:flex;gap:6px;background:var(--panel-2);padding:4px;border-radius:11px;border:1px solid var(--border);flex:none',
+    }, options.map((o) => {
+      const on = o.value === current;
+      return el('button', {
+        type: 'button', role: 'radio', 'aria-checked': on ? 'true' : 'false',
+        'data-focus-key': label + ':' + o.label,
+        class: on ? 'sp-chip-on' : '',
+        style: 'padding:7px 12px;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;color:var(--text-2);white-space:nowrap',
+        onclick: () => { if (!on) onPick(o.value); },
+        text: o.label,
+      });
+    }));
+  }
+  function whenShort(ms) {
+    try { return new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(ms).toString(); }
+  }
+  async function openHistoryEntry(id) {
+    try {
+      const list = await api.historyGet();
+      const e = (Array.isArray(list) ? list : []).find((x) => x && x.id === id);
+      if (e) { S.currentHistory = e; SP.go('historydetail'); return; }
+    } catch (_) {}
+    SP.go('history');
+  }
+  function autoCleanSection(store) {
+    if (!api.autoCleanGet || !store.autoClean) return null;
+    const st = store.autoClean;
+    const cfg = st.settings || {};
+    const on = !!cfg.enabled;
+    const acCard = el('div', {
+      'data-autoclean': '',
+      style: 'background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:6px 22px;box-shadow:var(--shadow-sm)',
+    });
+    acCard.appendChild(row(
+      'Auto-clean developer files',
+      'Off unless you turn it on. Moves Safe build output of projects you have not touched in a while, and large package caches, out of the way. Only on AC power while your computer is idle. The first run only shows what it would do.',
+      toggle(on, () => acPatch(store, { enabled: !on })),
+      !on
+    ));
+    if (on) {
+      acCard.appendChild(row('Projects unused for', 'No file in the project changed and no git activity for this long.',
+        seg('Projects unused for', [14, 30, 60, 90].map((d) => ({ value: d, label: d + ' days' })), cfg.staleDays, (v) => acPatch(store, { staleDays: v }))));
+      acCard.appendChild(row('Package caches larger than', 'Smaller caches are left alone.',
+        seg('Package caches larger than', [{ value: 500 * MBb, label: '500 MB' }, { value: GBb, label: '1 GB' }, { value: 5 * GBb, label: '5 GB' }], cfg.minCacheBytes, (v) => acPatch(store, { minCacheBytes: v }))));
+      acCard.appendChild(row('At most per run', 'A run stops at this size. A later run takes the rest.',
+        seg('At most per run', [{ value: 5 * GBb, label: '5 GB' }, { value: 20 * GBb, label: '20 GB' }, { value: 50 * GBb, label: '50 GB' }], cfg.maxRunBytes, (v) => acPatch(store, { maxRunBytes: v }))));
+
+      // Status: waiting for approval, approved, or not run yet.
+      let status;
+      let action = null;
+      if (st.pendingPreview) {
+        status = { tone: 'var(--warn-fg)', text: 'Waiting for your approval. The preview in History lists what it would move; nothing has been moved.' };
+        action = btn('Review preview', 'eye', () => openHistoryEntry(st.pendingPreview));
+      } else if (st.approved) {
+        status = { tone: 'var(--success-fg)', text: 'Approved. It runs about twice a day when your computer is idle on AC power.' };
+      } else {
+        status = { tone: 'var(--text-2)', text: 'The next run is a preview. Nothing is moved until you approve it in History.' };
+      }
+      const lr = st.lastRun;
+      const lastLine = lr && lr.at
+        ? 'Last run ' + whenShort(lr.at) + ': ' + (lr.dryRun ? 'preview, ' : '') + (lr.count ? (lr.dryRun ? 'would move ' : 'moved ') + fmt(lr.bytes) + ' from ' + lr.count + (lr.count === 1 ? ' item' : ' items') : 'nothing matched') + (lr.stopped ? ' (stopped: ' + lr.stopped + ')' : '') + '.'
+        : 'It has not run yet.';
+      const previewBtn = btn(store.acPreviewing ? 'Checking…' : 'What would it move now?', 'search', async () => {
+        store.acPreviewing = true;
+        rerenderKeepFocus();
+        try { store.acPreview = await api.autoCleanPreview(); } catch (_) { store.acPreview = { error: true }; }
+        store.acPreviewing = false;
+        rerenderKeepFocus();
+      }, { disabled: !!store.acPreviewing });
+      const statusBox = el('div', { style: 'padding:16px 0' }, [
+        el('div', { style: 'display:flex;align-items:flex-start;justify-content:space-between;gap:16px' }, [
+          el('div', { style: 'min-width:0' }, [
+            el('div', { style: 'font-weight:600;font-size:13.5px;color:' + status.tone + ';line-height:1.5', text: status.text }),
+            el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:4px', text: lastLine }),
+          ]),
+          el('div', { style: 'display:flex;gap:8px;flex:none' }, [action, previewBtn]),
+        ]),
+      ]);
+      const pv = store.acPreview;
+      if (pv && !pv.error) {
+        const list = el('div', { style: 'display:flex;flex-direction:column;gap:6px;margin-top:12px' });
+        list.appendChild(el('div', { style: 'font-weight:600;font-size:13px', text: pv.count ? 'Right now it would move ' + fmt(pv.bytes) + ' from ' + pv.count + (pv.count === 1 ? ' item' : ' items') + ':' : 'Right now nothing matches your rules.' }));
+        (pv.candidates || []).slice(0, 6).forEach((c) => list.appendChild(el('div', { style: 'display:flex;gap:10px;align-items:baseline;min-width:0' }, [
+          el('div', { class: 'mono', title: c.path, style: 'flex:1;min-width:0;font-size:12px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: c.path }),
+          el('div', { style: 'font-size:12px;color:var(--text-3);flex:none', text: fmt(c.bytes) }),
+        ])));
+        if ((pv.candidates || []).length > 6) list.appendChild(el('div', { style: 'color:var(--text-3);font-size:12px', text: 'and ' + (pv.candidates.length - 6) + ' more.' }));
+        if ((pv.skipped || []).length) list.appendChild(el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:4px', text: pv.skipped.length + ' left alone, for example: ' + pv.skipped[0].reason }));
+        statusBox.appendChild(list);
+      } else if (pv && pv.error) {
+        statusBox.appendChild(el('div', { style: 'color:var(--danger-fg);font-size:12.5px;margin-top:10px', text: 'Spaci could not check right now.' }));
+      }
+      acCard.appendChild(el('div', { style: 'border-bottom:1px solid var(--border)' }, [statusBox]));
+      acCard.appendChild(el('div', { style: 'display:flex;gap:10px;align-items:flex-start;padding:16px 0;color:var(--text-3);font-size:12.5px;line-height:1.55' }, [
+        ic('shield', 16, { color: 'var(--text-3)' }),
+        el('div', { text: 'Only Safe items. Never app caches, AI tool data, Docker, the Trash, or anything Spaci could not verify. A project is skipped while a developer tool runs in it or when it has a .spaci-keep file. Moved items are kept for 24 hours, so you can undo a run from History.' }),
+      ]));
+    }
+    return frag([
+      el('h2', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin:30px 0 14px', text: 'Auto-clean' }),
+      acCard,
+    ]);
+  }
 
   // tiny local fragment helper (frag is not exported on SP)
   function frag(kids) {
@@ -182,6 +315,7 @@
     try { prefs = await api.getPrefs(); } catch (_) {}
     try { version = await api.appVersion(); } catch (_) {}
     try { update = await api.updateStatus(); } catch (_) {}
+    try { if (api.autoCleanGet) store.autoClean = await api.autoCleanGet(); } catch (_) {}
     store.prefs = prefs || {};
     store.version = version || '';
     store.update = update || { state: 'idle' };
@@ -353,6 +487,9 @@
     card.appendChild(row('Appearance font', 'Typeface used across the app.', fontSeg, true));
 
     host.appendChild(card);
+
+    const acSection = autoCleanSection(store);
+    if (acSection) host.appendChild(acSection);
 
     // ---------- About Spaci card ----------
     // Faithful to design/spaci-v2-reference.html: animated brand logo, "Spaci."
