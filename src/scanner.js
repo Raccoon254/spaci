@@ -15,6 +15,7 @@ const { execFile } = require('child_process');
 const docker = require('./docker');
 const languages = require('./languages');
 const techCache = require('./tech-cache');
+const { projectFigures } = require('./reclaimable');
 
 // Scanning is IO bound, not CPU bound: the win comes from keeping many reads in
 // flight rather than from cores. These caps keep a scan responsive without
@@ -772,7 +773,9 @@ async function buildProject(dir, detected, signal, rootEntries) {
     });
   });
   items.sort((a, b) => b.size - a.size);
-  const cleanableSize = items.reduce((s, i) => s + i.size, 0);
+  // Only safe items are ever passed to the cleaner, so only they count as
+  // reclaimable; unverified bytes are reported apart (issue #13).
+  const { cleanableSize, unverifiedSize } = projectFigures(items);
 
   // The scanner already read this listing, so Docker detection costs nothing.
   const names = rootEntries || await fsp.readdir(dir).catch(() => []);
@@ -797,6 +800,7 @@ async function buildProject(dir, detected, signal, rootEntries) {
     types: types.map((t) => ({ id: t.id, name: t.name, icon: t.icon, score: t.score, markers: t.matchedMarkers || [] })),
     items,
     cleanableSize,
+    unverifiedSize,
     totalSize: 0, // computed lazily on demand to keep scans fast
     mtime,
     git: null,

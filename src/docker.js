@@ -735,6 +735,9 @@ const PRUNE_KINDS = {
     name: 'Build cache',
     args: ['builder', 'prune', '-f'],
     safe: true,
+    // reversible: the data comes back by itself (Docker rebuilds it). History
+    // records true as 'rebuild', false as 'none'.
+    reversible: true,
     description: 'Layer cache from past `docker build` runs. Rebuilds on demand.',
   },
   'dangling-images': {
@@ -742,6 +745,7 @@ const PRUNE_KINDS = {
     name: 'Dangling images',
     args: ['image', 'prune', '-f'],
     safe: true,
+    reversible: true,
     description: 'Untagged image layers left behind by rebuilds. Nothing references them.',
   },
   'stopped-containers': {
@@ -749,6 +753,7 @@ const PRUNE_KINDS = {
     name: 'Stopped containers',
     args: ['container', 'prune', '-f'],
     safe: false,
+    reversible: false,
     description: 'Removes stopped containers. Their volumes and images are kept.',
   },
   // Tagged images are where most engine space goes, and `image prune -f` never
@@ -760,6 +765,9 @@ const PRUNE_KINDS = {
     name: 'Unused images',
     args: ['image', 'prune', '-a', '-f'],
     safe: false,
+    // Permanent from Spaci's side: a locally built image with no registry copy
+    // is gone, and pulled ones only come back if the registry still has them.
+    reversible: false,
     description: 'Removes every image no container uses, tagged or not. They download or rebuild again the next time you need them.',
   },
 };

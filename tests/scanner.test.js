@@ -56,7 +56,11 @@ test('projects, artifacts and Docker facts come out of one walk', async () => {
   const names = app.items.map((i) => i.name).sort();
   assert.deepEqual(names, ['dist', 'node_modules']);
   assert.ok(app.items.every((i) => i.size > 0), 'every artifact should be measured');
-  assert.equal(app.cleanableSize, app.items.reduce((s, i) => s + i.size, 0));
+  // Reclaimable is only what a clean passes to the cleaner (safe items);
+  // the rest is reported apart (issue #13).
+  assert.equal(app.cleanableSize, app.items.filter((i) => i.safe === true).reduce((s, i) => s + i.size, 0));
+  assert.equal(app.unverifiedSize, app.items.filter((i) => i.safe !== true).reduce((s, i) => s + i.size, 0));
+  assert.equal(app.cleanableSize + app.unverifiedSize, app.items.reduce((s, i) => s + i.size, 0));
   // Largest first, which is what the UI renders.
   assert.ok(app.items[0].size >= app.items[app.items.length - 1].size);
 });

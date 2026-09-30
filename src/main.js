@@ -75,6 +75,9 @@ const restoreHints = require('./restore-hints');
 const cleanPlan = require('./clean-plan');
 const ipcGuards = require('./ipc-guards');
 const dockerVolumes = require('./docker-volumes');
+const recommendations = require('./recommendations');
+const reclaimable = require('./reclaimable');
+const { fmt } = recommendations;
 const trayPolicy = require('./tray-policy');
 const installLocation = require('./install-location');
 
@@ -302,6 +305,8 @@ async function computeDocker(projects, options = {}) {
     const stubs = list.map((p) => ({ path: p.path, docker: p.docker || null }));
     const { summary, attached } = await work('dockerSummary', [stubs, options]);
     for (const a of attached || []) if (list[a.index]) list[a.index].docker = a.docker;
+    // The Docker headline without volumes and containers (issue #13).
+    if (summary && summary.ok && !summary.cleanable) summary.cleanable = reclaimable.dockerFigures(summary.categories);
     return summary;
   } catch (e) {
     return { ok: false, reason: 'error', error: e && e.message, at: Date.now() };
@@ -315,8 +320,8 @@ function keepProject(p) {
 
 function updateTrayTitle() {
   if (!tray) return;
-  const reclaim = (cache.projects || []).reduce((s, p) => s + (p.cleanableSize || 0), 0)
-    + (cache.system || []).filter((t) => t.safe).reduce((s, t) => s + (t.size || 0), 0);
+  // Safe project items and safe system targets only: what a clean would remove.
+  const reclaim = reclaimable.grandTotal({ projects: cache.projects || [], system: cache.system || [] });
   tray.setToolTip(reclaim > 0 ? `Spaci · ${fmt(reclaim)} reclaimable` : 'Spaci');
 }
 
@@ -809,83 +814,6 @@ function getBrandIcon(id, theme) {
   return svg;
 }
 
-/**
- * Turn Docker's reclaim policy (which lives in docker.js, next to the prune
- * allowlist) into recommendation cards.
- */
-function dockerRecommendations(info) {
-  const COPY = {
-    'build-cache': (s) => `${s.unused} of ${s.total} cached build layers are not in use. Docker rebuilds them the next time you build.`,
-    'dangling-images': (s) => `${s.unused} of ${s.total} images have no container using them. Cleaning removes only the untagged layers left behind by rebuilds.`,
-    'desktop-disk': (s) => [s.message, s.sizeNote, s.guidance].filter(Boolean).join(' '),
-  };
-  const TITLE = {
-    'build-cache': 'Docker build cache',
-    'dangling-images': 'Unused Docker images',
-    'desktop-disk': 'Docker disk image',
-  };
-  // Unknown kinds are dropped rather than crashing the recommendations list.
-  return docker.reclaimSuggestions(info).filter((s) => COPY[s.kind]).map((s) => {
-    const informational = s.kind === 'desktop-disk';
-    return {
-      id: 'docker:' + s.kind,
-      kind: 'docker',
-      savings: s.savings,
-      severity: s.severity,
-      icon: 'box',
-      title: `${TITLE[s.kind]} · ${fmt(informational ? s.bytes : s.savings)}`,
-      body: COPY[s.kind](s),
-      // The disk image is explained, not cleaned: pruning needs a running engine.
-      action: informational ? { type: 'none' } : { type: 'docker-prune', kind: s.kind },
-    };
-  });
-}
-
-function buildRecommendations(projects, sysTargets, prefs, dockerInfo) {
-  const recs = [];
-  const now = Date.now();
-  const staleMs = (prefs.staleDays || 60) * 86400000;
-
-  // Big reclaimable projects
-  const sorted = [...projects].filter((p) => p.cleanableSize > 0).sort((a, b) => b.cleanableSize - a.cleanableSize);
-  for (const p of sorted.slice(0, 5)) {
-    const stale = now - p.mtime > staleMs;
-    recs.push({
-      id: 'proj:' + p.path,
-      kind: 'project',
-      savings: p.cleanableSize,
-      severity: stale ? 'high' : 'normal',
-      icon: stale ? 'clock' : 'broom',
-      title: `${p.name} · ${fmt(p.cleanableSize)} reclaimable`,
-      body: stale
-        ? `Not modified in ${Math.round((now - p.mtime) / 86400000)} days. Its build artifacts are likely safe to remove.`
-        : `${p.items.length} artifact folder(s) (${p.items.map((i) => i.name).slice(0, 3).join(', ')}…).`,
-      action: { type: 'open-project', path: p.path },
-    });
-  }
-  // Big system caches
-  const bigSys = [...sysTargets].filter((t) => t.safe && t.size > 500 * 1024 * 1024).sort((a, b) => b.size - a.size);
-  for (const t of bigSys.slice(0, 4)) {
-    recs.push({
-      id: 'sys:' + t.id,
-      kind: 'cache',
-      savings: t.size,
-      severity: t.size > 3 * 1024 ** 3 ? 'high' : 'normal',
-      icon: t.icon, title: `${t.name} · ${fmt(t.size)}`,
-      body: t.description, action: { type: 'select-system', id: t.id },
-    });
-  }
-  // Docker is invisible to a filesystem scan, so it is easily the biggest thing
-  // a dev machine is unaware of. Rank it with everything else by size.
-  recs.push(...dockerRecommendations(dockerInfo));
-  return recs.sort((a, b) => (b.savings || 0) - (a.savings || 0));
-}
-function fmt(b) {
-  if (b < 1024) return b + ' B';
-  const u = ['KB', 'MB', 'GB', 'TB']; let i = -1; do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
-  return `${b.toFixed(1)} ${u[i]}`;
-}
-
 // ---------- IPC ----------
 ipcMain.handle('prefs:get', () => loadPrefs());
 ipcMain.handle('prefs:set', (_e, patch) => {
@@ -987,7 +915,7 @@ ipcMain.handle('docker:status', async (_e, force) => {
 });
 
 ipcMain.handle('docker:kinds', () => Object.values(docker.PRUNE_KINDS)
-  .map(({ id, name, safe, description }) => ({ id, name, safe, description })));
+  .map(({ id, name, safe, reversible, description }) => ({ id, name, safe, reversible: reversible === true, description })));
 
 // Reclaim one allowlisted category. The kind is validated inside docker.prune,
 // so an unexpected value from the renderer can never become a docker argument.
@@ -1244,7 +1172,13 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
   }
 });
 
-ipcMain.handle('recommendations', (_e, { projects, sysTargets }) => buildRecommendations(projects || [], sysTargets || [], loadPrefs(), cache.docker));
+// Savings are what each action really removes (recommendations.js, issue #13).
+ipcMain.handle('recommendations', (_e, payload) => {
+  const { projects, sysTargets } = payload && typeof payload === 'object' ? payload : {};
+  return recommendations.buildRecommendations(projects || [], sysTargets || [], loadPrefs(), cache.docker, {
+    reclaimSuggestions: docker.reclaimSuggestions, pruneKinds: docker.PRUNE_KINDS,
+  });
+});
 
 /**
  * Paths the renderer may open or reveal: only what Spaci itself found or was

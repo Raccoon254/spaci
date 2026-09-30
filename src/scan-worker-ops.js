@@ -17,6 +17,8 @@
 // real parent channel (Electron utilityProcess parentPort, or a
 // child_process.fork IPC channel in tests).
 
+const { dockerFigures } = require('./reclaimable');
+
 // Loaded lazily so a test that injects every module never loads the real ones.
 const LOADERS = {
   scanner: () => require('./scanner'),
@@ -96,6 +98,14 @@ async function attachLanguages(scanner, projects, signal, { now = Date.now, pass
  * docker record each project should carry. Heavy inventory lists never leave
  * the worker.
  */
+/** reclaimSuggestions without the heavy fields, and never throwing. */
+function safeSuggestions(docker, info) {
+  try {
+    const list = docker.reclaimSuggestions(info);
+    return Array.isArray(list) ? JSON.parse(JSON.stringify(list)) : undefined;
+  } catch (_) { return undefined; }
+}
+
 async function dockerSummary(mod, stubs, options = {}) {
   const scanner = mod('scanner');
   const docker = mod('docker');
@@ -111,6 +121,10 @@ async function dockerSummary(mod, stubs, options = {}) {
         status: inventory.status,
         categories: inventory.categories,
         totals: inventory.totals,
+        // What Spaci's prunes can free (no volumes, no containers), and the
+        // suggestions sized from per-image detail that never leaves the worker.
+        cleanable: dockerFigures(inventory.categories, inventory.images),
+        suggestions: typeof docker.reclaimSuggestions === 'function' ? safeSuggestions(docker, { ...inventory, desktopDisk: disk }) : undefined,
         desktopDisk: disk,
         projects: list.filter((p) => p.docker && p.docker.usage).length,
         at: Date.now(),

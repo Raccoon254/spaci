@@ -144,7 +144,8 @@ function dockerEntry({ id, at, finishedAt, spec, freed, restoreHint }) {
     scope: 'docker', label: (spec && spec.name) || 'Docker',
     requested: 1, count: 1, failedCount: 0, refusedCount: 0,
     freed: bytesOf(freed), items: [],
-    reversible: spec && spec.safe ? 'rebuild' : 'none',
+    // An explicit reversible flag wins; older specs without one fall back to safe.
+    reversible: (spec && (typeof spec.reversible === 'boolean' ? spec.reversible : spec.safe)) ? 'rebuild' : 'none',
   };
   if (restoreHint) entry.restoreHint = restoreHint;
   return entry;

@@ -13,6 +13,7 @@
 
 const nodeFs = require('fs');
 const path = require('path');
+const { projectFigures } = require('./reclaimable');
 
 const CACHE_SCHEMA = 2;
 
@@ -40,14 +41,15 @@ function normalizeProject(p) {
     ? p.items.filter((it) => isObj(it) && typeof it.path === 'string' && it.path)
       .map((it) => ({ ...it, size: num(it.size) }))
     : [];
-  const cleanable = typeof p.cleanableSize === 'number' && Number.isFinite(p.cleanableSize)
-    ? Math.max(0, p.cleanableSize)
-    : items.reduce((s, it) => s + it.size, 0);
+  // Recomputed from the items, never trusted from disk: caches written before
+  // 2.3 counted unverified items as reclaimable (issue #13).
+  const { cleanableSize, unverifiedSize } = projectFigures(items);
   return {
     ...p,
     name: str(p.name, path.basename(p.path)),
     items,
-    cleanableSize: cleanable,
+    cleanableSize,
+    unverifiedSize,
     mtime: num(p.mtime),
   };
 }

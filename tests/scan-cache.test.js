@@ -23,7 +23,7 @@ test('normalizeCache turns non-objects into an empty cache', () => {
 
 test('normalizeCache migrates a v1 cache and keeps its data', () => {
   const v1 = {
-    projects: [{ path: '/p/a', name: 'a', items: [{ path: '/p/a/node_modules', size: 10 }], cleanableSize: 10, mtime: 5 }],
+    projects: [{ path: '/p/a', name: 'a', items: [{ path: '/p/a/node_modules', size: 10, safe: true }], cleanableSize: 10, mtime: 5 }],
     system: [{ id: 'npm', size: 100, safe: true }],
     scannedAt: 1700000000000,
     root: '/p',
@@ -78,9 +78,19 @@ test('normalizeCache keeps unknown keys from a newer build and valid docker data
 });
 
 test('a project without cleanableSize gets it from its items', () => {
-  const c = normalizeCache({ projects: [{ path: '/x', items: [{ path: '/x/a', size: 3 }, { path: '/x/b', size: 4 }] }] });
+  const c = normalizeCache({ projects: [{ path: '/x', items: [{ path: '/x/a', size: 3, safe: true }, { path: '/x/b', size: 4, safe: true }] }] });
   assert.equal(c.projects[0].cleanableSize, 7);
+  assert.equal(c.projects[0].unverifiedSize, 0);
   assert.equal(c.projects[0].name, 'x');
+});
+
+test('an old cache that counted unverified items as reclaimable is corrected on load (issue #13)', () => {
+  const c = normalizeCache({ projects: [{
+    path: '/x', cleanableSize: 9,
+    items: [{ path: '/x/node_modules', size: 3, safe: true }, { path: '/x/build', size: 6, safe: false }, { path: '/x/dist', size: 1 }],
+  }] });
+  assert.equal(c.projects[0].cleanableSize, 3, 'only what a clean would pass to the cleaner');
+  assert.equal(c.projects[0].unverifiedSize, 7, 'unverified (and unflagged) bytes apart');
 });
 
 test('readCacheFile: missing, truncated and valid files', () => {
