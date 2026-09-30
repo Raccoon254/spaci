@@ -12,6 +12,12 @@ contextBridge.exposeInMainWorld('api', {
   diskUsage: (p) => ipcRenderer.invoke('disk:usage', p),
   diskBreakdown: () => ipcRenderer.invoke('disk:breakdown'),
   topChildren: (dirs) => ipcRenderer.invoke('fs:top-children', dirs),
+  // ---- storage breakdown (os-storage) ----
+  storageMeasure: () => ipcRenderer.invoke('storage:measure'),
+  storageOpenFda: () => ipcRenderer.invoke('storage:open-fda'),
+  storageReveal: (p) => ipcRenderer.invoke('storage:reveal', p),
+  onStorageProgress: (cb) => sub('storage:progress', cb),
+  // ---- end storage breakdown (os-storage) ----
   icon: (name) => ipcRenderer.invoke('icon:get', name),
   iconSvg: (name) => ipcRenderer.invoke('icon:get', name),
   techIcon: (id, flavor) => ipcRenderer.invoke('techicon:get', id, flavor),

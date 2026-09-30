@@ -115,6 +115,29 @@ try {
   const text = await evalIn('return document.body.innerText');
   check('disk label matches the OS', process.platform === 'darwin' || !/Macintosh HD/.test(text));
 
+  // Storage: the breakdown returns, its categories add up to used (within 2%)
+  // or the gap is named, and the System drill-down lists items with tiers.
+  const bd = await evalIn('return await window.api.storageMeasure()');
+  const cats = bd?.categories || [];
+  const sum = cats.reduce((a, c) => a + (c.bytes || 0), 0);
+  const sysCat = cats.find((c) => c.key === 'system');
+  check('storage breakdown returns', bd?.meta?.version === 2 && bd.used > 0 && cats.length > 0,
+    JSON.stringify({ used: bd?.used, categories: cats.map((c) => c.key), seconds: Math.round((bd?.meta?.durationMs || 0) / 1000) }));
+  const gap = Math.abs(sum - (bd?.used || 0));
+  const within = bd?.used > 0 && gap <= bd.used * 0.02;
+  const remainder = sysCat?.remainder || { bytes: 0, parts: [] };
+  const named = (remainder.bytes <= (bd?.used || 0) * 0.02 || (remainder.parts || []).length > 0) && (!bd?.reconcile || (bd.reconcile.upperBound || []).length > 0);
+  check('storage adds up to used within 2%, or names the remainder', (within || !!bd?.reconcile) && named,
+    JSON.stringify({ used: bd?.used, sum, explained: bd?.explained, unexplained: bd?.unexplained, parts: (remainder.parts || []).map((p) => p.key), reconcile: bd?.reconcile }));
+  const sysItems = [...(sysCat?.os || []), ...(sysCat?.areas || []), ...(remainder.parts || []), ...(sysCat?.info || [])];
+  check('System drill lists items, each with a tier, tier D with its OS command',
+    sysItems.length > 0 && sysItems.every((i) => ['A', 'B', 'C', 'D'].includes(i.tier)) && sysItems.filter((i) => i.tier === 'D').every((i) => i.command || i.commandNote),
+    sysItems.map((i) => `${i.key}:${i.tier}`).join(' '));
+  const drill = await evalIn(`const S = window.SP.state; S.breakdown = await window.api.diskBreakdown();
+    S.activeCat = (S.breakdown.categories || []).find((c) => c.key === 'system'); window.SP.go('storagecat');
+    await new Promise((r) => setTimeout(r, 800)); return document.body.innerText`);
+  check('System drill-down renders its sections', /Not visible to Spaci/.test(drill) && /System folders|Managed by/.test(drill), drill.slice(0, 160).replace(/\s+/g, ' '));
+
   if (WITH_DOCKER) {
     const before = dockerImageCount();
     const st = await evalIn('return await window.api.dockerStatus(true)');

@@ -81,7 +81,101 @@
     Promise.resolve().then(async () => {
       try { if (!S.disk) S.disk = await window.api.diskUsage(); } catch (_) {}
       try { if (!S.breakdown) S.breakdown = await window.api.diskBreakdown(); } catch (_) {}
-    }).finally(() => { S._storageLoading = false; if (S.route === 'storage' || S.route === 'storagecat') SP.go(S.route); });
+    }).finally(() => { S._storageLoading = false; if (S.route === 'storage' || S.route === 'storagecat') SP.go(S.route); measureIfStale(); });
+  }
+
+  // ---------- live measurement (os-storage) ----------
+  // storageMeasure() streams snapshots while it measures: each folder shows
+  // its size from the last run until the fresh one lands, so the screen fills
+  // in seconds. A breakdown from before this model (no meta.version 2) or
+  // older than ten minutes is measured again when the screen opens.
+  const STALE_MS = 10 * 60 * 1000;
+  let unsubProgress = null;
+  let repaintTimer = null;
+  function repaintSoon() {
+    if (repaintTimer) return;
+    repaintTimer = setTimeout(() => {
+      repaintTimer = null;
+      if (S.route === 'storage') SP.go('storage');
+      else if (S.route === 'storagecat' && latestCatRender) latestCatRender();
+    }, 300);
+  }
+  function measureNow() {
+    if (!api || typeof api.storageMeasure !== 'function' || S.storageMeasuring) return;
+    S.storageMeasuring = true;
+    if (!unsubProgress && typeof api.onStorageProgress === 'function') {
+      unsubProgress = api.onStorageProgress((snap) => {
+        if (!S.storageMeasuring || !snap || !Array.isArray(snap.categories)) return;
+        S.breakdown = snap;
+        refreshActiveCat();
+        repaintSoon();
+      });
+    }
+    Promise.resolve(api.storageMeasure()).then((bd) => { if (bd && Array.isArray(bd.categories)) S.breakdown = bd; })
+      .catch(() => {})
+      .finally(() => { S.storageMeasuring = false; S.catChildren = {}; refreshActiveCat(); repaintSoon(); });
+    repaintSoon();
+  }
+  function measureIfStale() {
+    const bd = S.breakdown;
+    const version = bd && bd.meta && bd.meta.version;
+    const at = bd && (bd.at || (bd.meta && bd.meta.scannedAt));
+    if (S._storageTriedAt && Date.now() - S._storageTriedAt < 60000) return; // a failed run does not loop
+    if (!bd || version !== 2 || !at || Date.now() - at > STALE_MS) { S._storageTriedAt = Date.now(); measureNow(); }
+  }
+  // The open category must follow the fresh numbers, not the snapshot it was opened from.
+  function refreshActiveCat() {
+    if (!S.activeCat || !S.breakdown) return;
+    const fresh = (S.breakdown.categories || []).find((x) => x && x.key === S.activeCat.key);
+    if (fresh) S.activeCat = fresh;
+  }
+
+  // ---------- tiers, confidence, commands ----------
+  const TIER = {
+    A: { label: 'Regenerable', cls: 'sp-badge-safe', title: 'Tier A: regenerable, safe to clean in bulk' },
+    B: { label: 'Review first', cls: 'sp-badge-caution', title: 'Tier B: regenerable, but costly to rebuild; confirm per category' },
+    C: { label: 'Your data', cls: 'sp-badge-warn', title: 'Tier C: your data or irreversible; decide item by item' },
+    D: { label: 'Managed by the OS', cls: 'sp-badge-accent', title: 'Tier D: managed by the operating system; Spaci explains it and never cleans it' },
+  };
+  function tierChip(t) {
+    const m = TIER[t];
+    if (!m) return null;
+    return el('span', { class: m.cls, title: m.title, style: 'display:inline-flex;align-items:center;padding:2px 8px;border-radius:99px;font-size:10.5px;font-weight:700;letter-spacing:.2px;white-space:nowrap;flex:none', text: t + ' · ' + m.label });
+  }
+  const CONF = {
+    partial: 'Partial: ran out of time, bytes so far',
+    'upper-bound': 'Upper bound: shared blocks counted in full',
+    denied: 'At least: some folders were not readable',
+    cached: 'From the last scan, measuring again',
+    stale: 'From the last complete scan: this one ran out of time',
+    estimate: 'The OS’s own estimate',
+    measuring: 'Still measuring',
+  };
+  function confNote(c, pending) {
+    const text = pending ? CONF.cached : CONF[c];
+    if (!text) return null;
+    return el('span', { style: 'font-size:11px;color:var(--text-4);white-space:nowrap', text: text });
+  }
+  const OS_NAME = () => {
+    const p = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+    return /mac/i.test(p) ? 'macOS' : /win/i.test(p) ? 'Windows' : 'Linux';
+  };
+  function commandBox(command, note) {
+    if (!command) return note ? el('div', { style: 'color:var(--text-3);font-size:12px;line-height:1.5;margin-top:8px', text: note }) : null;
+    const copy = el('button', {
+      style: 'height:28px;padding:0 10px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--text-2);font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;cursor:pointer;flex:none',
+      hov: 'border-color:var(--border-2);color:var(--text)',
+      title: 'Copy the command',
+      onclick: (e) => { e.stopPropagation(); try { navigator.clipboard.writeText(command); if (SP.toast) SP.toast('Command copied', command); } catch (_) {} }
+    }, [ic('copy', 13), 'Copy']);
+    return el('div', { style: 'margin-top:10px' }, [
+      el('div', { style: 'font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-4);font-weight:600;margin-bottom:6px', text: OS_NAME() + '’s own command (Spaci never runs it)' }),
+      el('div', { style: 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;background:var(--panel-2);border:1px solid var(--border)' }, [
+        el('code', { style: 'flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis', title: command, text: command }),
+        copy
+      ]),
+      note ? el('div', { style: 'color:var(--text-3);font-size:12px;line-height:1.5;margin-top:6px', text: note }) : null
+    ]);
   }
 
   // "What macOS calls System Data". macOS files developer data, caches, app
@@ -129,10 +223,60 @@
     ]);
   }
 
+  function systemHint(c) {
+    const r = c.remainder && c.remainder.bytes;
+    const live = S.storageMeasuring || c.confidence === 'measuring';
+    return 'OS volumes and files, system folders and home folders no category claims' + (r > 0 ? (live ? '. ' + fmt(r) + ' is not measured yet.' : '. ' + fmt(r) + ' is not visible to Spaci, and named inside.') : '.');
+  }
+
+  // How much of the used space Spaci can put a name and a folder to, and
+  // whether a measurement is running. Absent on breakdowns from before v2.
+  function accountingCard(used) {
+    const bd = S.breakdown || {};
+    if (bd.explained == null || !used) return null;
+    const live = S.storageMeasuring || (bd.meta && bd.meta.partial);
+    const pct = Math.max(0, Math.min(100, bd.explained / used * 100));
+    const pending = bd.meta && bd.meta.pending;
+    const at = bd.at || (bd.meta && bd.meta.scannedAt);
+    const right = live
+      ? el('div', { style: 'display:flex;align-items:center;gap:9px;color:var(--text-2);font-size:12.5px;font-weight:600;flex:none' }, [
+        el('span', { style: 'color:var(--accent-fg);display:flex' }, [ring('spiral', 20)]),
+        pending > 0 ? 'Measuring, ' + pending + (pending === 1 ? ' folder' : ' folders') + ' to go' : 'Measuring system folders'
+      ])
+      : el('button', {
+        style: 'height:34px;padding:0 13px;border-radius:9px;border:1px solid var(--border);background:var(--panel-2);color:var(--text-2);font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:7px;cursor:pointer;flex:none',
+        hov: 'border-color:var(--border-2);color:var(--text)',
+        title: at ? 'Last measured ' + (SP.ago ? SP.ago(at) : '') : '',
+        onclick: () => { S._storageTriedAt = 0; measureNow(); }
+      }, [ic('refresh', 14), 'Measure again']);
+    const note = bd.reconcile && bd.reconcile.overcount > 0
+      ? el('div', { style: 'color:var(--text-3);font-size:12px;line-height:1.5;margin-top:10px', text: 'Folders add up to ' + fmt(bd.reconcile.overcount) + ' more than the disk uses: blocks shared between files (APFS clones, hard links) are counted once per folder' + (bd.reconcile.upperBound && bd.reconcile.upperBound.length ? ' in ' + bd.reconcile.upperBound.slice(0, 3).join(', ') : '') + '. Nothing is scaled to hide it.' })
+      : null;
+    return el('div', { style: 'padding:16px 18px;border-radius:14px;background:var(--panel);border:1px solid var(--border);margin:-8px 0 26px' }, [
+      el('div', { style: 'display:flex;align-items:center;gap:16px' }, [
+        el('div', { style: 'flex:1;min-width:0' }, [
+          el('div', { style: 'font-size:14px;color:var(--text-2)' }, [
+            'Spaci accounts for ',
+            el('b', { style: 'color:var(--text);font-weight:700', text: fmt(bd.explained) }),
+            ' of the ' + fmt(used) + ' in use ',
+            el('span', { style: 'color:var(--text-3)', text: '(' + pct.toFixed(0) + '%)' })
+          ]),
+          el('div', { style: 'height:6px;border-radius:99px;background:var(--track);overflow:hidden;margin-top:9px' }, [
+            el('span', { style: 'display:block;height:100%;border-radius:99px;background:var(--accent);width:' + pct.toFixed(1) + '%;transition:width .4s' })
+          ]),
+          bd.unexplained > 0 ? el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:7px', text: live ? fmt(bd.unexplained) + ' is not measured yet. Folders fill in as they finish.' : fmt(bd.unexplained) + ' is not visible without administrator rights or Full Disk Access. Open System to see what it is made of.' }) : null
+        ]),
+        right
+      ]),
+      note
+    ]);
+  }
+
   // ---------- STORAGE ----------
   SP.screens.storage = function (host) {
     const { total, used, free, cats } = disk();
     if (!total && !cats.length) { ensure(); loading(host); return; }
+    measureIfStale();
 
     const hover = S.storageHover;
     const maxCat = cats.reduce((m, c) => Math.max(m, c.bytes), 0) || 1;
@@ -152,6 +296,9 @@
       stats.map((s) => el('div', { style: 'display:flex;align-items:center;gap:9px;font-size:14px;color:var(--text-2)' }, [
         ic(s.icon, 16, { color: 'var(--text-3)' }), s.label, el('b', { style: 'color:' + s.color + ';font-weight:700;letter-spacing:-.2px', text: s.value })
       ]))));
+
+    const accounting = accountingCard(used);
+    if (accounting) host.appendChild(accounting);
 
     // disk usage header
     host.appendChild(el('div', { style: 'display:flex;align-items:baseline;justify-content:space-between;margin-bottom:13px' }, [
@@ -199,8 +346,12 @@
         }, [
           el('div', { style: 'width:44px;height:44px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:' + color }, [ic(c.icon || 'folder', 23)]),
           el('div', { style: 'flex:1;min-width:0' }, [
-            el('div', { style: 'font-weight:600;font-size:14.5px', text: c.label }),
-            el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:2px', text: c.hint || '' })
+            el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' }, [
+              el('span', { style: 'font-weight:600;font-size:14.5px', text: c.label }),
+              tierChip(c.tier),
+              confNote(c.confidence, c.pending)
+            ]),
+            el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:2px', text: c.key === 'system' && c.remainder ? systemHint(c) : (c.hint || '') })
           ]),
           el('div', { style: 'width:132px;flex:none' }, [
             el('div', { style: 'height:6px;border-radius:99px;background:var(--track);overflow:hidden' }, [el('span', { style: 'display:block;height:100%;border-radius:99px;background:' + color + ';width:' + (c.bytes / maxCat * 100).toFixed(1) + '%' })]),
@@ -250,6 +401,7 @@
     // Kick off the largest-items fetch once per category, caching the result.
     function ensureChildren() {
       if (!dirs.length) return;
+      if (isSystem && Array.isArray(c.areas)) return; // the breakdown already listed them
       if (S.catChildren[c.key] !== undefined) return; // cached (array or [])
       if (S._catLoading === c.key) return; // already in flight
       if (typeof api.topChildren !== 'function') { S.catChildren[c.key] = []; if (latestCatRender) latestCatRender(); return; }
@@ -297,7 +449,11 @@
       }, [
         el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:' + color }, [pathMark(item.path, isDir ? 'folder' : 'file', 22)]),
         el('div', { style: 'flex:1;min-width:0' }, [
-          el('div', { style: 'font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: item.name || (item.path || '').split('/').pop() || '' }),
+          el('div', { style: 'display:flex;align-items:center;gap:8px;min-width:0' }, [
+            el('span', { style: 'font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0', text: item.name || (item.path || '').split(/[\\/]/).pop() || '' }),
+            tierChip(item.tier),
+            item.partial ? confNote('partial') : null
+          ]),
           el('div', { class: 'mono', style: 'color:var(--text-3);font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,SFMono-Regular,Menlo,monospace', text: shortPath(item.path, home) })
         ]),
         el('div', { style: 'width:120px;flex:none' }, [
@@ -322,10 +478,164 @@
       ]);
     }
 
+    // ---------- System, explained (breakdown v2) ----------
+    // Four parts that add up to the System figure: what the OS manages (tier D
+    // volumes and files), system folders measured outside the home folder,
+    // home folders no category claims, and what no account without admin
+    // rights (or Full Disk Access) can measure, named part by part.
+    const SYS_COLORS = { os: '#7a8a99', areas: '#5e93dd', home: '#e0954f', hidden: 'var(--track-bright)' };
+    const sumOf = (list) => (list || []).reduce((a, it) => a + (Number(it && it.bytes) || 0), 0);
+    S.storageOpen = S.storageOpen || {};
+
+    function revealBtn(p) {
+      if (!p || typeof api.storageReveal !== 'function') return null;
+      return el('button', {
+        style: 'width:30px;height:30px;border-radius:8px;border:1px solid var(--border);background:var(--panel-2);color:var(--text-3);display:grid;place-items:center;flex:none;cursor:pointer',
+        hov: 'border-color:var(--border-2);color:var(--text)',
+        title: 'Show in ' + (OS_NAME() === 'macOS' ? 'Finder' : OS_NAME() === 'Windows' ? 'Explorer' : 'the file manager'),
+        'aria-label': 'Show ' + p,
+        onclick: (e) => { e.stopPropagation(); try { api.storageReveal(p); } catch (_) {} }
+      }, [ic('folder-open', 14)]);
+    }
+
+    function childRow(ch, max, home) {
+      const pct = max ? Math.max(2, (Number(ch.bytes || 0) / max) * 100) : 0;
+      const sub = [ch.path ? shortPath(ch.path, home) : null, ch.lastUsedAt ? 'last used ' + (SP.ago ? SP.ago(Date.parse(ch.lastUsedAt)) : ch.lastUsedAt) : null, ch.reclaimable ? fmt(ch.reclaimable) + ' reclaimable' : null].filter(Boolean).join('  ·  ');
+      return el('div', { style: 'display:flex;flex-direction:column;gap:4px;padding:9px 0;border-top:1px solid var(--border)' }, [
+        el('div', { style: 'display:flex;align-items:center;gap:12px' }, [
+          el('div', { style: 'flex:1;min-width:0' }, [
+            el('div', { style: 'font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: ch.name || '' }),
+            sub ? el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,SFMono-Regular,Menlo,monospace', text: sub }) : null
+          ]),
+          ch.bytes != null ? el('div', { style: 'width:90px;flex:none;height:5px;border-radius:99px;background:var(--track);overflow:hidden' }, [el('span', { style: 'display:block;height:100%;background:' + color + ';width:' + pct.toFixed(1) + '%' })]) : null,
+          ch.bytes != null ? el('div', { style: 'font-weight:700;font-size:13px;font-variant-numeric:tabular-nums;min-width:62px;text-align:right', text: fmt(ch.bytes) }) : null,
+          revealBtn(ch.path)
+        ]),
+        ch.command ? el('code', { style: 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis', title: ch.command, text: ch.command }) : null
+      ]);
+    }
+
+    function sysRow(it, max, home) {
+      const open = !!S.storageOpen[it.key];
+      const measured = it.bytes != null;
+      const pct = measured && max ? Math.max(2, (it.bytes / max) * 100) : 0;
+      const kids = Array.isArray(it.children) ? it.children : [];
+      const notes = [];
+      if (it.duBytes && it.duBytes > (it.bytes || 0) * 1.05) notes.push('du and Finder report ' + fmt(it.duBytes) + ': shared blocks counted once per copy.');
+      if (it.freeableAtLeast != null) notes.push('Deleting it now frees at least ' + fmt(it.freeableAtLeast) + '.');
+      if (it.additive === false) notes.push('Shown for reference: already counted in another total.');
+      const toggle = () => { S.storageOpen[it.key] = !open; if (latestCatRender) latestCatRender(); };
+      const detail = open ? el('div', { style: 'padding:4px 17px 14px 74px' }, [
+        it.hint ? el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: it.hint }) : null,
+        notes.length ? el('div', { style: 'color:var(--text-3);font-size:12px;line-height:1.5;margin-top:6px', text: notes.join(' ') }) : null,
+        it.settings ? el('button', {
+          style: 'margin-top:12px;height:36px;padding:0 15px;border-radius:10px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:13px;display:inline-flex;align-items:center;gap:8px;cursor:pointer',
+          hov: 'background:var(--accent-hover)',
+          onclick: (e) => { e.stopPropagation(); try { api.storageOpenFda && api.storageOpenFda(); } catch (_) {} }
+        }, [ic('shield', 15), 'Open Full Disk Access settings']) : null,
+        kids.length ? el('div', { style: 'margin-top:10px' }, kids.map((ch) => childRow(ch, Math.max(...kids.map((k) => Number(k.bytes) || 0)), home))) : null,
+        commandBox(it.command, it.commandNote)
+      ]) : null;
+      return el('div', { style: 'border-radius:14px;background:var(--panel);border:1px solid ' + (open ? 'var(--border-2)' : 'var(--border)') }, [
+        el('div', {
+          class: 'sp-hov',
+          role: 'button',
+          tabindex: '0',
+          'aria-expanded': open ? 'true' : 'false',
+          style: 'display:flex;align-items:center;gap:15px;padding:13px 17px;cursor:pointer',
+          onclick: toggle,
+          onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }
+        }, [
+          el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:' + (it.group === 'remainder' ? 'var(--text-3)' : color) }, [ic(it.icon || 'folder', 21)]),
+          el('div', { style: 'flex:1;min-width:0' }, [
+            el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' }, [
+              el('span', { style: 'font-weight:600;font-size:14px', text: it.label }),
+              tierChip(it.tier),
+              confNote(it.confidence)
+            ]),
+            it.hint && !open ? el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: it.hint }) : null
+          ]),
+          measured ? el('div', { style: 'width:110px;flex:none;height:6px;border-radius:99px;background:var(--track);overflow:hidden' }, [el('span', { style: 'display:block;height:100%;border-radius:99px;background:' + color + ';width:' + pct.toFixed(1) + '%' })]) : null,
+          el('div', { style: 'font-weight:700;font-size:14.5px;font-variant-numeric:tabular-nums;min-width:70px;text-align:right;color:' + (measured ? 'var(--text)' : 'var(--text-3)'), text: measured ? fmt(it.bytes) : (it.count != null ? it.count + (it.count === 1 ? ' item' : ' items') : 'not measurable') }),
+          ic(open ? 'chevron-up' : 'chevron-down', 17, { color: 'var(--text-4)' })
+        ]),
+        detail
+      ]);
+    }
+
+    function section(title, sub, nodes) {
+      if (!nodes.length) return;
+      host.appendChild(el('div', { style: 'display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin:26px 0 12px' }, [
+        el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600', text: title }),
+        sub ? el('div', { style: 'font-size:12.5px;color:var(--text-3);font-variant-numeric:tabular-nums', text: sub }) : null
+      ]));
+      host.appendChild(el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, nodes));
+    }
+
+    function renderSystem() {
+      const home = S._homeDir || '';
+      const osItems = c.os || [];
+      const areas = c.areas || [];
+      const unc = c.unclassified || [];
+      const rem = c.remainder || { bytes: 0, parts: [] };
+      const info = c.info || [];
+      const parts = [
+        { key: 'os', label: 'Managed by ' + OS_NAME(), bytes: sumOf(osItems) },
+        { key: 'areas', label: 'System folders', bytes: sumOf(areas) },
+        { key: 'home', label: 'Unclaimed home folders', bytes: c.unclassifiedBytes != null ? c.unclassifiedBytes : sumOf(unc) },
+        { key: 'hidden', label: 'Not visible to Spaci', bytes: rem.bytes || 0 },
+      ];
+      const measuring = S.storageMeasuring || (S.breakdown && S.breakdown.meta && S.breakdown.meta.partial);
+      if (measuring) parts[3].label = 'Not measured yet';
+      const whole = parts.reduce((a, p) => a + p.bytes, 0) || 1;
+      host.appendChild(el('div', { style: 'padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid var(--border)' }, [
+        el('div', { style: 'font-size:13.5px;color:var(--text-2);line-height:1.55', text: 'System is everything outside the other categories. Spaci splits it into what ' + OS_NAME() + ' manages, the system folders it measured, home folders no category claims, and what it cannot see, named part by part.' }),
+        el('div', { style: 'display:flex;height:12px;border-radius:99px;overflow:hidden;background:var(--track);margin:14px 0 12px' }, parts.filter((p) => p.bytes > 0).map((p) => el('div', { title: p.label + ': ' + fmt(p.bytes), style: 'height:100%;flex:none;border-right:2px solid var(--panel);background:' + SYS_COLORS[p.key] + ';width:' + (p.bytes / whole * 100) + '%' }))),
+        el('div', { style: 'display:flex;flex-wrap:wrap;gap:10px 22px' }, parts.map((p) => el('div', { style: 'display:flex;align-items:center;gap:8px;font-size:12.5px' }, [
+          el('span', { style: 'width:10px;height:10px;border-radius:3px;flex:none;background:' + SYS_COLORS[p.key] }),
+          el('span', { style: 'font-weight:600', text: p.label }),
+          el('span', { style: 'color:var(--text-3);font-variant-numeric:tabular-nums', text: fmt(p.bytes) })
+        ])))
+      ]));
+
+      const maxOf = (list) => Math.max(1, ...list.map((x) => Number(x.bytes) || 0));
+      section(parts[0].label, fmt(parts[0].bytes), osItems.map((it) => sysRow(it, maxOf(osItems), home)));
+      section('System folders', fmt(parts[1].bytes), areas.map((it) => sysRow(it, maxOf(areas), home)));
+      if (unc.length) {
+        const max = maxOf(unc);
+        const more = (c.unclassifiedCount || unc.length) - unc.length;
+        section('Home folders no category claims', fmt(parts[2].bytes) + (more > 0 ? ' in ' + c.unclassifiedCount + ' items' : ''), unc.map((u) => el('div', { style: 'display:flex;align-items:center;gap:15px;padding:12px 17px;border-radius:14px;background:var(--panel);border:1px solid var(--border)' }, [
+          el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:' + color }, [pathMark(u.path, u.isDir === false ? 'file' : 'folder', 21)]),
+          el('div', { style: 'flex:1;min-width:0' }, [
+            el('div', { style: 'display:flex;align-items:center;gap:8px' }, [el('span', { style: 'font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: u.name }), tierChip('C'), confNote(u.confidence)]),
+            el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,SFMono-Regular,Menlo,monospace', text: shortPath(u.path, home) })
+          ]),
+          el('div', { style: 'width:110px;flex:none;height:6px;border-radius:99px;background:var(--track);overflow:hidden' }, [el('span', { style: 'display:block;height:100%;border-radius:99px;background:' + color + ';width:' + Math.max(2, u.bytes / max * 100).toFixed(1) + '%' })]),
+          el('div', { style: 'font-weight:700;font-size:14.5px;font-variant-numeric:tabular-nums;min-width:70px;text-align:right', text: fmt(u.bytes) }),
+          revealBtn(u.path)
+        ])));
+      } else if (c.unclassified === null) {
+        section('Home folders no category claims', '', [infoCard('Measured after the categories finish.')]);
+      }
+      const hiddenParts = (rem.parts || []);
+      section(measuring ? 'Not measured yet' : 'Not visible to Spaci', fmt(rem.bytes || 0), [
+        infoCard(measuring ? 'Spaci is still measuring. What is left here shrinks as folders finish; the parts below are what stays out of reach at the end.' : rem.bytes > 0
+          ? fmt(rem.bytes) + ' of used space is in places an app without administrator rights cannot measure. These are the parts it is made of.'
+          : 'Everything in System was measured. These places could not be read, so anything in them is counted in the parts above.'),
+        ...hiddenParts.map((it) => sysRow(it, 0, home))
+      ]);
+      section('For reference', '', info.map((it) => sysRow(it, maxOf(info), home)));
+      if (c.unmeasured && c.unmeasured.length) {
+        host.appendChild(el('div', { style: 'height:14px' }));
+        host.appendChild(infoCard('Spaci ran out of time measuring ' + c.unmeasured.map((d) => shortPath(d, home)).join(', ') + '; their categories show the size reached so far. Measure again to finish them.'));
+      }
+    }
+
     function render() {
       host.innerHTML = '';
       host.appendChild(header());
 
+      if (isSystem && Array.isArray(c.areas)) { renderSystem(); return; }
       if (!dirs.length) {
         host.appendChild(infoCard('Spaci measures this category as a whole, so there are no individual folders to drill into here. The reclaimable parts of other categories are surfaced in Recommendations.'));
         return;

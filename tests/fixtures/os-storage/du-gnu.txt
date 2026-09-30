@@ -1,0 +1,7 @@
+4	/var/lib/misc
+1236	/var/lib/apt
+52	/var/lib/dpkg
+8	/var/lib/polkit-1
+512000	/var/lib/flatpak
+1048576	/var/lib/snapd
+1563124	/var/lib

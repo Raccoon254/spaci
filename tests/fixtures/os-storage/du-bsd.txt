@@ -1,0 +1,40 @@
+2052	/Users/user/Library/com.apple.AppleMediaServices
+1574760	/Users/user/Library/Logs
+0	/Users/user/Library/Internet Plug-Ins
+472	/Users/user/Library/FrontBoard
+40	/Users/user/Library/News
+0	/Users/user/Library/Colors
+0	/Users/user/Library/PreferencePanes
+3180360	/Users/user/Library/Android
+772	/Users/user/Library/Gas Mask
+0	/Users/user/Library/Scripts
+772	/Users/user/Library/UnifiedAssetFramework
+0	/Users/user/Library/com.apple.siri-replay
+128	/Users/user/Library/Mobile Documents
+10920	/Users/user/Library/Finance
+68	/Users/user/Library/LaunchAgents
+36	/Users/user/Library/com.apple.bluetoothuser
+343396	/Users/user/Library/Group Containers
+36597744	/Users/user/Library/Containers
+0	/Users/user/Library/Application
+6256	/Users/user/Library/Intents
+55304	/Users/user/Library/Photos
+30620	/Users/user/Library/Fonts
+16424	/Users/user/Library/Accessibility
+280	/Users/user/Library/KeyboardServices
+28	/Users/user/Library/Metadata
+0	/Users/user/Library/Screen Savers
+96	/Users/user/Library/Jupyter
+8	/Users/user/Library/CallServices
+4	/Users/user/Library/Spelling
+4	/Users/user/Library/SafariSafeBrowsing
+4	/Users/user/Library/Reminders
+4	/Users/user/Library/FinanceBackup
+8592	/Users/user/Library/com.apple.familycircled
+0	/Users/user/Library/Input Methods
+44	/Users/user/Library/Services
+92	/Users/user/Library/com.apple.bluetooth.services.cloud
+1848	/Users/user/Library/com.apple.iTunesCloud
+0	/Users/user/Library/LockdownMode
+2495408	/Users/user/Library/Caches
+65853580	/Users/user/Library

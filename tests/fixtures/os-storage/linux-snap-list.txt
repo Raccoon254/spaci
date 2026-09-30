@@ -1,0 +1,6 @@
+Name               Version          Rev    Tracking         Publisher      Notes
+core22             20240111         1122   latest/stable    canonical**    base,disabled
+core22             20240408         1380   latest/stable    canonical**    base
+firefox            125.0.3-1        4173   latest/stable/…  mozilla**      disabled
+firefox            126.0-2          4259   latest/stable/…  mozilla**      -
+snapd              2.62             21465  latest/stable    canonical**    snapd

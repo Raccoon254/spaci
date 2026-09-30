@@ -1,0 +1,3 @@
+sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+/dev/nvme0n1p2 / ext4 rw,relatime,errors=remount-ro 0 0
+/dev/loop3 /snap/core22/1380 squashfs ro,nodev,relatime,errors=continue 0 0

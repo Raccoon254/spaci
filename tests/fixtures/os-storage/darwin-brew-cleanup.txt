@@ -1,0 +1,7 @@
+Warning: Skipping ansible: most recent version 14.4.0_1 not installed
+Warning: Skipping aom: most recent version 3.15.1 not installed
+Warning: Skipping at-spi2-core: most recent version 2.62.0.1 not installed
+Would remove: /opt/homebrew/Cellar/xz/5.8.3 (96 files, 2.7MB)
+Would remove: /opt/homebrew/var/homebrew/tmp/.cellar/readline (55 files, 2.6MB)
+Would remove: /opt/homebrew/var/homebrew/tmp/.cellar/ca-certificates (4 files, 202.3KB)
+==> This operation would free approximately 5.5MB of disk space.
