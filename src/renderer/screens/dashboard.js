@@ -26,13 +26,78 @@
   function recSize(r) {
     return Number(r.bytes != null ? r.bytes : r.savings != null ? r.savings : r.size || 0) || 0;
   }
+  // One shared category colour map when the shell provides it (SP.catColor),
+  // else the local palette by position.
+  function catColor(c, i) {
+    const f = SP.catColor;
+    let v = null;
+    try { v = typeof f === 'function' ? f(c && c.key, i) : (f && c ? f[c.key] : null); } catch (_) { v = null; }
+    return typeof v === 'string' && v ? v : COLORS[i % COLORS.length];
+  }
+
+  // Honest reclaim figures, shared by Dashboard, Recommendations and Storage.
+  //   top         what the top recommendations reclaim (the one headline label)
+  //   grand       every cleanable byte found: verified project artifacts, all
+  //               System Cleaner targets, Docker images and build cache (never
+  //               volumes or containers)
+  //   unverified  project folders Spaci could not verify as build output; it
+  //               never cleans them, so they are reported apart and not summed
+  function itemsSplit(p) {
+    const items = Array.isArray(p && p.items) ? p.items : null;
+    if (!items) return { ok: Number(p && p.cleanableSize) || 0, unverified: Number(p && p.unverifiedSize) || 0 };
+    let ok = 0; let unverified = 0;
+    items.forEach((i) => { const b = Number(i && i.size) || 0; if (i && i.safe === true) ok += b; else unverified += b; });
+    if (p && typeof p.unverifiedSize === 'number') unverified = p.unverifiedSize;
+    return { ok, unverified };
+  }
+  function reclaimTotals() {
+    const recs = (S.recs || []).filter((r) => !(r.action && r.action.type === 'none'));
+    const top = recs.reduce((a, r) => a + recSize(r), 0);
+    let projects = 0; let unverified = 0;
+    (S.projects || []).forEach((p) => { const x = itemsSplit(p); projects += x.ok; unverified += x.unverified; });
+    const system = (S.sysTargets || []).reduce((a, t) => a + (Number(t && t.size) || 0), 0);
+    const d = S.docker;
+    const dc = d && d.ok && d.categories ? d.categories : null;
+    const docker = dc ? ['images', 'buildCache'].reduce((a, k) => a + (Number(dc[k] && dc[k].reclaimable) || 0), 0) : 0;
+    // The grand total can never read lower than the headline it contains.
+    const grand = Math.max(top, projects + system + docker);
+    return { top, grand, unverified, count: recs.length, parts: { projects, system, docker } };
+  }
+  SP.reclaimTotals = reclaimTotals;
+
+  // "Sep 30, 2026, 14:05": the date and minutes, no seconds.
+  function scannedAt(ms) {
+    try { return new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); }
+    catch (_) { return new Date(ms).toLocaleString(); }
+  }
+
+  // Brand logo for Docker, AI tools and browsers; tech mark for developer
+  // caches and projects; the card's own glyph otherwise.
+  function recMark(r, size) {
+    const B = window.SpaciBrandIcon;
+    const T = window.SpaciTechIcon;
+    const targets = S.sysTargets || [];
+    const brand = B && B.forRec ? B.forRec(r, targets) : null;
+    if (brand && SP.bic) return SP.bic(brand, size, { label: brand, fallback: r.icon || 'broom-2' });
+    const act = r.action || {};
+    const t = act.type === 'select-system' ? targets.find((x) => x.id === act.id) : null;
+    const tech = t && T && T.forTarget ? T.forTarget(t) : null;
+    if (tech && SP.tic) return SP.tic(tech, size, { label: t.name || tech });
+    const p = act.type === 'open-project' ? (S.projects || []).find((x) => x.path === act.path) : null;
+    const en = p && S.enrich ? S.enrich[p.path] : null;
+    const pr = (en && en.primary) || (p && p.primary) || null;
+    const pid = pr && T ? T.cleanId(pr.id) : '';
+    if (pid && SP.tic) return SP.tic(pid, size, { label: pr.name || pid });
+    return ic(r.icon || 'broom-2', size);
+  }
 
   SP.screens.dashboard = function (host) {
     const d = S.disk || { total: 0, used: 0, free: 0 };
     const cats = (S.breakdown && S.breakdown.categories) || [];
     // Informational recommendations (action 'none') are not something to clean.
     const recs = (S.recs || []).filter((r) => !(r.action && r.action.type === 'none'));
-    const totalReclaim = recs.reduce((a, r) => a + recSize(r), 0);
+    const tot = reclaimTotals();
+    const totalReclaim = tot.top;
 
     // header
     host.appendChild(
@@ -43,7 +108,7 @@
         ]),
         el('div', { style: 'text-align:right;flex:none' }, [
           el('div', { style: 'color:var(--text-3);font-size:12px;display:flex;align-items:center;gap:6px;justify-content:flex-end' }, [ic('clock', 14), 'Last scanned']),
-          el('div', { style: 'font-weight:600;font-size:13px;margin-top:3px', text: S.lastScan ? new Date(S.lastScan).toLocaleString() : 'Never' })
+          el('div', { style: 'font-weight:600;font-size:13px;margin-top:3px', text: S.lastScan ? scannedAt(S.lastScan) : 'Never' })
         ])
       ])
     );
@@ -61,9 +126,7 @@
     const reclaimSpace = reclaimStr.lastIndexOf(' ');
     const defaultNum = totalReclaim ? reclaimStr.slice(0, reclaimSpace) : '0';
     const defaultUnit = totalReclaim ? reclaimStr.slice(reclaimSpace + 1) : 'B';
-    const defaultSub = totalReclaim
-      ? (recs.length ? 'across ' + recs.length + ' rec' + (recs.length === 1 ? '' : 's') : 'reclaimable')
-      : "you're all clear";
+    const defaultSub = totalReclaim ? 'top recommendations' : "you're all clear";
 
     const centerNum = el('span', { text: defaultNum });
     const centerUnit = el('span', { style: 'font-size:17px;font-weight:600;letter-spacing:-.3px;color:var(--accent-fg);margin-left:3px', text: defaultUnit });
@@ -87,7 +150,7 @@
       const span = ((Number(c.bytes) || 0) / sumCats) * usedAngle;
       if (span < 0.6) { angle += span; return; }
       const gap = Math.min(2, span / 3);
-      const path = svgEl('path', { d: arc(114, 114, 103, angle + gap / 2, angle + span - gap / 2), stroke: COLORS[i % COLORS.length], 'stroke-width': 16, 'stroke-linecap': 'round', fill: 'none', style: 'cursor:pointer;transition:stroke-width .15s' });
+      const path = svgEl('path', { d: arc(114, 114, 103, angle + gap / 2, angle + span - gap / 2), stroke: catColor(c, i), 'stroke-width': 16, 'stroke-linecap': 'round', fill: 'none', style: 'cursor:pointer;transition:stroke-width .15s' });
       const catStr = fmt(c.bytes);
       const sp = catStr.lastIndexOf(' ');
       path.addEventListener('mouseenter', () => {
@@ -117,7 +180,7 @@
       style: 'height:54px;padding:0 30px;border-radius:14px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:16px;display:flex;align-items:center;gap:11px;cursor:pointer;box-shadow:var(--shadow-md);transition:transform .12s',
       hov: 'background:var(--accent-hover)',
       onclick: () => window.SP_doScan && window.SP_doScan()
-    }, [S.scanning ? ic('spaci-ring', 19, { anim: 'elastic' }) : ic('scanner', 19), S.scanning ? 'Scanning…' : 'Smart Scan']);
+    }, [S.scanning ? ic('spaci-ring', 19, { anim: 'elastic' }) : ic('scanner', 19), S.scanning ? 'Scanning…' : 'Scan']);
     scanBtn.addEventListener('mousedown', () => { scanBtn.style.transform = 'scale(.97)'; });
     scanBtn.addEventListener('mouseup', () => { scanBtn.style.transform = ''; });
     scanBtn.addEventListener('mouseleave', () => { scanBtn.style.transform = ''; });
@@ -133,37 +196,25 @@
         glowBig,
         donutWrap,
         el('div', { style: 'flex:1;position:relative;z-index:1' }, [
-          el('div', { style: 'font-size:27px;font-weight:700;letter-spacing:-.9px;margin-bottom:9px', text: totalReclaim ? 'Reclaim ' + fmt(totalReclaim) + ' of space' : 'Run a scan to find space' }),
-          el('div', { style: 'color:var(--text-2);font-size:15px;line-height:1.6;margin-bottom:24px;max-width:460px', text: 'Spaci looks across your projects and system caches for regenerable files you can safely clear.' }),
+          el('div', { style: 'font-size:27px;font-weight:700;letter-spacing:-.9px;margin-bottom:9px' }, totalReclaim
+            ? [el('span', { text: 'Top recommendations: ' }), el('span', { style: 'color:var(--accent-fg)', text: fmt(totalReclaim) })]
+            : [el('span', { text: 'Scan to find space' })]),
+          totalReclaim ? el('div', { style: 'display:flex;flex-wrap:wrap;gap:4px 18px;color:var(--text-2);font-size:14px;line-height:1.6;margin-bottom:6px' }, [
+            el('span', {}, [el('span', { text: 'All cleanable found: ' }), el('b', { style: 'color:var(--text);font-weight:700', text: fmt(tot.grand) })]),
+            tot.unverified > 0 ? el('span', { style: 'color:var(--text-3)', text: fmt(tot.unverified) + ' unverified, not counted' }) : null,
+          ]) : null,
+          el('div', { style: 'color:var(--text-3);font-size:13.5px;line-height:1.6;margin-bottom:22px;max-width:460px', text: 'Across your projects, system caches and Docker. Nothing is removed until you review it.' }),
           el('div', { style: 'display:flex;gap:13px' }, [scanBtn, reviewBtn])
         ])
       ])
     );
 
-    // reclaim banner, always shown (at-rest variant when nothing reclaimable yet)
-    const bannerHead = totalReclaim
-      ? el('div', { style: 'font-size:22px;font-weight:700;letter-spacing:-.5px' }, [el('span', { text: 'Up to ' }), el('span', { style: 'color:var(--accent-fg)', text: fmt(totalReclaim) }), el('span', { text: ' can be reclaimed' })])
-      : el('div', { style: 'font-size:22px;font-weight:700;letter-spacing:-.5px', text: 'No reclaimable space found yet' });
-    const bannerSub = totalReclaim
-      ? 'Across ' + recs.length + ' recommendation' + (recs.length === 1 ? '' : 's') + ' from your projects and system.'
-      : 'Run a scan to find regenerable files you can safely clear.';
-    host.appendChild(
-      el('div', { style: 'display:flex;align-items:center;gap:18px;padding:20px 24px;border-radius:18px;background:var(--accent-soft);border:1px solid var(--border);margin-top:16px' }, [
-        el('div', { style: 'width:50px;height:50px;border-radius:14px;background:var(--accent);color:var(--on-accent);display:grid;place-items:center;flex:none;box-shadow:var(--shadow-sm)' }, [ic('sparkles', 25)]),
-        el('div', { style: 'flex:1' }, [
-          bannerHead,
-          el('div', { style: 'color:var(--text-2);font-size:13.5px;margin-top:2px', text: bannerSub })
-        ]),
-        el('button', { style: 'height:46px;padding:0 22px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer', hov: 'background:var(--accent-hover)', onclick: () => (totalReclaim ? SP.go('recommendations') : window.SP_doScan && window.SP_doScan()) }, [totalReclaim ? 'See how' : 'Scan now', ic('chevron-right', 15)])
-      ])
-    );
-
     // storage breakdown card
     const bar = el('div', { style: 'height:16px;border-radius:6px;overflow:hidden;display:flex;gap:3px;background:var(--track)' },
-      cats.map((c, i) => el('span', { style: `height:100%;border-radius:3px;background:${COLORS[i % COLORS.length]};flex-basis:${(Number(c.bytes) || 0) / sumCats * (usedAngle / 3.6)}%;flex-grow:0;flex-shrink:0;transform-origin:left;animation:sp-segment .6s cubic-bezier(.22,.61,.36,1) backwards`, title: c.label })));
+      cats.map((c, i) => el('span', { style: `height:100%;border-radius:3px;background:${catColor(c, i)};flex-basis:${(Number(c.bytes) || 0) / sumCats * (usedAngle / 3.6)}%;flex-grow:0;flex-shrink:0;transform-origin:left;animation:sp-segment .6s cubic-bezier(.22,.61,.36,1) backwards`, title: c.label })));
     const legend = el('div', { style: 'display:flex;flex-wrap:wrap;gap:14px 22px;margin-top:18px' },
       cats.map((c, i) => el('div', { style: 'display:flex;align-items:center;gap:8px' }, [
-        el('span', { style: `width:9px;height:9px;border-radius:3px;background:${COLORS[i % COLORS.length]};flex:none` }),
+        el('span', { style: `width:9px;height:9px;border-radius:3px;background:${catColor(c, i)};flex:none` }),
         el('span', { style: 'font-size:12.5px;color:var(--text-2);font-weight:600', text: c.label }),
         el('span', { style: 'font-size:12.5px;color:var(--text-3)', text: fmt(c.bytes) })
       ])));
@@ -182,7 +233,10 @@
 
     // top recommendations
     if (recs.length) {
-      host.appendChild(el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin:30px 0 14px', text: 'Top recommendations' }));
+      host.appendChild(el('div', { style: 'display:flex;align-items:baseline;justify-content:space-between;margin:30px 0 14px' }, [
+        el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600', text: 'Top recommendations' }),
+        recs.length > 3 ? el('button', { style: 'border:none;background:transparent;color:var(--accent-fg);font-weight:600;font-size:12.5px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:4px', onclick: () => SP.go('recommendations') }, ['See all ' + recs.length, ic('chevron-right', 13)]) : null,
+      ]));
       host.appendChild(
         el('div', { style: 'display:flex;flex-direction:column;gap:9px' },
           recs.slice(0, 3).map((r) => el('div', {
@@ -191,7 +245,7 @@
             hov: 'border-color:var(--border-2);transform:translateX(2px)',
             onclick: () => SP.go('recommendations')
           }, [
-            el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--accent-soft);display:grid;place-items:center;flex:none;color:var(--accent-fg)' }, [ic(r.icon || 'broom-2', 23)]),
+            el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [recMark(r, 23)]),
             el('div', { style: 'flex:1;min-width:0' }, [
               el('div', { style: 'font-weight:600;font-size:14.5px', text: r.title || r.label || 'Cleanable' }),
               el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:2px', text: r.body || r.note || r.path || '' })
