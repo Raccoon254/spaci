@@ -37,7 +37,43 @@ function normDisk(d) { if (!d) return null; const total = Number(d.total) || 0; 
 function isInfoRec(r) { return !!(r && r.action && r.action.type === 'none'); }
 function recBytes(r) { return Number(r.bytes != null ? r.bytes : r.savings != null ? r.savings : r.size || 0) || 0; }
 
-const state = { disk: null, breakdown: null, recs: [], history: [], scanning: false, mode: '' };
+const state = { disk: null, breakdown: null, recs: [], history: [], projects: [], system: [], scanning: false, mode: '' };
+
+// Brand logos and tech marks. tray.html only loads the icon component, so the
+// two logo elements are pulled in here from the same origin (CSP 'self').
+function ensureScript(src, ready) {
+  return new Promise((resolve) => {
+    if (ready()) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => resolve();
+    document.head.appendChild(s);
+  });
+}
+const logosReady = Promise.all([
+  ensureScript('tech-icon.js', () => !!customElements.get('spaci-tech-icon')),
+  ensureScript('brand-icon.js', () => !!customElements.get('spaci-brand-icon')),
+]);
+function recMark(r, size) {
+  const B = window.SpaciBrandIcon;
+  const T = window.SpaciTechIcon;
+  const brand = B && B.forRec ? B.forRec(r, state.system) : null;
+  if (brand) return B.bic(brand, size, { label: brand, fallback: r.icon || 'broom' });
+  const act = r.action || {};
+  const t = act.type === 'select-system' ? state.system.find((x) => x.id === act.id) : null;
+  const tech = t && T && T.forTarget ? T.forTarget(t) : null;
+  if (tech) return el('spaci-tech-icon', { tech, label: t.name || tech, style: `width:${size}px;height:${size}px` });
+  const p = act.type === 'open-project' ? state.projects.find((x) => x.path === act.path) : null;
+  const pid = p && p.primary && T ? T.cleanId(p.primary.id) : '';
+  if (pid) return el('spaci-tech-icon', { tech: pid, label: p.primary.name || pid, style: `width:${size}px;height:${size}px` });
+  return ic(r.icon || 'broom', size, { color: 'var(--text-2)' });
+}
+// A project earns a count when it has artifacts on disk or Docker storage,
+// the same rule the Projects screen uses. Never capped.
+function projectCount() {
+  return (state.projects || []).filter((p) => p && ((Array.isArray(p.items) && p.items.length) || (p.docker && p.docker.usage))).length;
+}
 
 function statTile(icon, label, value, accent) {
   return el('div', { style: 'flex:1;display:flex;flex-direction:column;gap:5px' }, [
@@ -45,9 +81,16 @@ function statTile(icon, label, value, accent) {
     el('div', { style: 'font-size:15px;font-weight:700;letter-spacing:-.4px;color:' + (accent || 'var(--text-2)'), text: value })
   ]);
 }
-function actionRow(icon, label, hint, onclick) {
-  return el('div', { style: 'display:flex;align-items:center;gap:12px;padding:9px 11px;border-radius:10px;cursor:pointer', hov: 'background:var(--panel)', onclick }, [
-    ic(icon, 17, { color: 'var(--text-2)' }), el('span', { style: 'flex:1;font-size:13.5px;font-weight:500', text: label }), el('span', { style: 'color:var(--text-4);font-size:11.5px', text: hint || '' })
+function actionRow(icon, label, onclick) {
+  return el('button', { style: 'display:flex;align-items:center;gap:12px;width:100%;padding:9px 11px;border:none;border-radius:10px;background:transparent;color:var(--text);font-family:inherit;text-align:left;cursor:pointer', hov: 'background:var(--panel)', onclick }, [
+    ic(icon, 17, { color: 'var(--text-2)' }), el('span', { style: 'flex:1;font-size:13.5px;font-weight:500', text: label })
+  ]);
+}
+function winRow(r) {
+  return el('button', { style: 'display:flex;align-items:center;gap:10px;width:100%;padding:7px 10px;border:none;border-radius:10px;background:transparent;color:var(--text);font-family:inherit;text-align:left;cursor:pointer', hov: 'background:var(--panel)', onclick: () => openMain('recommendations') }, [
+    el('span', { style: 'width:26px;height:26px;border-radius:8px;background:var(--panel);display:grid;place-items:center;flex:none' }, [recMark(r, 16)]),
+    el('span', { style: 'flex:1;min-width:0;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: String(r.title || '').replace(/\s+·\s+.*$/, '') || 'Cleanable' }),
+    el('span', { style: 'font-size:12.5px;font-weight:700;color:var(--accent-fg);flex:none;font-variant-numeric:tabular-nums', text: fmt(recBytes(r)) })
   ]);
 }
 
@@ -60,7 +103,8 @@ function render() {
   const reclaim = (state.recs || []).filter((r) => !isInfoRec(r)).reduce((a, r) => a + recBytes(r), 0);
   const lifetime = (state.history || []).reduce((a, h) => a + (Number(h.freed) || 0), 0);
   const cacheCat = cats.find((c) => c.key === 'caches');
-  const projRecs = (state.recs || []).filter((r) => (r.kind || '') === 'project').length;
+  const projects = projectCount();
+  const wins = (state.recs || []).filter((r) => !isInfoRec(r) && recBytes(r) > 0).slice(0, 3);
   const sc = state.scanning;
 
   const segs = cats.slice(0, 6).map((c, i) => el('span', { title: c.label, style: `height:100%;border-radius:2px;background:${colorFor(c, i)};flex-basis:${((Number(c.bytes) || 0) / sumCats) * 100}%;flex-grow:0;flex-shrink:0;transform-origin:left;animation:sp-segment .5s cubic-bezier(.22,.61,.36,1) backwards` }));
@@ -71,16 +115,16 @@ function render() {
       el('div', { style: 'color:var(--accent-fg)' }, [ringEl(sc ? 'spin' : 'shimmer', 34)]),
       el('div', { style: 'flex:1;min-width:0' }, [
         el('div', { style: 'font-size:15px;font-weight:700;letter-spacing:-.3px' }, [el('span', { text: 'Spaci' }), el('span', { style: 'color:var(--accent-fg)', text: '.' })]),
-        el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:1px', text: 'Macintosh HD · ' + fmt(d.free) + ' free' })
+        el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:1px', text: d.total ? fmt(d.free) + ' free of ' + fmt(d.total) : 'Measuring disk…' })
       ])
     ]),
 
     // reclaimable hero
     el('div', { style: 'padding:7px 18px 16px' }, [
-      el('div', { style: 'font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-3);font-weight:700', text: sc ? (state.mode === 'deep' ? 'Deep scan running' : 'Fast scan running') : 'Reclaimable now' }),
+      el('div', { style: 'font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-3);font-weight:700', text: sc ? (state.mode === 'deep' ? 'Deep scan running' : 'Fast scan running') : 'Top recommendations' }),
       el('div', { style: 'display:flex;align-items:flex-end;gap:10px;margin-top:6px' }, [
         el('div', { style: 'font-size:30px;font-weight:700;letter-spacing:-1.4px;line-height:1;color:' + (reclaim ? 'var(--text)' : 'var(--text-3)'), text: sc ? '…' : (reclaim ? fmt(reclaim) : '0 B') }),
-        el('div', { style: 'color:var(--text-3);font-size:11.5px;padding-bottom:3px', text: reclaim ? 'across caches and build artifacts' : 'run a scan to find space' })
+        el('div', { style: 'color:var(--text-3);font-size:11.5px;padding-bottom:3px', text: reclaim ? 'across caches, build artifacts and Docker' : 'scan to find space' })
       ]),
       el('div', { style: 'height:8px;border-radius:99px;background:var(--track);margin-top:13px;overflow:hidden;display:flex;gap:2px' }, sc ? [el('div', { style: 'height:100%;width:36%;border-radius:99px;background:var(--accent);animation:sp-indet 1.2s ease-in-out infinite' })] : segs),
       // scan buttons: Fast + Deep
@@ -93,18 +137,21 @@ function render() {
     // quick stats + gamified lifetime
     el('div', { style: 'display:flex;padding:13px 18px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);gap:8px' }, [
       statTile('broom', 'Caches', cacheCat ? fmt(cacheCat.bytes) : '0 B'),
-      statTile('folder-2', 'Projects', String(projRecs)),
+      statTile('folder-2', 'Projects', String(projects)),
       statTile('sparkles', 'Reclaimed', lifetime ? fmt(lifetime) : '0 B', 'var(--success-fg)')
     ]),
+
+    // top wins, each with the logo of what it belongs to
+    wins.length && !sc ? el('div', { style: 'padding:8px 8px 4px' }, wins.map(winRow)) : null,
 
     el('div', { style: 'flex:1' }),
 
     // actions
     el('div', { style: 'border-top:1px solid var(--border);padding:7px 8px 9px' }, [
-      actionRow('scanner', 'Open Smart Scan', '⌘S', () => openMain('dashboard')),
-      actionRow('dashboard', 'Open Spaci', '⌘O', () => openMain()),
-      actionRow('settings', 'Settings', '', () => openMain('settings')),
-      actionRow('close', 'Quit Spaci', '⌘Q', quitApp)
+      actionRow('scanner', 'Open Smart Scan', () => openMain('dashboard')),
+      actionRow('dashboard', 'Open Spaci', () => openMain()),
+      actionRow('settings', 'Settings', () => openMain('settings')),
+      actionRow('close', 'Quit Spaci', quitApp)
     ])
   ]);
   root.appendChild(panel);
@@ -125,14 +172,19 @@ async function doScan(mode) {
 async function load() {
   try { state.disk = normDisk(await window.api.diskUsage()); } catch (_) {}
   try { state.breakdown = await window.api.diskBreakdown(); } catch (_) {}
-  try { const c = (await window.api.cacheGet()) || {}; state.recs = (await window.api.recommendations({ projects: c.projects || [], sysTargets: c.system || [] })) || []; } catch (_) {}
+  try {
+    const c = (await window.api.cacheGet()) || {};
+    state.projects = Array.isArray(c.projects) ? c.projects : [];
+    state.system = Array.isArray(c.system) ? c.system : [];
+    state.recs = (await window.api.recommendations({ projects: state.projects, sysTargets: state.system })) || [];
+  } catch (_) {}
   try { state.history = (await window.api.historyGet()) || []; } catch (_) {}
 }
 async function applyTheme() { try { const p = await window.api.getPrefs(); document.getElementById('tray').classList.toggle('light', p && p.theme === 'light'); } catch (_) {} }
 async function boot() {
   await applyTheme();
   render();
-  await load();
+  await Promise.all([load(), logosReady]);
   render();
   if (window.api.onBreakdownUpdated) window.api.onBreakdownUpdated((bd) => { state.breakdown = bd; render(); });
 }
