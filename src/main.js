@@ -39,8 +39,9 @@ app.on('render-process-gone', (_e, wc, details) => {
 });
 app.on('child-process-gone', (_e, details) => {
   const d = details || {};
-  // A worker the client killed on purpose (idle, quit) exits 'clean-exit' or 'killed'.
-  crashLog[d.reason === 'clean-exit' ? 'info' : 'error'](`child-process-gone type=${d.type} name=${d.name || d.serviceName || ''} reason=${d.reason} exitCode=${d.exitCode}`);
+  // The scan worker is killed on purpose when idle and on quit ('killed'), so
+  // only other reasons (crashed, oom, launch-failed...) are errors.
+  crashLog[d.reason === 'clean-exit' || d.reason === 'killed' ? 'info' : 'error'](`child-process-gone type=${d.type} name=${d.name || d.serviceName || ''} reason=${d.reason} exitCode=${d.exitCode}`);
 });
 
 const os = require('os');
