@@ -47,6 +47,8 @@
   function resolveAction(rec) {
     if (!rec) return null;
     const act = rec.action || {};
+    // Informational cards (the Docker disk image explanation) have nothing to run.
+    if (act.type === 'none') return null;
     // Docker is reclaimed by the daemon, not by deleting paths, so it carries a
     // prune kind instead of clean jobs. Everything else on this screen is
     // path-based.

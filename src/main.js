@@ -10,6 +10,8 @@ const scanner = require('./scanner');
 const system = require('./system');
 const docker = require('./docker');
 const cleaner = require('./cleaner');
+const aitools = require('./aitools');
+const cleanGuard = require('./clean-guard');
 const largefiles = require('./largefiles');
 const diskbreakdown = require('./diskbreakdown');
 const { initUpdater } = require('./updater');
@@ -94,7 +96,10 @@ async function refreshDocker(projects, options = {}) {
         projects: (projects || []).filter((p) => p.docker && p.docker.usage).length,
         at: Date.now(),
       }
-      : { ok: false, reason: inventory ? inventory.reason : 'unavailable', status: inventory ? inventory.status : null, at: Date.now() };
+      // Keep the disk image size and engine state on failure too: when Docker
+      // Desktop is up but its engine is down, the disk image is still the
+      // biggest thing Spaci can explain to the user.
+      : { ok: false, reason: inventory ? inventory.reason : 'unavailable', status: inventory ? inventory.status : null, state: inventory ? inventory.state : null, desktopDisk: disk, at: Date.now() };
     return cache.docker;
   } catch (e) {
     cache.docker = { ok: false, reason: 'error', error: e && e.message, at: Date.now() };
@@ -359,21 +364,28 @@ function dockerRecommendations(info) {
   const COPY = {
     'build-cache': (s) => `${s.unused} of ${s.total} cached build layers are not in use. Docker rebuilds them the next time you build.`,
     'dangling-images': (s) => `${s.unused} of ${s.total} images have no container using them. Cleaning removes only the untagged layers left behind by rebuilds.`,
+    'desktop-disk': (s) => [s.message, s.sizeNote, s.guidance].filter(Boolean).join(' '),
   };
   const TITLE = {
     'build-cache': 'Docker build cache',
     'dangling-images': 'Unused Docker images',
+    'desktop-disk': 'Docker disk image',
   };
-  return docker.reclaimSuggestions(info).map((s) => ({
-    id: 'docker:' + s.kind,
-    kind: 'docker',
-    savings: s.savings,
-    severity: s.severity,
-    icon: 'box',
-    title: `${TITLE[s.kind]} · ${fmt(s.savings)}`,
-    body: COPY[s.kind](s),
-    action: { type: 'docker-prune', kind: s.kind },
-  }));
+  // Unknown kinds are dropped rather than crashing the recommendations list.
+  return docker.reclaimSuggestions(info).filter((s) => COPY[s.kind]).map((s) => {
+    const informational = s.kind === 'desktop-disk';
+    return {
+      id: 'docker:' + s.kind,
+      kind: 'docker',
+      savings: s.savings,
+      severity: s.severity,
+      icon: 'box',
+      title: `${TITLE[s.kind]} · ${fmt(informational ? s.bytes : s.savings)}`,
+      body: COPY[s.kind](s),
+      // The disk image is explained, not cleaned: pruning needs a running engine.
+      action: informational ? { type: 'none' } : { type: 'docker-prune', kind: s.kind },
+    };
+  });
 }
 
 function buildRecommendations(projects, sysTargets, prefs, dockerInfo) {
@@ -540,13 +552,26 @@ ipcMain.handle('project:enrich', async (_e, p, force) => {
   return await refreshEnrich(p);
 });
 
+// Every known system target, keyed by each of its paths. The clean handler
+// re-applies the target's own rules (mode, protect, running-tool guard) from
+// here, so safety never depends on the renderer passing the right fields.
+const TARGET_INDEX = cleanGuard.buildTargetIndex(system.TARGETS);
+
 ipcMain.handle('clean', async (e, jobs, meta) => {
   const ac = new AbortController();
   const onProgress = (p) => e.sender.send('clean:progress', p);
   try {
-    const res = await cleaner.clean(jobs, onProgress, ac.signal);
-    appendHistory({ at: Date.now(), scope: (meta && meta.scope) || 'projects', label: (meta && meta.label) || '', count: jobs.length, freed: res.totalFreed, reversible: !(meta && meta.reversible === false), items: jobs.slice(0, 80).map((j) => j.path) });
-    return { ok: true, ...res };
+    const { allowed, refused } = await cleanGuard.enforceTargetRules(jobs, {
+      index: TARGET_INDEX,
+      toolStatus: () => aitools.aiToolStatus(),
+    });
+    const res = allowed.length
+      ? await cleaner.clean(allowed, onProgress, ac.signal)
+      : { totalFreed: 0, errors: [] };
+    if (allowed.length) {
+      appendHistory({ at: Date.now(), scope: (meta && meta.scope) || 'projects', label: (meta && meta.label) || '', count: allowed.length, freed: res.totalFreed, reversible: !(meta && meta.reversible === false), items: allowed.slice(0, 80).map((j) => j.path) });
+    }
+    return { ok: true, ...res, refused };
   } catch (err) { return { ok: false, error: err.message }; }
 });
 
