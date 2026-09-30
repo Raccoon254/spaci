@@ -202,3 +202,42 @@ test('without protect everything goes, and .DS_Store is still left alone', async
     assert.deepEqual(fs.readdirSync(t), ['.DS_Store']);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('hard-linked files are not credited as freed, since unlinking one link frees nothing', async () => {
+  const fsx = require('fs');
+  const osx = require('os');
+  const px = require('path');
+  const { clean } = require('../src/cleaner');
+  const root = fsx.mkdtempSync(px.join(osx.tmpdir(), 'spaci-hl-'));
+  try {
+    const store = px.join(root, 'store'); const target = px.join(root, 'target');
+    fsx.mkdirSync(store); fsx.mkdirSync(target);
+    fsx.writeFileSync(px.join(store, 'pkg.bin'), Buffer.alloc(256 * 1024, 1));
+    fsx.linkSync(px.join(store, 'pkg.bin'), px.join(target, 'pkg.bin'));
+    const res = await clean([{ path: target, mode: 'contents' }], () => {}, new AbortController().signal);
+    assert.equal(res.totalFreed, 0);
+    assert.ok(!fsx.existsSync(px.join(target, 'pkg.bin')));
+    assert.ok(fsx.existsSync(px.join(store, 'pkg.bin')));
+  } finally {
+    fsx.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('excludePaths survive, and are matched case-insensitively on macOS and Windows', async () => {
+  const fsx = require('fs');
+  const osx = require('os');
+  const px = require('path');
+  const { clean } = require('../src/cleaner');
+  const root = fsx.mkdtempSync(px.join(osx.tmpdir(), 'spaci-ex-'));
+  try {
+    fsx.mkdirSync(px.join(root, 'Keep', 'deep'), { recursive: true });
+    fsx.writeFileSync(px.join(root, 'Keep', 'deep', 'a'), 'x');
+    fsx.writeFileSync(px.join(root, 'gone'), 'x');
+    const exclude = process.platform === 'linux' ? px.join(root, 'Keep') : px.join(root, 'keep');
+    await clean([{ path: root, mode: 'contents', excludePaths: [exclude] }], () => {}, new AbortController().signal);
+    assert.ok(fsx.existsSync(px.join(root, 'Keep', 'deep', 'a')));
+    assert.ok(!fsx.existsSync(px.join(root, 'gone')));
+  } finally {
+    fsx.rmSync(root, { recursive: true, force: true });
+  }
+});

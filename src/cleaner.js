@@ -32,8 +32,37 @@ function isProtected(ctx, name) {
   return ctx.protect.size > 0 && ctx.protect.has(name.toLowerCase());
 }
 
-/** Bytes a file occupies on disk (what du reports), falling back to size. */
+/**
+ * `excludePaths` are absolute paths that must survive. The main process passes
+ * every other target nested inside the one being cleaned, so cleaning "Other
+ * app caches" never reaches into a separately listed cache, whatever that
+ * folder is called. Keys are Unicode-normalised, and case-folded on macOS and
+ * Windows where the filesystem ignores case; over-matching is the safe side.
+ */
+function excludeKey(p) {
+  const key = path.resolve(String(p)).normalize('NFC');
+  return process.platform === 'linux' ? key : key.toLowerCase();
+}
+
+function excludeSet(excludePaths) {
+  const set = new Set();
+  for (const p of Array.isArray(excludePaths) ? excludePaths : []) {
+    if (typeof p === 'string' && p) set.add(excludeKey(p));
+  }
+  return set;
+}
+
+function isExcluded(ctx, p) {
+  return ctx.exclude.size > 0 && ctx.exclude.has(excludeKey(p));
+}
+
+/**
+ * Bytes a file occupies on disk (what du reports), falling back to size.
+ * A file with other hard links (pnpm and uv stores use them) frees nothing when
+ * one link goes, so it is not credited: freed bytes may read low, never high.
+ */
 function allocated(stat) {
+  if (typeof stat.nlink === 'number' && stat.nlink > 1) return 0;
   return typeof stat.blocks === 'number' ? stat.blocks * 512 : stat.size;
 }
 
@@ -56,7 +85,7 @@ function fail(ctx, p, err) {
 async function removeEntry(p, ctx, parentStat) {
   if (ctx.signal?.aborted) return 'kept';
   const name = path.basename(p);
-  if (SKIP_DELETE.has(name) || isProtected(ctx, name)) return 'kept';
+  if (SKIP_DELETE.has(name) || isProtected(ctx, name) || isExcluded(ctx, p)) return 'kept';
 
   let stat;
   try { stat = await fsp.lstat(p); }
@@ -113,8 +142,14 @@ async function removeEntry(p, ctx, parentStat) {
   return 'gone';
 }
 
-function newCtx(signal, protect) {
-  return { signal, protect: protectSet(protect), freed: 0, failures: [] };
+function newCtx(signal, options = {}) {
+  return {
+    signal,
+    protect: protectSet(options.protect),
+    exclude: excludeSet(options.excludePaths),
+    freed: 0,
+    failures: [],
+  };
 }
 
 /** Summarise failures as one message that names the first offender. */
@@ -133,7 +168,7 @@ function failureMessage(failures) {
 async function deletePath(target, onProgress, signal, options = {}) {
   try { await fsp.lstat(target); } catch { return 0; }
 
-  const ctx = newCtx(signal, options.protect);
+  const ctx = newCtx(signal, options);
   let parentStat = null;
   try { parentStat = await fsp.lstat(path.dirname(target)); } catch { /* */ }
   const result = await removeEntry(target, ctx, parentStat);
@@ -173,7 +208,7 @@ async function emptyContents(dir, onProgress, signal, options = {}) {
   let freed = 0;
   for (const name of entries) {
     if (signal?.aborted) break;
-    const ctx = newCtx(signal, options.protect);
+    const ctx = newCtx(signal, options);
     const child = path.join(dir, name);
     const result = await removeEntry(child, ctx, parentStat);
     freed += ctx.freed;
@@ -191,8 +226,9 @@ async function emptyContents(dir, onProgress, signal, options = {}) {
 
 /**
  * Clean a list of jobs.
- * job = { path, mode?, protect? }  mode 'contents' empties dir, otherwise removes
- * path. `protect` is an array of basenames that survive at any depth.
+ * job = { path, mode?, protect?, excludePaths? }  mode 'contents' empties dir,
+ * otherwise removes path. `protect` is an array of basenames that survive at any
+ * depth; `excludePaths` is an array of absolute paths that survive.
  */
 async function clean(jobs, onProgress, signal) {
   let totalFreed = 0;
@@ -202,7 +238,7 @@ async function clean(jobs, onProgress, signal) {
     if (signal?.aborted) break;
     const before = totalFreed;
     const report = (p) => { if (p.error) errors.push(p); onProgress?.({ ...p, done, total: jobs.length }); };
-    const options = { protect: job.protect };
+    const options = { protect: job.protect, excludePaths: job.excludePaths };
     if (job.mode === 'contents') {
       totalFreed += await emptyContents(job.path, report, signal, options);
     } else {
