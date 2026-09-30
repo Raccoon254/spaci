@@ -1132,3 +1132,32 @@ test('a packaged build never pings when SPACI_TELEMETRY=0, even with telemetry o
     m.cleanup();
   }
 });
+
+test('notice notifications honour the notify pref; the notice itself still reaches the app', async () => {
+  const shown = [];
+  class FakeNotification extends EventEmitter {
+    constructor(opts) { super(); this.opts = opts; }
+    show() { shown.push(this.opts.title); }
+  }
+  FakeNotification.isSupported = () => true;
+  const userData = seededUserData({ onboarded: true, lastSeenVersion: '2.1.0', notify: false });
+  const realSetTimeout = global.setTimeout;
+  const due = [];
+  global.setTimeout = (fn, ms, ...a) => { if (ms === 30000) { due.push(fn); return { unref() {} }; } return realSetTimeout(fn, ms, ...a); };
+  const m = loadMain(userData, { notification: FakeNotification });
+  try {
+    m.electron.net.fetch = async () => ({ status: 200, text: async () => JSON.stringify({ notices: [aNotice({ id: 'upd', severity: 'important', title: 'Update now' })] }) });
+    m.ready.resolve();
+    await flush();
+    assert.ok(due.length >= 1, 'the first notices fetch was scheduled');
+    for (const fn of due.splice(0)) fn();
+    for (let i = 0; i < 10; i++) await flush();
+    assert.deepEqual((await m.handlers['notices:list']()).map((n) => n.id), ['upd'], 'fetched and listed in the app');
+    assert.deepEqual(shown, [], 'notify off: no system notification');
+    assert.equal((await m.handlers['prefs:set']({}, { notify: 'yes' })).notify, false, 'junk ignored');
+    m.appEvents.emit('before-quit');
+  } finally {
+    global.setTimeout = realSetTimeout;
+    m.cleanup();
+  }
+});

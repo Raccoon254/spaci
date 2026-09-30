@@ -113,6 +113,8 @@ const DEFAULT_PREFS = {
   // In-app notices (src/notices.js). lastSeenVersion has no default on purpose:
   // its absence on an onboarded install means an upgrade from before 2.3.
   notices: true,
+  // Settings > Desktop notifications. Every system notification checks it.
+  notify: true,
   dismissedNotices: [],
   seenNoticeIds: [],
 };
@@ -413,7 +415,8 @@ function openNoticeInWindow(id) {
 }
 
 function notifyNotice(notice) {
-  if (!Notification.isSupported()) return;
+  // Desktop notifications off: the notice still shows in the app.
+  if (!notificationsAllowed()) return;
   const n = new Notification({ title: notice.title, body: notice.summary || '' });
   liveNotifications.add(n);
   const release = () => liveNotifications.delete(n);
@@ -822,6 +825,7 @@ ipcMain.handle('prefs:set', (_e, patch) => {
   const clean = { ...(patch && typeof patch === 'object' ? patch : {}) };
   for (const k of NOTICE_OWNED_PREFS) delete clean[k];
   if ('notices' in clean && typeof clean.notices !== 'boolean') delete clean.notices;
+  if ('notify' in clean && typeof clean.notify !== 'boolean') delete clean.notify;
   const p = { ...current, ...clean };
   if (Object.prototype.hasOwnProperty.call(clean, 'scanRoots')) {
     p.scanRoots = ipcGuards.acceptScanRoots(clean.scanRoots, {
