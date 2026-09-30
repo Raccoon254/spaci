@@ -76,6 +76,7 @@
     "deb": {
       "afterInstall": "build/linux/after-install.sh",
       "afterRemove": "build/linux/after-remove.sh"
-    }
+    },
+    "afterPack": "build/after-pack.js"
   }
 }

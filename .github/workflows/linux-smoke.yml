@@ -6,7 +6,7 @@ name: Linux smoke
 on:
   push:
     branches: ['hotfix/**']
-    paths: ['package.json', 'build/linux/**', 'src/main.js', '.github/workflows/linux-smoke.yml']
+    paths: ['package.json', 'build/**', 'src/main.js', '.github/workflows/linux-smoke.yml']
   workflow_dispatch:
     inputs:
       tag:
@@ -70,7 +70,8 @@ jobs:
           test -n "$(ls /usr/share/icons/hicolor/*/apps/spaci.png 2>/dev/null)" || { echo "FAIL deb-icon" >> "$RUNNER_TEMP/failures"; echo "no spaci icon installed"; }
           grep -E '^(Name|Exec|Icon)=' /usr/share/applications/spaci.desktop
           if [ -d /etc/apparmor.d ]; then cat /etc/apparmor.d/spaci || echo "FAIL deb-apparmor" >> "$RUNNER_TEMP/failures"; fi
-          ls -la /opt/Spaci/chrome-sandbox
+          ls -la /opt/Spaci/chrome-sandbox /opt/Spaci/spaci /opt/Spaci/spaci-bin
+          head -3 /opt/Spaci/spaci
           "$RUNNER_TEMP/launch.sh" deb /opt/Spaci/spaci
 
       - name: AppImage launches once libfuse2 is present

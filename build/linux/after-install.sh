@@ -2,7 +2,8 @@
 # Spaci deb post-install. Same steps as electron-builder's default template,
 # plus an AppArmor profile: Ubuntu 23.10 and later block unprivileged user
 # namespaces, which Chromium's sandbox needs, so without it the app exits at
-# launch. The profile only grants `userns` to Spaci's own binary.
+# launch. The profile only grants `userns` to Spaci's own binary (the real
+# Electron binary behind the launcher, see build/after-pack.js).
 
 if type update-alternatives 2>/dev/null >&1; then
     # Remove previous link if it doesn't use update-alternatives
@@ -24,7 +25,7 @@ if [ -d /etc/apparmor.d ] && [ -e /etc/apparmor.d/abi/4.0 ] && hash apparmor_par
 abi <abi/4.0>,
 include <tunables/global>
 
-profile ${executable} "/opt/${sanitizedProductName}/${executable}" flags=(unconfined) {
+profile ${executable} "/opt/${sanitizedProductName}/${executable}-bin" flags=(unconfined) {
   userns,
 
   include if exists <local/${executable}>
