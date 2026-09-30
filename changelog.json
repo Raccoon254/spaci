@@ -5,7 +5,9 @@
     "tag": "Latest",
     "major": false,
     "summary": "A safety and honesty update: nothing irreversible is deleted without asking, large files go to the Trash, and History records exactly what happened.",
-    "added": [],
+    "added": [
+      "Linux: a .deb package for Ubuntu and Debian. It installs Spaci in your app menu with its icon and works on Ubuntu 24.04 out of the box."
+    ],
     "improved": [
       "History now records every item: what was removed, what failed, what was skipped and why, how much space each freed, and how to get it back.",
       "Restore hints match your project. A cleaned node_modules folder tells you to run pnpm, yarn, bun or npm, based on the lockfile the project actually uses.",
@@ -20,7 +22,8 @@
       "History counted items that failed or were skipped as cleaned. Counts now reflect what was actually removed, and a clean interrupted by a crash is recorded as interrupted.",
       "The tray showed a \"Guard on\" status, and the Tools screens showed sample figures as if they were real. Previews are now labelled as previews.",
       "The \"Desktop notifications\" setting is now respected.",
-      "Tightened what the app window is allowed to ask the background process to open, read or scan. The large-file scan now looks only in your home folder and in folders you choose."
+      "Tightened what the app window is allowed to ask the background process to open, read or scan. The large-file scan now looks only in your home folder and in folders you choose.",
+      "Linux: on Ubuntu 24.04 Spaci showed a generic icon and did not open. The AppImage now has its icon and starts on systems that block the Chromium sandbox for AppImages, and the new .deb keeps the sandbox on. AppImages still need libfuse2 (sudo apt install libfuse2t64); the .deb does not."
     ]
   },
   {
