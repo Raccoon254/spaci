@@ -1,0 +1,244 @@
+'use strict';
+// The scan worker's dispatch logic: every operation that walks the disk or
+// spawns processes (git, du, docker, pgrep) runs here, in a separate process,
+// never on Electron's main thread. Spawning from Electron's large main process
+// is synchronous and expensive; a background scan used to freeze the window for
+// seconds and hold up Quit.
+//
+// Protocol (messages are structured-clone safe):
+//   main -> worker  { id, op, args, progress? }   run op(...args)
+//   main -> worker  { id, abort: true }           abort that op's AbortController
+//   worker -> main  { id, progress }              progress event for that op
+//   worker -> main  { id, ok: true, result }      op finished
+//   worker -> main  { id, ok: false, error }      op failed ({ message, name, code })
+//
+// Pure: the transport (`send`) and the scan modules are injected, so node
+// --test covers the dispatch without Electron. startWorker() attaches it to the
+// real parent channel (Electron utilityProcess parentPort, or a
+// child_process.fork IPC channel in tests).
+
+// Loaded lazily so a test that injects every module never loads the real ones.
+const LOADERS = {
+  scanner: () => require('./scanner'),
+  system: () => require('./system'),
+  docker: () => require('./docker'),
+  diskbreakdown: () => require('./diskbreakdown'),
+  largefiles: () => require('./largefiles'),
+  aitools: () => require('./aitools'),
+};
+
+/**
+ * Docker functions callable by name through the generic 'docker' op, mapped to
+ * the index of their options argument (-1: none). When the caller asked for
+ * progress, the worker puts `onProgress` into that options object. Anything
+ * not listed here is refused.
+ */
+const DOCKER_ALLOWLIST = Object.freeze({
+  status: 0,
+  inventory: 0,
+  prune: 1,
+  desktopDisk: -1,
+  composeServices: -1,
+  resetCache: -1,
+  listVolumes: 0,
+  removeVolume: 1,
+  restartDesktop: 0,
+});
+
+// Scan-time language analysis: one `git ls-tree` per repo (a bounded lstat
+// walk that skips node_modules and other vendored folders otherwise), reused by
+// scanner.analyzeTech's per-process cache while HEAD and manifests are
+// unchanged. Bounded per project and for the whole pass, so a machine full of
+// non-git folders cannot stretch a scan.
+const LANG_CONCURRENCY = 6;
+const LANG_BUDGET_MS = 1000;
+const LANG_PASS_MS = 60 * 1000;
+
+function serializeError(e) {
+  if (e && typeof e === 'object') {
+    return { message: String(e.message || e), name: e.name || 'Error', code: e.code || null };
+  }
+  return { message: String(e), name: 'Error', code: null };
+}
+
+function unknownOp(op) {
+  const e = new Error('Unknown scan worker operation: ' + op);
+  e.code = 'EUNKNOWNOP';
+  return e;
+}
+
+async function pool(items, limit, fn) {
+  let next = 0;
+  const run = async () => { while (next < items.length) { const i = next++; await fn(items[i], i); } };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+}
+
+/** Attach `languages` and `primary` to every scanned project, in place. */
+async function attachLanguages(scanner, projects, signal, { now = Date.now, passMs = LANG_PASS_MS } = {}) {
+  if (!scanner || typeof scanner.analyzeTech !== 'function' || !Array.isArray(projects)) return 0;
+  const deadline = now() + passMs;
+  let done = 0;
+  await pool(projects, LANG_CONCURRENCY, async (p) => {
+    if (!p || typeof p.path !== 'string' || signal?.aborted || now() >= deadline) return;
+    let tech = null;
+    try { tech = await scanner.analyzeTech(p.path, signal, { budgetMs: LANG_BUDGET_MS }); } catch { tech = null; }
+    if (!tech) return;
+    if (Array.isArray(tech.languages) && tech.languages.length) p.languages = tech.languages;
+    if (tech.primary) p.primary = tech.primary;
+    done++;
+  });
+  return done;
+}
+
+/**
+ * The Docker card summary for a scan plus per-project attribution. `stubs` are
+ * { path, docker } for each scanned project; the reply lists, by index, the
+ * docker record each project should carry. Heavy inventory lists never leave
+ * the worker.
+ */
+async function dockerSummary(mod, stubs, options = {}) {
+  const scanner = mod('scanner');
+  const docker = mod('docker');
+  const list = (Array.isArray(stubs) ? stubs : []).map((s) => ({ path: s && s.path, docker: (s && s.docker) || null }));
+  let summary;
+  try {
+    const { inventory } = await scanner.attachDockerUsage(list, options || {});
+    const disk = await docker.desktopDisk();
+    summary = inventory && inventory.ok
+      ? {
+        ok: true,
+        approximate: Boolean(inventory.approximate),
+        status: inventory.status,
+        categories: inventory.categories,
+        totals: inventory.totals,
+        desktopDisk: disk,
+        projects: list.filter((p) => p.docker && p.docker.usage).length,
+        at: Date.now(),
+      }
+      // Keep the disk image size and engine state on failure too: when Docker
+      // Desktop is up but its engine is down, the disk image is still the
+      // biggest thing Spaci can explain to the user.
+      : { ok: false, reason: inventory ? inventory.reason : 'unavailable', status: inventory ? inventory.status : null, state: inventory ? inventory.state : null, desktopDisk: disk, at: Date.now() };
+  } catch (e) {
+    summary = { ok: false, reason: 'error', error: e && e.message, at: Date.now() };
+  }
+  const attached = [];
+  list.forEach((s, index) => { if (s.docker && s.docker.usage) attached.push({ index, docker: s.docker }); });
+  return { summary, attached };
+}
+
+function buildOps(mod) {
+  return {
+    ping: async () => ({ pid: process.pid, at: Date.now() }),
+
+    scanProjects: async (ctx, root, opts = {}) => {
+      const res = await mod('scanner').scanProjects(root, ctx.progress, ctx.signal);
+      if (res && opts && opts.languages !== false && !ctx.signal.aborted) {
+        await attachLanguages(mod('scanner'), res.projects, ctx.signal);
+      }
+      return res;
+    },
+    dockerSummary: (ctx, stubs, options) => dockerSummary(mod, stubs, options),
+    enrichProject: (ctx, dir) => mod('scanner').enrichProject(dir, ctx.signal),
+    revalidateArtifact: (ctx, absPath) => mod('scanner').revalidateArtifact(absPath),
+
+    scanSystem: (ctx) => mod('system').scanSystem(ctx.progress, ctx.signal),
+
+    diskBreakdown: (ctx, home) => mod('diskbreakdown').diskBreakdown(home),
+    topChildren: (ctx, dirs, limit) => mod('diskbreakdown').topChildren(Array.isArray(dirs) ? dirs : [], limit),
+
+    scanLargeFiles: (ctx, root, minBytes) => mod('largefiles').scanLargeFiles(root, minBytes, ctx.progress, ctx.signal),
+
+    aiToolStatus: (ctx) => mod('aitools').aiToolStatus(),
+
+    // Generic routing for Docker: any allowlisted export, called by name.
+    docker: async (ctx, name, args = []) => {
+      const docker = mod('docker');
+      const at = Object.prototype.hasOwnProperty.call(DOCKER_ALLOWLIST, name) ? DOCKER_ALLOWLIST[name] : undefined;
+      if (at === undefined || typeof docker[name] !== 'function') throw unknownOp('docker.' + name);
+      const list = Array.isArray(args) ? args.slice() : [];
+      if (at >= 0 && ctx.wantsProgress) {
+        const o = list[at] && typeof list[at] === 'object' ? list[at] : {};
+        list[at] = { ...o, onProgress: ctx.progress };
+      }
+      return docker[name](...list);
+    },
+  };
+}
+
+/**
+ * @param {object} d
+ * @param {(msg:object) => void} d.send  post a message to the main process
+ * @param {object} [d.modules]  scan modules to use instead of the real ones
+ * @param {object} [d.extraOps]  more ops (tests), (ctx, ...args) => result
+ */
+function createDispatcher({ send, modules = {}, extraOps = {}, log = console } = {}) {
+  const loaded = { ...modules };
+  const mod = (name) => {
+    if (!loaded[name]) loaded[name] = LOADERS[name]();
+    return loaded[name];
+  };
+  const ops = { ...buildOps(mod), ...extraOps };
+  const running = new Map();
+
+  const post = (m) => { try { send(m); } catch (e) { log.error && log.error('[worker] send failed:', e && e.message); } };
+
+  async function run(msg) {
+    const { id, op } = msg;
+    const fn = Object.prototype.hasOwnProperty.call(ops, op) ? ops[op] : null;
+    if (typeof fn !== 'function') { post({ id, ok: false, error: serializeError(unknownOp(op)) }); return; }
+    const controller = new AbortController();
+    running.set(id, controller);
+    const wantsProgress = Boolean(msg.progress);
+    const ctx = {
+      id,
+      signal: controller.signal,
+      wantsProgress,
+      progress: wantsProgress ? (p) => { if (running.has(id)) post({ id, progress: p }); } : null,
+    };
+    try {
+      const result = await fn(ctx, ...(Array.isArray(msg.args) ? msg.args : []));
+      if (running.has(id)) post({ id, ok: true, result });
+    } catch (e) {
+      if (running.has(id)) post({ id, ok: false, error: serializeError(e) });
+    } finally {
+      running.delete(id);
+    }
+  }
+
+  return {
+    handle(msg) {
+      if (!msg || typeof msg !== 'object' || msg.id == null) return;
+      if (msg.abort) { const c = running.get(msg.id); if (c) c.abort(); return; }
+      if (typeof msg.op !== 'string') return;
+      run(msg);
+    },
+    /** Abort every op in flight (the process is going away). */
+    abortAll() { for (const c of running.values()) c.abort(); },
+    running: () => running.size,
+    ops: () => Object.keys(ops),
+  };
+}
+
+/**
+ * Attach a dispatcher to this process's parent channel: Electron's
+ * utilityProcess parentPort in the app, a child_process.fork IPC channel in
+ * tests. The worker exits when its parent goes away.
+ */
+function startWorker({ modules, extraOps, log = console } = {}) {
+  let dispatcher;
+  if (process.parentPort && typeof process.parentPort.postMessage === 'function') {
+    const port = process.parentPort;
+    dispatcher = createDispatcher({ send: (m) => port.postMessage(m), modules, extraOps, log });
+    port.on('message', (e) => dispatcher.handle(e && e.data));
+  } else if (typeof process.send === 'function') {
+    dispatcher = createDispatcher({ send: (m) => { if (process.connected) process.send(m); }, modules, extraOps, log });
+    process.on('message', (m) => dispatcher.handle(m));
+    process.on('disconnect', () => process.exit(0));
+  } else {
+    throw new Error('The scan worker must be started by Spaci (no parent channel).');
+  }
+  return dispatcher;
+}
+
+module.exports = { createDispatcher, startWorker, attachLanguages, dockerSummary, serializeError, DOCKER_ALLOWLIST, LANG_BUDGET_MS };
