@@ -71,7 +71,7 @@ function parseDuBytes(stdout) {
 /** Measure a path's size with `du -sk` (fast, kilobytes). Falls back to a walk only when `du` printed no usable total. */
 function duSizeUnix(p) {
   return new Promise((resolve) => {
-    execFile('du', ['-sk', p], { timeout: 30000 }, (err, stdout) => {
+    execFile('du', ['-skx', p], { timeout: 30000 }, (err, stdout) => {
       const bytes = parseDuBytes(stdout);
       if (bytes > 0 || !err) return resolve(bytes);
       resolve(walkSize(p));

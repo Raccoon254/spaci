@@ -302,7 +302,9 @@ function systemCategory(bytes, { platform = process.platform, home = require('os
   const api = platform === 'win32' ? require('path').win32 : require('path').posix;
   const j = (...p) => api.join(home, ...p);
   const dirs = platform === 'darwin'
-    ? [home, j('Library'), '/opt', '/usr/local', '/Library', '/Users/Shared', '/private/var']
+    // Not /private/var: most of it is Chrome code-sign clones du counts many
+    // times over, so listing it would overstate what could be freed.
+    ? [home, j('Library'), '/opt', '/usr/local', '/Library', '/Users/Shared']
     : platform === 'win32'
       ? [home, j('AppData', 'Local'), j('AppData', 'Roaming'), 'C:\\ProgramData']
       : [home, j('.local', 'share'), '/opt', '/usr/local', '/var'];

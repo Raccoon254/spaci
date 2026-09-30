@@ -204,7 +204,7 @@ test('no target description claims nothing is lost for logs or saved state', () 
 
 test('the System remainder carries drill-down folders for each OS', () => {
   const { systemCategory } = require('../src/storage-classifier');
-  assert.deepEqual(systemCategory(5, { platform: 'darwin', home: '/Users/u' }).dirs, ['/Users/u', '/Users/u/Library', '/opt', '/usr/local', '/Library', '/Users/Shared', '/private/var']);
+  assert.deepEqual(systemCategory(5, { platform: 'darwin', home: '/Users/u' }).dirs, ['/Users/u', '/Users/u/Library', '/opt', '/usr/local', '/Library', '/Users/Shared']);
   assert.ok(systemCategory(5, { platform: 'linux', home: '/home/u' }).dirs.includes('/opt'));
   assert.ok(systemCategory(5, { platform: 'win32', home: 'C:\\Users\\u' }).dirs.includes('C:\\Users\\u\\AppData\\Local'));
 });

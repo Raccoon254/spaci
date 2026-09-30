@@ -90,7 +90,9 @@ function duSize(p) {
     // failure/timeout we resolve 0 rather than falling back to a node walk,
     // because that walk sums APPARENT sizes and APFS clones inflate it wildly
     // (e.g. ~/Library measured at 365 GB instead of 62 GB).
-    execFile('du', ['-sk', p], { timeout: DU_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+    // -x: stay on this filesystem. Without it du walks into mounted disk
+    // images (an iOS simulator runtime under /Library/Developer counted 17 GB).
+    execFile('du', ['-skx', p], { timeout: DU_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
       const bytes = parseDuBytes(stdout);
       if (bytes > 0 || !err) { resolve(bytes); return; }
       if (err && (err.killed || err.signal)) timedOut.add(p);

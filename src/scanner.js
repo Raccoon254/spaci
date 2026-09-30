@@ -209,7 +209,7 @@ const withDuSlot = makeGate(SIZE_WORKERS);
  */
 function duSizeRaw(dir, signal) {
   return new Promise((resolve) => {
-    execFile('du', ['-sk', dir], { timeout: 120000, signal, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    execFile('du', ['-skx', dir], { timeout: 120000, signal, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       const first = String(stdout || '').trim().split('\n').find(Boolean) || '';
       const kb = parseInt((first.split(/\s+/)[0] || '').trim(), 10);
       // du exits non-zero when it hit an unreadable subdirectory but still
