@@ -91,7 +91,179 @@
     return ic(r.icon || 'broom-2', size);
   }
 
+  // ---------- clean tiers (shared by every screen) ----------
+  // Main classifies everything the screens show into A (Safe), B (Review) and
+  // C (Permanent), trusting its own scan over the renderer's copy
+  // (src/clean-tiers.js). The answer is cached per scan and fetched again when
+  // the lists change. Until it arrives, the old flag-based guess is shown.
+  const FALLBACK_BADGES = {
+    A: { cls: 'sp-badge-safe', text: 'Safe' },
+    B: { cls: 'sp-badge-caution', text: 'Review' },
+    C: { cls: 'sp-badge-warn', text: 'Permanent' },
+  };
+  const TIER_SCREENS = new Set(['dashboard', 'projects', 'project', 'system', 'recommendations']);
+  const tierState = { data: null, sig: '', loading: null };
+  function tierSig() {
+    const ps = S.projects || [];
+    const ts = S.sysTargets || [];
+    let items = 0;
+    let bytes = 0;
+    ps.forEach((p) => { (p.items || []).forEach((it) => { items++; bytes += Number(it.size) || 0; }); });
+    ts.forEach((t) => { bytes += Number(t.size) || 0; });
+    return [S.lastScan || 0, ps.length, ts.length, items, bytes].join('|');
+  }
+  function loadTiers(force) {
+    if (!window.api || typeof window.api.cleanTiers !== 'function') return Promise.resolve(null);
+    const sig = tierSig();
+    if (!force && tierState.data && tierState.sig === sig) return Promise.resolve(tierState.data);
+    if (tierState.loading && tierState.loadingSig === sig) return tierState.loading;
+    tierState.loadingSig = sig;
+    tierState.loading = window.api.cleanTiers({ projects: S.projects || [], sysTargets: S.sysTargets || [] })
+      .then((d) => {
+        const changed = !tierState.data || tierState.sig !== sig;
+        tierState.data = d || null;
+        tierState.sig = sig;
+        tierState.loading = null;
+        // Repaint the screen that asked, once, now that the real tiers are in.
+        if (changed && TIER_SCREENS.has(S.route) && !S.cleaning && !S.confirmCfg) SP.go(S.route);
+        return tierState.data;
+      })
+      .catch(() => { tierState.loading = null; return null; });
+    return tierState.loading;
+  }
+  function fallbackTarget(t) {
+    if (!t) return 'B';
+    if (t.reversible === false || (t.storyCategory === 'aitools' && !t.safe)) return 'C';
+    return t.safe ? 'A' : 'B';
+  }
+  function fallbackItem(it) {
+    if (!it) return 'B';
+    if (it.reversible === false) return 'C';
+    return it.safe === true ? 'A' : 'B';
+  }
+  SP.tiers = {
+    ensure: () => { loadTiers(false); },
+    // True once main's answer for the current lists is in. Until then the
+    // badges show a guess; anything that selects or cleans awaits load().
+    ready: () => !!(tierState.data && tierState.sig === tierSig()),
+    load: loadTiers,
+    invalidate: () => { tierState.sig = ''; },
+    plan: () => (tierState.data && tierState.sig === tierSig() ? tierState.data.planA : null),
+    target: (t) => {
+      const d = tierState.data && tierState.data.tiers && tierState.data.tiers.system[t && t.id];
+      return d ? d.tier : fallbackTarget(t);
+    },
+    targetReason: (t) => {
+      const d = tierState.data && tierState.data.tiers && tierState.data.tiers.system[t && t.id];
+      return d ? d.reason : '';
+    },
+    item: (it) => {
+      const d = tierState.data && tierState.data.tiers && tierState.data.tiers.items[it && it.path];
+      return d ? d.tier : fallbackItem(it);
+    },
+    docker: (kind) => {
+      const d = tierState.data && tierState.data.tiers && tierState.data.tiers.docker[kind];
+      return d ? d.tier : (kind === 'stopped-containers' || kind === 'volume' ? 'C' : 'B');
+    },
+    badge: (tier) => ((tierState.data && tierState.data.badges && tierState.data.badges[tier]) || FALLBACK_BADGES[tier] || FALLBACK_BADGES.B),
+    // A small pill for a tier, the same shape everywhere.
+    pill: (tier, extraStyle) => {
+      const b = SP.tiers.badge(tier);
+      return el('span', { class: b.cls, style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700;flex:none' + (extraStyle ? ';' + extraStyle : ''), text: b.text });
+    },
+  };
+
+  // ---------- Clean all developer files (tier A, one confirm) ----------
+  // Every tier A thing across all projects and developer caches, confirmed once
+  // with a summary, then cleaned through api.clean like any other clean: main's
+  // guard, its revalidation of project folders and its confirmation gate decide
+  // what really goes.
+  let cleanAllBusy = false;
+  function planBody(plan) {
+    const lines = [];
+    lines.push('Build output and package caches: ' + plan.count + (plan.count === 1 ? ' item' : ' items')
+      + (plan.projects ? ' across ' + plan.projects + (plan.projects === 1 ? ' project' : ' projects') : '') + '.');
+    lines.push('');
+    plan.groups.slice(0, 6).forEach((g) => {
+      lines.push(g.label + ', ' + g.count + ' (' + fmt(g.bytes) + '). Back with: ' + g.hint + '.');
+    });
+    if (plan.groups.length > 6) lines.push('and ' + (plan.groups.length - 6) + ' more kinds, ' + fmt(plan.groups.slice(6).reduce((a, g) => a + g.bytes, 0)) + '.');
+    lines.push('');
+    lines.push('Everything rebuilds on the next install or build. App caches, AI tool history, the Trash and anything unverified are not included.');
+    return lines.join('\n');
+  }
+  SP.cleanAllDev = async function cleanAllDev() {
+    if (cleanAllBusy || S.cleaning) return;
+    cleanAllBusy = true;
+    try {
+      const data = await loadTiers(true);
+      const plan = data && data.planA;
+      if (!plan || !plan.count || !plan.jobs.length) {
+        SP.toast('Nothing to clean', 'No developer build output or package caches were found. Scan to look again.');
+        return;
+      }
+      const ok = await SP.confirm({
+        title: 'Clean all developer files (' + fmt(plan.bytes) + ')?',
+        body: planBody(plan),
+        confirmLabel: 'Clean ' + fmt(plan.bytes),
+        icon: 'broom',
+      });
+      if (!ok) return;
+      S.cleaning = true;
+      S.cleanAllRunning = true;
+      if (TIER_SCREENS.has(S.route)) SP.go(S.route);
+      const jobs = plan.jobs.map((j) => (j.mode ? { path: j.path, mode: j.mode } : { path: j.path, isDir: j.isDir, size: j.size }));
+      const nameOf = (id) => { const t = (S.sysTargets || []).find((x) => x.id === id); return t ? t.name : ''; };
+      let res;
+      try {
+        res = await window.api.clean(jobs, { scope: 'developer', label: 'All developer files', confirmed: true });
+      } catch (err) {
+        res = { ok: false, error: (err && err.message) || 'Clean failed' };
+      }
+      S.cleaning = false;
+      S.cleanAllRunning = false;
+      const sum = SP.reportClean(res, { fallbackFreed: plan.bytes, names: nameOf, burstLabel: 'across ' + plan.count + (plan.count === 1 ? ' item' : ' items') });
+      if (sum.ok) {
+        // Drop what went; anything refused or failed stays listed.
+        const gone = new Set(plan.jobs.filter((j) => !sum.blocked(j.path)).map((j) => j.path));
+        (S.projects || []).forEach((p) => {
+          const before = (p.items || []).length;
+          p.items = (p.items || []).filter((it) => !gone.has(it.path));
+          if (p.items.length !== before) p.cleanableSize = p.items.filter((i) => i.safe === true).reduce((s, i) => s + (i.size || 0), 0);
+        });
+        const doneTargets = new Set(plan.jobs.filter((j) => j.target).filter((j) => gone.has(j.path)).map((j) => j.target));
+        const blockedTargets = new Set(plan.jobs.filter((j) => j.target && !gone.has(j.path)).map((j) => j.target));
+        S.sysTargets = (S.sysTargets || []).filter((t) => !(doneTargets.has(t.id) && !blockedTargets.has(t.id) && !sum.refusedTargets.has(t.id)));
+        SP.tiers.invalidate();
+      }
+      if (TIER_SCREENS.has(S.route)) SP.go(S.route);
+    } finally {
+      cleanAllBusy = false;
+      S.cleaning = false;
+      S.cleanAllRunning = false;
+    }
+  };
+
+  // The button, the same on Dashboard and Projects. Shows the tier A total once known.
+  SP.cleanAllButton = function cleanAllButton(opts) {
+    opts = opts || {};
+    SP.tiers.ensure();
+    const plan = SP.tiers.plan();
+    const busy = !!S.cleanAllRunning;
+    const none = plan && !plan.count;
+    const label = busy ? 'Cleaning…' : 'Clean all developer files' + (plan && plan.count ? ' (' + fmt(plan.bytes) + ')' : '');
+    return el('button', {
+      'data-clean-all': '',
+      title: none ? 'Nothing to clean right now' : 'Every Safe item: build output and package caches. You confirm once.',
+      style: 'height:' + (opts.height || 44) + 'px;padding:0 18px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:650;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none'
+        + (busy || none ? ';opacity:.55;pointer-events:none' : ''),
+      hov: 'border-color:var(--accent);color:var(--accent-fg)',
+      onclick: () => SP.cleanAllDev(),
+    }, [busy ? ring('elastic', 16) : ic('broom', 16), label]);
+  };
+
   SP.screens.dashboard = function (host) {
+    SP.tiers.ensure();
     const d = S.disk || { total: 0, used: 0, free: 0 };
     const cats = (S.breakdown && S.breakdown.categories) || [];
     // Informational recommendations (action 'none') are not something to clean.
@@ -208,6 +380,26 @@
         ])
       ])
     );
+
+    // Developer files: every tier A item, cleaned in one go.
+    const planA = SP.tiers.plan();
+    if (planA && planA.count > 0) {
+      const top = planA.groups.slice(0, 3).map((g) => g.label).join(', ');
+      host.appendChild(
+        el('div', { style: 'margin-top:16px;display:flex;align-items:center;gap:18px;padding:20px 22px;background:var(--panel);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow-sm)' }, [
+          el('div', { style: 'width:44px;height:44px;border-radius:12px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--accent-fg)' }, [ic('code', 22)]),
+          el('div', { style: 'flex:1;min-width:0' }, [
+            el('div', { style: 'font-size:15px;font-weight:700;display:flex;align-items:center;gap:9px;flex-wrap:wrap' }, [
+              el('span', { text: 'Developer files' }),
+              SP.tiers.pill('A'),
+              el('span', { style: 'color:var(--accent-fg)', text: fmt(planA.bytes) }),
+            ]),
+            el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:3px;line-height:1.5', text: planA.count + (planA.count === 1 ? ' item' : ' items') + ' of build output and package caches (' + top + '). Everything rebuilds on the next install or build.' }),
+          ]),
+          SP.cleanAllButton({ height: 42 }),
+        ])
+      );
+    }
 
     // storage breakdown card
     const bar = el('div', { style: 'height:16px;border-radius:6px;overflow:hidden;display:flex;gap:3px;background:var(--track)' },

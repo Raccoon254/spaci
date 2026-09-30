@@ -44,9 +44,17 @@
     const list = S.recsProjects || S.projects || [];
     return list.find((p) => p.path === act.path) || null;
   }
+  // Main's tiers (SP.tiers, src/clean-tiers.js) decide where they exist, so a
+  // card and the row it opens always show the same badge.
+  const BY_TIER = { A: TIER.safe, B: TIER.review, C: TIER.permanent };
   function recRisk(r) {
     if (!r) return TIER.safe;
     const act = r.action || {};
+    if (SP.tiers && !(r.action && r.action.type === 'none')) {
+      if (act.type === 'docker-prune' && act.kind) return BY_TIER[SP.tiers.docker(act.kind)] || TIER.review;
+      const tt = targetOf(r);
+      if (tt) return BY_TIER[SP.tiers.target(tt)] || TIER.review;
+    }
     // Unused images are Review, not Permanent: they download or rebuild again.
     // History still records them as permanent (a local-only build is gone).
     if (act.kind === 'unused-images') return TIER.review;
@@ -211,6 +219,7 @@
 
   // ================= RECOMMENDATIONS =================
   SP.screens.recommendations = function (host) {
+    if (SP.tiers) SP.tiers.ensure();
     const rescanBtn = el('button', {
       style: 'height:44px;padding:0 18px;border-radius:11px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;flex:none',
       hov: 'background:var(--panel-2)',

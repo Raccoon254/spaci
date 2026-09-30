@@ -24,7 +24,9 @@
     largefiles: 'trash',
     'large-files': 'trash',
     storage: 'database',
-    duplicates: 'copy'
+    duplicates: 'copy',
+    developer: 'code',
+    'auto-clean': 'clock'
   };
   function scopeIcon(e) {
     return SCOPE_ICON[(e.scope || '').toLowerCase()] || 'box';
@@ -89,6 +91,28 @@
   }
 
   const isV2 = (e) => !!e && e.v === 2;
+  // Auto-clean runs (src/auto-clean.js): staged items are 'trashed' in the log
+  // (still on disk) until the staging folder is purged 24 hours later.
+  const acOf = (e) => (e && e.autoClean && typeof e.autoClean === 'object' ? e.autoClean : null);
+  const isPreview = (e) => !!(acOf(e) && acOf(e).dryRun);
+  const isAuto = (e) => (e && (e.scope || '') === 'auto-clean') || !!acOf(e);
+  function canUndo(e) {
+    const a = acOf(e);
+    return !!(a && a.runId && !a.dryRun && !a.undoneAt && !a.purgedAt && Number(a.stagedUntil) > Date.now()
+      && (e.items || []).some((it) => it && it.outcome === 'trashed'));
+  }
+  function timeShort(ms) {
+    try { return new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); } catch (_) { return ''; }
+  }
+  function autoBadge(e) {
+    const a = acOf(e);
+    if (!a) return null;
+    const pill = (cls, text) => el('span', { class: cls, style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700', text });
+    if (a.dryRun) return pill('sp-badge-accent', a.approvedAt ? 'Preview, approved' : 'Preview');
+    if (a.undoneAt) return pill('sp-badge-caution', 'Undone');
+    if (canUndo(e)) return pill('sp-badge-accent', 'Undo until ' + timeShort(a.stagedUntil));
+    return null;
+  }
   const num = (x) => Number(x) || 0;
   const REV_TEXT = { rebuild: 'Rebuilds on next install/build', trash: 'In your Trash', none: 'Permanent', mixed: 'Mixed' };
   const REV_ICON = { rebuild: 'refresh', trash: 'trash', none: 'lock', mixed: 'info' };
@@ -262,9 +286,10 @@
     const parts = [];
     if (isV2(e)) {
       if (c.removed) parts.push(c.removed + ' removed');
-      if (c.trashed) parts.push(c.trashed + ' trashed');
+      if (c.trashed) parts.push(c.trashed + (isAuto(e) ? ' set aside' : ' trashed'));
       if (c.failed) parts.push(c.failed + ' failed');
-      if (c.refused) parts.push(c.refused + ' left alone');
+      if (c.refused) parts.push(c.refused + (isAuto(e) ? ' left or put back' : ' left alone'));
+      if (acOf(e) && acOf(e).dryRun) { parts.length = 0; parts.push('would move ' + num(acOf(e).previewCount) + (num(acOf(e).previewCount) === 1 ? ' item' : ' items') + ', nothing moved'); }
       if (!parts.length) parts.push('0 ' + itemNoun(e, 0));
     } else {
       const count = num(e.count);
@@ -282,19 +307,29 @@
       el('div', { style: 'flex:1;min-width:0' }, [
         el('div', { style: 'font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px;flex-wrap:wrap' }, [
           el('span', { text: titleOf(e) }),
-          el('span', {
+          // A preview removed nothing, so it has no recovery badge.
+          isPreview(e) ? null : el('span', {
             class: rk === 'none' ? 'sp-badge-warn' : rk === 'mixed' ? 'sp-badge-caution' : 'sp-badge-safe',
             style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700',
             text: REV_TEXT[rk]
           }),
-          statusBadge(e)
+          statusBadge(e),
+          autoBadge(e)
         ]),
         el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px', text: meta })
       ]),
-      el('div', { style: 'font-weight:700;font-size:15px;color:var(--accent-fg);flex:none', text: fmt(e.freed) }),
-      ic(REV_ICON[rk], 17, { color: 'var(--text-4)' }),
+      el('div', { style: 'font-weight:700;font-size:15px;flex:none;color:' + (isPreview(e) ? 'var(--text-3)' : 'var(--accent-fg)'), text: rowFigure(e) }),
+      isPreview(e) ? ic('eye', 17, { color: 'var(--text-4)' }) : ic(REV_ICON[rk], 17, { color: 'var(--text-4)' }),
       ic('chevron-right', 18, { color: 'var(--text-4)' })
     ]);
+  }
+
+  // Freed space, or for an auto-clean still in staging, what it set aside.
+  function rowFigure(e) {
+    const a = acOf(e);
+    if (a && a.dryRun) return fmt(num(a.previewBytes));
+    if (isAuto(e) && !num(e.freed) && num(e.trashedBytes)) return fmt(num(e.trashedBytes));
+    return fmt(e.freed);
   }
 
   function emptyState(host) {
@@ -426,6 +461,11 @@
   // went and how to get them back.
   function restoreCopy(e, rk) {
     const scope = (e.scope || '').toLowerCase();
+    const a = acOf(e);
+    if (a && !a.dryRun) {
+      if (a.purgedAt) return { title: 'Removed', text: 'The 24 hours to undo this run passed, so Spaci removed what it had set aside and the space was freed. Each item below lists how to rebuild it.' };
+      return { title: 'Set aside for 24 hours', text: 'Auto-clean moved these into a Spaci folder on the same disk. They come back with Undo until ' + whenExact(a.stagedUntil) + '. After that the space is freed, and each item below lists how to rebuild it.' };
+    }
     if (rk === 'none') {
       return {
         title: 'Permanent',
@@ -462,7 +502,11 @@
 
   const PAGE = 100;
 
-  function outcomeBadge(outcome) {
+  function outcomeBadge(outcome, e, it) {
+    if (e && isAuto(e) && it) {
+      if (outcome === 'trashed') return el('span', { class: 'sp-badge-accent', style: 'display:inline-flex;padding:2px 8px;border-radius:7px;font-size:10.5px;font-weight:700;flex:none', text: 'Set aside' });
+      if (outcome === 'refused' && it.reason === 'Put back by Undo.') return el('span', { class: 'sp-badge-safe', style: 'display:inline-flex;padding:2px 8px;border-radius:7px;font-size:10.5px;font-weight:700;flex:none', text: 'Put back' });
+    }
     const map = {
       removed: ['sp-badge-safe', 'Removed'],
       trashed: ['sp-badge-accent', 'Trashed'],
@@ -474,7 +518,11 @@
     return el('span', { class: m[0], style: 'display:inline-flex;padding:2px 8px;border-radius:7px;font-size:10.5px;font-weight:700;flex:none', text: m[1] });
   }
 
-  function itemNote(it) {
+  function itemNote(it, e) {
+    if (e && isAuto(e)) {
+      if (it.outcome === 'trashed') { const a = acOf(e); return { text: a && a.purgedAt ? 'Removed after 24 hours.' : 'Set aside by auto-clean. Undo puts it back.', raw: '' }; }
+      if (it.outcome === 'refused' && it.reason === 'Put back by Undo.') return { text: 'Put back where it was by Undo.', raw: '' };
+    }
     if (it.outcome === 'failed') {
       // A known error code gets plain English; otherwise the recorded reason is
       // already written for people (interrupted, trash failed), so show it as is.
@@ -501,17 +549,139 @@
     ];
     if (obj) {
       const box = children[1];
-      const note = itemNote(it);
+      const note = itemNote(it, e);
       const rk = it.outcome === 'removed' || it.outcome === 'trashed' ? it.reversible : null;
       if (note) box.appendChild(el('div', { title: note.raw, style: 'color:var(--text-3);font-size:12px;margin-top:3px;line-height:1.5', text: note.text }));
       if (rk && REV_TEXT[rk] && it.outcome !== 'trashed') box.appendChild(el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:3px', text: REV_TEXT[rk] }));
-      if (it.restoreHint && it.outcome === 'removed') {
+      if (it.restoreHint && (it.outcome === 'removed' || (isAuto(e) && it.outcome === 'trashed'))) {
         box.appendChild(el('div', { class: 'mono', style: 'color:var(--text-2);font-size:12px;margin-top:4px;white-space:pre-wrap;word-break:break-word', text: String(it.restoreHint) }));
       }
-      children.push(outcomeBadge(it.outcome));
+      children.push(outcomeBadge(it.outcome, e, it));
       if (it.bytes != null) children.push(el('div', { style: 'font-size:12.5px;color:var(--text-3);font-weight:600;flex:none', text: fmt(num(it.bytes)) }));
     }
     return el('div', { style: 'display:flex;align-items:center;gap:13px;padding:12px 15px;border-radius:12px;background:var(--panel);border:1px solid var(--border)' }, children);
+  }
+
+  async function reopen(id) {
+    try {
+      const list = await window.api.historyGet();
+      const fresh = (Array.isArray(list) ? list : []).find((x) => x && x.id === id);
+      if (fresh) S.currentHistory = fresh;
+    } catch (_) {}
+    if (S.route === 'historydetail') SP.go('historydetail');
+  }
+
+  let undoBusy = false;
+  async function undoRun(e) {
+    const a = acOf(e);
+    if (undoBusy || !a || !window.api.autoCleanUndo) return;
+    const staged = (e.items || []).filter((it) => it && it.outcome === 'trashed');
+    const ok = await SP.confirm({
+      title: 'Undo this auto-clean?',
+      body: 'Spaci puts ' + staged.length + (staged.length === 1 ? ' item' : ' items') + ' (' + fmt(e.trashedBytes) + ') back where they were.\n\nAnything you rebuilt since stays as it is: Spaci keeps the new copy and removes the old one after 24 hours.',
+      confirmLabel: 'Undo',
+      icon: 'undo',
+    });
+    if (!ok) return;
+    undoBusy = true;
+    SP.go('historydetail');
+    let res;
+    try { res = await window.api.autoCleanUndo(a.runId); } catch (err) { res = { ok: false, error: (err && err.message) || 'Undo failed' }; }
+    undoBusy = false;
+    if (res && res.restored != null && (res.ok || res.restored > 0)) {
+      const extra = res.conflicts ? ' ' + res.conflicts + ' already rebuilt, kept as they are.' : '';
+      SP.toast('Put back ' + res.restored + (res.restored === 1 ? ' item' : ' items'), ('Auto-clean was undone.' + extra).trim());
+    } else {
+      S.reportCfg = { tone: 'danger', title: 'Could not undo', lead: ((res && res.error) || 'Undo failed') + '.', groups: [], errors: [] };
+      SP.go('historydetail');
+    }
+    await reopen(e.id);
+  }
+
+  let approveState = { id: null, pending: null, loading: false };
+  function loadApproveState(e) {
+    if (!window.api.autoCleanGet || approveState.loading || approveState.id === e.id) return;
+    approveState = { id: e.id, pending: null, loading: true };
+    window.api.autoCleanGet().then((st) => {
+      approveState = { id: e.id, pending: st && st.pendingPreview, enabled: !!(st && st.settings && st.settings.enabled), loading: false };
+      if (S.route === 'historydetail' && S.currentHistory && S.currentHistory.id === e.id) SP.go('historydetail');
+    }).catch(() => { approveState.loading = false; });
+  }
+  async function approve(e) {
+    let res;
+    try { res = await window.api.autoCleanApprove(e.id); } catch (err) { res = { ok: false, error: err && err.message }; }
+    if (res && res.ok) SP.toast('Auto-clean approved', 'It runs when your computer is idle on AC power. Each run can be undone for 24 hours.');
+    else SP.toast('Not approved', (res && res.error) || 'Try again.');
+    approveState = { id: null };
+    await reopen(e.id);
+  }
+  async function turnOff(e) {
+    try { await window.api.autoCleanSet({ enabled: false }); } catch (_) {}
+    SP.toast('Auto-clean is off', 'Nothing will be moved. Turn it on again in Settings.');
+    approveState = { id: null };
+    await reopen(e.id);
+  }
+
+  function btnStyle(primary) {
+    return 'height:40px;padding:0 16px;border-radius:11px;font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;' +
+      (primary ? 'border:none;background:var(--accent);color:var(--on-accent)' : 'border:1px solid var(--border-2);background:var(--panel-2);color:var(--text)');
+  }
+
+  function autoCleanCard(e) {
+    const a = acOf(e);
+    if (!a) return null;
+    const box = (kids) => el('div', { 'data-autoclean-card': '', style: 'padding:18px 20px;border-radius:16px;background:var(--accent-soft);border:1px solid var(--border);margin-bottom:20px' }, kids);
+    if (a.dryRun) {
+      loadApproveState(e);
+      const pending = approveState.id === e.id && approveState.pending === e.id;
+      const kids = [
+        el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: 'Preview only. Nothing was moved.' }),
+        el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: num(a.previewCount)
+          ? 'With your current rules, auto-clean would set aside ' + fmt(num(a.previewBytes)) + ' from ' + num(a.previewCount) + (num(a.previewCount) === 1 ? ' item' : ' items') + '. Approve to let it run when your computer is idle on AC power. Every run can be undone for 24 hours.'
+          : 'Nothing matches your rules right now. Approve the rules to let later runs clean what matches then.' }),
+      ];
+      if (a.approvedAt) kids.push(el('div', { style: 'color:var(--success-fg);font-size:13px;font-weight:600;margin-top:10px', text: 'Approved ' + whenExact(a.approvedAt) + '.' }));
+      else if (pending) {
+        kids.push(el('div', { style: 'display:flex;gap:10px;margin-top:14px' }, [
+          el('button', { 'data-approve': '', style: btnStyle(true), hov: 'background:var(--accent-hover)', onclick: () => approve(e) }, [ic('check', 15), 'Approve auto-clean']),
+          el('button', { style: btnStyle(false), hov: 'background:var(--panel-3)', onclick: () => turnOff(e) }, ['Turn off auto-clean']),
+        ]));
+      } else if (approveState.id === e.id && !approveState.loading) {
+        kids.push(el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:10px', text: 'This preview is out of date. A newer one runs with your current rules.' }));
+      }
+      const list = el('div', { style: 'display:flex;flex-direction:column;gap:7px;margin-top:16px' });
+      (Array.isArray(a.preview) ? a.preview : []).slice(0, 100).forEach((pv) => {
+        list.appendChild(el('div', { style: 'display:flex;align-items:center;gap:13px;padding:11px 14px;border-radius:12px;background:var(--panel);border:1px solid var(--border)' }, [
+          itemMark(e, pv, 'folder', 18),
+          el('div', { style: 'flex:1;min-width:0' }, [
+            el('div', { class: 'mono', title: pv.path, style: 'font-size:12.5px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: pv.path }),
+            el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px', text: pv.rule || pv.group || '' }),
+          ]),
+          SP.tiers ? SP.tiers.pill('A') : null,
+          el('div', { style: 'font-size:12.5px;color:var(--text-3);font-weight:600;flex:none', text: fmt(num(pv.bytes)) }),
+        ]));
+      });
+      kids.push(list);
+      return box(kids);
+    }
+    if (a.undoneAt) {
+      return box([
+        el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: 'Undone' }),
+        el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: 'Undone ' + whenExact(a.undoneAt) + ': ' + num(a.restored) + ' put back' + (num(a.conflicts) ? ', ' + num(a.conflicts) + ' kept as you rebuilt them' : '') + (num(a.undoFailed) ? ', ' + num(a.undoFailed) + ' could not be moved back' : '') + '.' }),
+      ]);
+    }
+    if (canUndo(e)) {
+      return box([
+        el('div', { style: 'display:flex;align-items:center;gap:16px' }, [
+          el('div', { style: 'flex:1;min-width:0' }, [
+            el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: 'You can undo this until ' + whenExact(a.stagedUntil) }),
+            el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: 'Undo moves everything below back where it was. After that the space is freed for good.' }),
+          ]),
+          el('button', { 'data-undo': '', style: btnStyle(true) + (undoBusy ? ';opacity:.6;pointer-events:none' : ''), hov: 'background:var(--accent-hover)', onclick: () => undoRun(e) }, [undoBusy ? ring('elastic', 15) : ic('undo', 15), undoBusy ? 'Putting back…' : 'Undo this auto-clean']),
+        ]),
+      ]);
+    }
+    return null;
   }
 
   SP.screens.historydetail = function (host) {
@@ -541,11 +711,12 @@
         el('div', { style: 'flex:1;min-width:0' }, [
           el('div', { style: 'font-size:25px;font-weight:700;letter-spacing:-.7px;display:flex;align-items:center;gap:11px;flex-wrap:wrap' }, [
             el('span', { text: titleOf(e) }),
-            el('span', {
+            isPreview(e) ? null : el('span', {
               class: rk === 'none' ? 'sp-badge-warn' : rk === 'mixed' ? 'sp-badge-caution' : 'sp-badge-safe',
               style: 'display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:8px;font-size:11.5px;font-weight:700'
             }, [ic(REV_ICON[rk], 13), REV_TEXT[rk]]),
-            statusBadge(e)
+            statusBadge(e),
+            autoBadge(e)
           ]),
           el('div', { style: 'color:var(--text-3);font-size:13px;margin-top:5px', text: whenExact(e.at) })
         ]),
@@ -556,10 +727,10 @@
     // stats strip: space freed / outcome counts / when
     const detailStats = [{ icon: 'hard-drive', label: 'Space freed', value: fmt(e.freed), color: 'var(--accent-fg)' }];
     // Trashed files are not freed until the Trash is emptied; show them apart.
-    if (Number(e.trashedBytes) > 0) detailStats.push({ icon: 'trash', label: 'In your Trash', value: fmt(e.trashedBytes), color: 'var(--text)' });
+    if (Number(e.trashedBytes) > 0) detailStats.push({ icon: isAuto(e) ? 'clock' : 'trash', label: isAuto(e) ? 'Set aside' : 'In your Trash', value: fmt(e.trashedBytes), color: 'var(--text)' });
     if (isV2(e)) {
       detailStats.push({ icon: 'check', label: 'Removed', value: String(c.removed), color: 'var(--text)' });
-      if (c.trashed) detailStats.push({ icon: 'trash', label: 'Trashed', value: String(c.trashed), color: 'var(--text)' });
+      if (c.trashed) detailStats.push({ icon: isAuto(e) ? 'clock' : 'trash', label: isAuto(e) ? 'Set aside' : 'Trashed', value: String(c.trashed), color: 'var(--text)' });
       if (c.failed) detailStats.push({ icon: 'warning', label: 'Failed', value: String(c.failed), color: 'var(--danger-fg)' });
       if (c.refused) detailStats.push({ icon: 'info', label: 'Left alone', value: String(c.refused), color: 'var(--text)' });
     } else {
@@ -574,6 +745,13 @@
           el('b', { style: 'color:' + st.color + ';font-weight:700', text: st.value })
         ])))
     );
+
+    // auto-clean: the dry run to approve, or the run to undo
+    const acCard = autoCleanCard(e);
+    if (acCard) {
+      host.appendChild(acCard);
+      if (acOf(e).dryRun) return; // a preview has no items, only its list above
+    }
 
     // interrupted banner
     if (e.status === 'interrupted') {
