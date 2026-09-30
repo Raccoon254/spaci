@@ -16,6 +16,10 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-24.04
+    # CI launches are not users: the app never sends its daily usage ping
+    # when SPACI_TELEMETRY=0 (launch.sh also sets it on every launch).
+    env:
+      SPACI_TELEMETRY: '0'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,7 +42,8 @@ jobs:
           # launch.sh <label> <command...>: pass when the app is still running after 25 s.
           label="$1"; shift
           log="$RUNNER_TEMP/$label.log"
-          xvfb-run -a timeout 25 "$@" --user-data-dir="$(mktemp -d)" >"$log" 2>&1
+          # SPACI_TELEMETRY=0: CI launches are not users, never ping.
+          SPACI_TELEMETRY=0 xvfb-run -a timeout 25 "$@" --user-data-dir="$(mktemp -d)" >"$log" 2>&1
           code=$?
           echo "---- $label (exit $code) ----"; tail -n 25 "$log"
           if [ "$code" = 124 ] && ! grep -q "FATAL" "$log"; then echo "PASS $label"; else echo "FAIL $label"; echo "FAIL $label" >> "$RUNNER_TEMP/failures"; fi
@@ -57,7 +62,7 @@ jobs:
 
       - name: Build AppImage and deb from this commit
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npx electron-builder --linux AppImage --publish never
           cp release/latest-linux.yml "$RUNNER_TEMP/latest-linux.yml"
           npx electron-builder --linux deb --publish never

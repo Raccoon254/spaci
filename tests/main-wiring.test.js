@@ -1098,3 +1098,37 @@ test('docker volumes IPC: cached listing, confirmation and allowlist gates, one 
     m.appEvents.emit('before-quit');
   } finally { m.cleanup(); }
 });
+
+test('a packaged build never pings when SPACI_TELEMETRY=0, even with telemetry on in prefs', async () => {
+  const saved = process.env.SPACI_TELEMETRY;
+  process.env.SPACI_TELEMETRY = '0';
+  const realFetch = global.fetch;
+  const fetched = [];
+  global.fetch = async (url) => { fetched.push(url); return { ok: true, status: 204 }; };
+  const realSetTimeout = global.setTimeout;
+  const pings = [];
+  // Run the 10 s startup ping at once.
+  global.setTimeout = (fn, ms, ...a) => { if (ms === 10000) { pings.push(fn); return { unref() {} }; } return realSetTimeout(fn, ms, ...a); };
+  const m = loadMain();
+  try {
+    m.electron.app.isPackaged = true;
+    m.ready.resolve();
+    await flush();
+    assert.equal(pings.length, 1, 'the startup ping was scheduled');
+    pings[0]();
+    await flush();
+    assert.deepEqual(fetched, []);
+    assert.equal((await m.handlers['prefs:get']()).installId, undefined, 'no install ID created');
+    // Without the override the same launch does ping (the stub fetch answers).
+    delete process.env.SPACI_TELEMETRY;
+    pings[0]();
+    for (let i = 0; i < 5; i++) await flush();
+    assert.deepEqual(fetched, ['https://spaci.kentom.co.ke/api/ping']);
+    m.appEvents.emit('before-quit');
+  } finally {
+    global.setTimeout = realSetTimeout;
+    global.fetch = realFetch;
+    if (saved === undefined) delete process.env.SPACI_TELEMETRY; else process.env.SPACI_TELEMETRY = saved;
+    m.cleanup();
+  }
+});

@@ -137,8 +137,9 @@ function patchPrefs(patch) { savePrefs({ ...loadPrefs(), ...patch }); }
 // Once a day: a random install ID, the version and the OS. Nothing else. The
 // user can switch it off in Settings (prefs.telemetry === false).
 function sendUsagePing() {
-  // Dev runs are not users; never count them.
-  if (!app.isPackaged) return;
+  // Dev runs are not users; never count them. Nor automated runs
+  // (SPACI_TELEMETRY=0, set by the CI smoke test), whatever the prefs say.
+  if (!app.isPackaged || telemetry.disabledByEnv(process.env)) return;
   telemetry.maybePing({
     prefs: loadPrefs(),
     // Merge only telemetry's own keys into the latest prefs, so a setting the

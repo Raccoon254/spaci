@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { maybePing, mapPlatform } = require('../src/telemetry');
+const { maybePing, mapPlatform, disabledByEnv } = require('../src/telemetry');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -17,6 +17,7 @@ function harness(prefs = {}, opts = {}) {
     arch: 'arm64',
     fetchImpl: async (url, init) => { calls.push({ url, init }); return { ok: true, status: 204 }; },
     now: () => new Date('2026-09-30T10:00:00Z'),
+    env: {}, // never the developer's own environment
     ...opts
   };
   return { args, calls, saves };
@@ -95,4 +96,29 @@ test('platform mapping', () => {
   assert.equal(mapPlatform('darwin'), 'mac');
   assert.equal(mapPlatform('win32'), 'windows');
   assert.equal(mapPlatform('linux'), 'linux');
+});
+
+test('SPACI_TELEMETRY=0 sends nothing and creates no install ID, whatever the prefs say', async () => {
+  for (const v of ['0', 'false', 'OFF', ' no ']) {
+    const h = harness({ telemetry: true }, { env: { SPACI_TELEMETRY: v } });
+    assert.equal(await maybePing(h.args), false, v);
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.saves.length, 0);
+    assert.equal(h.args.prefs.installId, undefined);
+  }
+  // Any other value, or none, leaves the prefs in charge.
+  for (const env of [{}, { SPACI_TELEMETRY: '1' }, { SPACI_TELEMETRY: '' }]) {
+    const h = harness({}, { env });
+    assert.equal(await maybePing(h.args), true, JSON.stringify(env));
+  }
+  assert.equal(disabledByEnv({ SPACI_TELEMETRY: '0' }), true);
+  assert.equal(disabledByEnv(undefined), false);
+});
+
+test('the CI smoke launches set SPACI_TELEMETRY=0', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const yml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'linux-smoke.yml'), 'utf8');
+  assert.match(yml, /SPACI_TELEMETRY: '0'/, 'job-level env');
+  assert.match(yml, /SPACI_TELEMETRY=0 xvfb-run/, 'every launch.sh launch');
 });

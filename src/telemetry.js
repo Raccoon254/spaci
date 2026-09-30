@@ -15,6 +15,15 @@ function mapPlatform(p) {
   return PLATFORMS[p] || String(p);
 }
 
+// SPACI_TELEMETRY=0 (or false/off/no) turns the ping off for that process,
+// whatever the prefs say: CI smoke launches and other automated runs are not
+// users and must never be counted. No install ID is created either.
+const OFF_VALUES = new Set(['0', 'false', 'off', 'no']);
+function disabledByEnv(env = process.env) {
+  const v = env && env.SPACI_TELEMETRY;
+  return typeof v === 'string' && OFF_VALUES.has(v.trim().toLowerCase());
+}
+
 // UTC calendar day, YYYY-MM-DD, matching how the server buckets days.
 function dayKey(date) {
   return date.toISOString().slice(0, 10);
@@ -28,10 +37,12 @@ async function maybePing({
   arch = process.arch,
   fetchImpl = typeof fetch === 'function' ? fetch : null,
   now = () => new Date(),
-  endpoint = DEFAULT_ENDPOINT
+  endpoint = DEFAULT_ENDPOINT,
+  env = process.env
 } = {}) {
   let timer;
   try {
+    if (disabledByEnv(env)) return false;
     if (!prefs || prefs.telemetry === false) return false;
     if (typeof fetchImpl !== 'function') return false;
 
@@ -72,4 +83,4 @@ async function maybePing({
   }
 }
 
-module.exports = { maybePing, mapPlatform, DEFAULT_ENDPOINT };
+module.exports = { maybePing, mapPlatform, disabledByEnv, DEFAULT_ENDPOINT };
