@@ -3,9 +3,11 @@
 const os = require('os');
 const path = require('path');
 const { buildBrowserTargets } = require('./browsers');
+const { buildAiToolTargets } = require('./aitools');
 
 const CATEGORY_META = {
   developer: { label: 'Developer', icon: 'code', hint: 'Code, build caches and SDKs' },
+  aitools: { label: 'AI tools', icon: 'flash', hint: 'Session history, logs and caches from AI coding tools' },
   applications: { label: 'Applications', icon: 'grid', hint: 'Installed apps' },
   appdata: { label: 'App Data', icon: 'database', hint: 'Per-app data and containers' },
   caches: { label: 'Caches', icon: 'broom', hint: 'Regenerable cache and log files' },
@@ -23,7 +25,7 @@ function uniq(list) {
 }
 
 function makeTarget(id, name, category, icon, paths, description, options = {}) {
-  return {
+  const target = {
     id,
     name,
     category,
@@ -35,7 +37,33 @@ function makeTarget(id, name, category, icon, paths, description, options = {}) 
     description,
     storyCategory: options.storyCategory || category.toLowerCase(),
   };
+  // Basenames the cleaner must never delete at any depth inside this target.
+  // Used when a generic cache folder holds a nested folder that is expensive
+  // to rebuild or is offered separately with its own safety rating.
+  if (Array.isArray(options.protect) && options.protect.length > 0) target.protect = uniq(options.protect);
+  return target;
 }
+
+// Go keeps its module cache at GOMODCACHE, else the first GOPATH entry's
+// pkg/mod, else ~/go/pkg/mod. Removing the whole tree is what
+// `go clean -modcache` does, so it is safe; the files are read-only on disk,
+// which the cleaner handles.
+function goModCache(ctx, fallback) {
+  const { env, pathApi } = ctx;
+  if (env.GOMODCACHE) return env.GOMODCACHE;
+  const sep = ctx.platform === 'win32' ? ';' : ':';
+  const gopath = String(env.GOPATH || '').split(sep).find(Boolean);
+  if (gopath) return pathApi.join(gopath, 'pkg', 'mod');
+  return fallback;
+}
+
+// Hugging Face stores downloaded models and datasets at HF_HOME, else
+// ~/.cache/huggingface. Regenerable, but a re-download can be many GB.
+function huggingFaceHome(ctx, fallback) {
+  return ctx.env.HF_HOME || fallback;
+}
+
+const HF_DESCRIPTION = 'Downloaded AI models and datasets. Safe to remove, but re-downloading large models can take a long time.';
 
 function platformContext(options = {}) {
   const platform = options.platform || process.platform;
@@ -61,13 +89,17 @@ function buildDeveloperTargets(ctx) {
       makeTarget('pnpm', 'pnpm store', 'Developer', 'node', [lib('pnpm', 'store'), join('.pnpm-store')], 'pnpm content-addressable store.'),
       makeTarget('bun', 'Bun cache', 'Developer', 'flash', [join('.bun', 'install', 'cache')], 'Bun install cache.'),
       makeTarget('gradle', 'Gradle cache', 'Developer', 'gradle', [join('.gradle', 'caches')], 'Global Gradle build cache & downloaded deps.'),
+      makeTarget('gradle-wrapper', 'Gradle wrapper downloads', 'Developer', 'gradle', [join('.gradle', 'wrapper', 'dists')], 'Gradle distributions fetched by project wrappers. Re-downloads on the next build.'),
       makeTarget('maven', 'Maven repository', 'Developer', 'java', [join('.m2', 'repository')], 'Downloaded Maven artifacts. Re-downloads on build.'),
+      makeTarget('nuget', 'NuGet packages', 'Developer', 'box', [join('.nuget', 'packages')], 'Downloaded NuGet packages. Re-downloads on restore.'),
       makeTarget('cargo', 'Cargo registry', 'Developer', 'rust', [join('.cargo', 'registry', 'cache'), join('.cargo', 'registry', 'src')], 'Rust crate cache.'),
       makeTarget('cocoapods', 'CocoaPods cache', 'Developer', 'apple', [lib('Caches', 'CocoaPods')], 'CocoaPods spec & pod cache.'),
       makeTarget('pub', 'Dart/Flutter pub', 'Developer', 'flutter', [join('.pub-cache', 'hosted')], 'Dart/Flutter downloaded packages.'),
+      makeTarget('dart-server', 'Dart analysis server', 'Developer', 'flutter', [join('.dartServer')], 'Dart and Flutter analysis cache. Rebuilds the next time your editor analyses code.'),
       makeTarget('pip', 'pip cache', 'Developer', 'python', [lib('Caches', 'pip')], 'Python pip download cache.'),
-      makeTarget('go', 'Go build/mod cache', 'Developer', 'go', [lib('Caches', 'go-build'), join('go', 'pkg', 'mod', 'cache')], 'Go build & module cache.'),
+      makeTarget('go', 'Go build/mod cache', 'Developer', 'go', [lib('Caches', 'go-build'), goModCache(ctx, join('go', 'pkg', 'mod'))], 'Go build cache and downloaded modules. Re-downloads on the next build.'),
       makeTarget('deno', 'Deno cache', 'Developer', 'flash', [lib('Caches', 'deno')], 'Deno dependency cache.'),
+      makeTarget('huggingface', 'Hugging Face models', 'Developer', 'cpu', [huggingFaceHome(ctx, join('.cache', 'huggingface'))], HF_DESCRIPTION, { safe: false }),
     ];
   }
 
@@ -77,13 +109,17 @@ function buildDeveloperTargets(ctx) {
       makeTarget('yarn', 'Yarn cache', 'Developer', 'node', [join('.cache', 'yarn')], 'Yarn package cache.'),
       makeTarget('pnpm', 'pnpm store', 'Developer', 'node', [join('.local', 'share', 'pnpm', 'store')], 'pnpm content-addressable store.'),
       makeTarget('gradle', 'Gradle cache', 'Developer', 'gradle', [join('.gradle', 'caches')], 'Global Gradle build cache & downloaded deps.'),
+      makeTarget('gradle-wrapper', 'Gradle wrapper downloads', 'Developer', 'gradle', [join('.gradle', 'wrapper', 'dists')], 'Gradle distributions fetched by project wrappers. Re-downloads on the next build.'),
       makeTarget('maven', 'Maven repository', 'Developer', 'java', [join('.m2', 'repository')], 'Downloaded Maven artifacts. Re-downloads on build.'),
+      makeTarget('nuget', 'NuGet packages', 'Developer', 'box', [join('.nuget', 'packages')], 'Downloaded NuGet packages. Re-downloads on restore.'),
       makeTarget('cargo', 'Cargo registry', 'Developer', 'rust', [join('.cargo', 'registry', 'cache'), join('.cargo', 'registry', 'src')], 'Rust crate cache.'),
       makeTarget('pip', 'pip cache', 'Developer', 'python', [join('.cache', 'pip')], 'Python pip download cache.'),
-      makeTarget('go', 'Go build/mod cache', 'Developer', 'go', [join('.cache', 'go-build'), join('go', 'pkg', 'mod', 'cache')], 'Go build & module cache.'),
+      makeTarget('go', 'Go build/mod cache', 'Developer', 'go', [join('.cache', 'go-build'), goModCache(ctx, join('go', 'pkg', 'mod'))], 'Go build cache and downloaded modules. Re-downloads on the next build.'),
       makeTarget('pub', 'Dart/Flutter pub', 'Developer', 'flutter', [join('.pub-cache', 'hosted')], 'Dart/Flutter downloaded packages.'),
+      makeTarget('dart-server', 'Dart analysis server', 'Developer', 'flutter', [join('.dartServer')], 'Dart and Flutter analysis cache. Rebuilds the next time your editor analyses code.'),
       makeTarget('bun', 'Bun cache', 'Developer', 'flash', [join('.bun', 'install', 'cache')], 'Bun install cache.'),
       makeTarget('deno', 'Deno cache', 'Developer', 'flash', [join('.cache', 'deno')], 'Deno dependency cache.'),
+      makeTarget('huggingface', 'Hugging Face models', 'Developer', 'cpu', [huggingFaceHome(ctx, join('.cache', 'huggingface'))], HF_DESCRIPTION, { safe: false }),
     ];
   }
 
@@ -91,13 +127,17 @@ function buildDeveloperTargets(ctx) {
   return [
     makeTarget('npm', 'npm cache', 'Developer', 'node', [from(local, 'npm-cache')], 'Downloaded npm package tarballs. Rebuilds on next install.'),
     makeTarget('yarn', 'Yarn cache', 'Developer', 'node', [from(local, 'Yarn', 'Cache')], 'Yarn package cache.'),
+    makeTarget('pnpm', 'pnpm store', 'Developer', 'node', [from(local, 'pnpm', 'store')], 'pnpm content-addressable store.'),
     makeTarget('gradle', 'Gradle cache', 'Developer', 'gradle', [winJoin('.gradle', 'caches')], 'Global Gradle build cache & downloaded deps.'),
+    makeTarget('gradle-wrapper', 'Gradle wrapper downloads', 'Developer', 'gradle', [winJoin('.gradle', 'wrapper', 'dists')], 'Gradle distributions fetched by project wrappers. Re-downloads on the next build.'),
     makeTarget('maven', 'Maven repository', 'Developer', 'java', [winJoin('.m2', 'repository')], 'Downloaded Maven artifacts. Re-downloads on build.'),
     makeTarget('cargo', 'Cargo registry', 'Developer', 'rust', [winJoin('.cargo', 'registry', 'cache'), winJoin('.cargo', 'registry', 'src')], 'Rust crate cache.'),
     makeTarget('pip', 'pip cache', 'Developer', 'python', [from(local, 'pip', 'Cache')], 'Python pip download cache.'),
-    makeTarget('go', 'Go build/mod cache', 'Developer', 'go', [from(local, 'go-build'), winJoin('go', 'pkg', 'mod', 'cache')], 'Go build & module cache.'),
+    makeTarget('go', 'Go build/mod cache', 'Developer', 'go', [from(local, 'go-build'), goModCache(ctx, winJoin('go', 'pkg', 'mod'))], 'Go build cache and downloaded modules. Re-downloads on the next build.'),
     makeTarget('nuget', 'NuGet packages', 'Developer', 'box', [winJoin('.nuget', 'packages')], 'Downloaded NuGet packages. Re-downloads on restore.'),
+    makeTarget('dart-server', 'Dart analysis server', 'Developer', 'flutter', [from(local, '.dartServer')], 'Dart and Flutter analysis cache. Rebuilds the next time your editor analyses code.'),
     makeTarget('bun', 'Bun cache', 'Developer', 'flash', [winJoin('.bun', 'install', 'cache')], 'Bun install cache.'),
+    makeTarget('huggingface', 'Hugging Face models', 'Developer', 'cpu', [huggingFaceHome(ctx, winJoin('.cache', 'huggingface'))], HF_DESCRIPTION, { safe: false }),
   ];
 }
 
@@ -114,13 +154,14 @@ function buildSystemTargets(options = {}) {
       makeTarget('xcode-devicesupport', 'iOS DeviceSupport', 'Xcode', 'apple', [lib('Developer', 'Xcode', 'iOS DeviceSupport')], 'Cached symbols per iOS version. Regenerates when you attach a device.', { storyCategory: 'xcode' }),
       makeTarget('simulator-caches', 'Simulator caches', 'Xcode', 'apple', [lib('Developer', 'CoreSimulator', 'Caches')], 'Core Simulator caches.', { storyCategory: 'xcode' }),
       makeTarget('user-caches', 'Other app caches', 'System', 'broom-2', [lib('Caches')], 'Generic per-app caches after known developer and browser caches are counted separately.', { storyCategory: 'caches' }),
+      makeTarget('cli-cache', 'Command-line tool caches', 'System', 'database', [join('.cache')], 'Caches command-line tools keep in ~/.cache, after known developer caches are counted separately.', { storyCategory: 'caches', protect: ['huggingface'] }),
       makeTarget('user-logs', 'User logs', 'System', 'log', [lib('Logs')], 'Application log files.', { storyCategory: 'caches' }),
       makeTarget('trash', 'Trash', 'System', 'trash', [join('.Trash')], 'Files in the Trash.', { storyCategory: 'system' }),
       makeTarget('saved-state', 'Saved app state', 'System', 'grid', [lib('Saved Application State')], 'Window restore state. Apps just open fresh.', { storyCategory: 'system' }),
     );
   } else if (platform === 'linux') {
     targets.push(
-      makeTarget('user-cache', 'Other user cache', 'System', 'database', [join('.cache')], 'Generic per-user cache after known developer and browser caches are counted separately.', { storyCategory: 'caches' }),
+      makeTarget('user-cache', 'Other user cache', 'System', 'database', [join('.cache')], 'Generic per-user cache after known developer and browser caches are counted separately.', { storyCategory: 'caches', protect: ['huggingface'] }),
       makeTarget('trash', 'Trash', 'System', 'trash', [join('.local', 'share', 'Trash', 'files'), join('.local', 'share', 'Trash', 'info')], 'Files in the Trash.', { storyCategory: 'system' }),
       makeTarget('thumbnails', 'Thumbnails', 'System', 'image', [join('.cache', 'thumbnails')], 'Cached image thumbnails. Regenerated on demand.', { storyCategory: 'caches' }),
     );
@@ -133,10 +174,13 @@ function buildSystemTargets(options = {}) {
     );
   }
 
-  return targets.concat(buildBrowserTargets(ctx).map((t) => ({
-    ...t,
-    storyCategory: 'browsers',
-  }))).filter((t) => t.paths.length > 0);
+  return targets
+    .concat(buildAiToolTargets(ctx))
+    .concat(buildBrowserTargets(ctx).map((t) => ({
+      ...t,
+      storyCategory: 'browsers',
+    })))
+    .filter((t) => t.paths.length > 0);
 }
 
 function buildProjectRoots(home) {
@@ -177,7 +221,7 @@ function buildStoryCategories(options = {}) {
 
   const cacheDirs =
     platform === 'darwin'
-      ? [join('Library', 'Caches'), join('Library', 'Logs')]
+      ? [join('Library', 'Caches'), join('Library', 'Logs'), join('.cache')]
       : platform === 'linux'
         ? [join('.cache')]
         : [env.TEMP, from(env.LOCALAPPDATA, 'Temp')];
@@ -189,6 +233,7 @@ function buildStoryCategories(options = {}) {
 
   return [
     storyDef('developer', developerDirs, pathsByStory),
+    storyDef('aitools', pathsByStory.get('aitools') || [], pathsByStory),
     storyDef('applications', appDirs, pathsByStory),
     storyDef('appdata', appDataDirs, pathsByStory),
     storyDef('caches', cacheDirs, pathsByStory),
@@ -209,7 +254,9 @@ function storyDef(key, dirs, pathsByStory) {
       if (childKey !== 'caches') subtractDirs.push(...paths);
     }
   } else if (key === 'appdata') {
-    subtractDirs.push(...(pathsByStory.get('browsers') || []));
+    // Browsers and AI tools (Cursor, Zed, Windsurf) keep data under
+    // Application Support; count it in their own story, not twice.
+    subtractDirs.push(...(pathsByStory.get('browsers') || []), ...(pathsByStory.get('aitools') || []));
   }
   return { key, ...meta, dirs: uniq(dirs), subtractDirs: uniq(subtractDirs) };
 }
