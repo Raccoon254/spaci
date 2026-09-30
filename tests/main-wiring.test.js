@@ -1163,3 +1163,84 @@ test('notice notifications honour the notify pref; the notice itself still reach
     m.cleanup();
   }
 });
+
+// ---- clean tiers and auto-clean ----
+test('clean tiers and auto-clean IPC: bridged, tiers trust main, approve and undo are main-owned', async () => {
+  const ac = require('../src/auto-clean');
+  const hl = require('../src/history-log');
+  const channels = ['tiers:get', 'autoclean:get', 'autoclean:set', 'autoclean:approve', 'autoclean:undo', 'autoclean:preview'];
+  const preload = fs.readFileSync(path.join(SRC, 'preload.js'), 'utf8');
+  const bridged = [...preload.matchAll(/invoke\('((?:tiers|autoclean):[a-z]+)'/g)].map((x) => x[1]).sort();
+  assert.deepEqual(bridged, [...channels].sort());
+  assert.match(preload, /sub\('autoclean:updated'/);
+
+  const dir = tmpTree('spaci-ac-wiring-');
+  const proj = path.join(dir, 'app');
+  const nm = path.join(proj, 'node_modules');
+  fs.mkdirSync(path.join(nm, 'dep'), { recursive: true });
+  fs.writeFileSync(path.join(nm, 'dep', 'index.js'), 'dep');
+  const NPM = { id: 'npm', name: 'npm cache', category: 'Developer', safe: true, reversible: true, mode: 'contents', paths: [path.join(dir, 'npm')] };
+  const TRASH = { id: 'trash', name: 'Trash', safe: false, reversible: false, mode: 'contents', paths: [path.join(dir, 'Trash')] };
+  const m = loadMain(undefined, { system: { TARGETS: [NPM, TRASH] } });
+  try {
+    for (const ch of channels) assert.equal(typeof m.handlers[ch], 'function', ch);
+    await scanInto(m, [{ path: proj, items: [{ name: 'node_modules', path: nm, size: 10, safe: true, reversible: true }, { name: 'dist', path: path.join(proj, 'dist'), size: 5, safe: false }], cleanableSize: 10 }]);
+
+    // The renderer claims dist is safe and the Trash is safe: main disagrees.
+    const shown = {
+      projects: [{ path: proj, items: [{ name: 'node_modules', path: nm, size: 10, safe: true }, { name: 'dist', path: path.join(proj, 'dist'), size: 5, safe: true }] }],
+      sysTargets: [{ id: 'npm', safe: true, size: 7, existingPaths: ['/etc'] }, { id: 'trash', safe: true, reversible: true, size: 3 }],
+    };
+    const t = await m.handlers['tiers:get']({}, shown);
+    assert.equal(t.tiers.items[nm].tier, 'A');
+    assert.equal(t.tiers.items[path.join(proj, 'dist')].tier, 'B');
+    assert.equal(t.tiers.system.trash.tier, 'C');
+    assert.equal(t.tiers.system.npm.tier, 'A');
+    assert.ok(!t.planA.jobs.some((j) => j.path === '/etc'), 'target paths come from main, never the renderer');
+    assert.deepEqual(t.planA.jobs.map((j) => j.path), [nm]);
+    assert.equal(t.badges.C.text, 'Permanent');
+    assert.equal((await m.handlers['tiers:get']({}, 'junk')).planA.count, 0);
+
+    // Settings: off by default; approved and pendingPreview cannot be set by the renderer.
+    let st = await m.handlers['autoclean:get']();
+    assert.equal(st.settings.enabled, false);
+    st = await m.handlers['autoclean:set']({}, { enabled: true, staleDays: 3, approved: { at: 1, rules: 'x' }, pendingPreview: 'evil' });
+    assert.equal(st.settings.enabled, true);
+    assert.equal(st.settings.staleDays, 7, 'clamped');
+    assert.equal(st.settings.approved, null);
+    assert.equal(st.pendingPreview, null);
+
+    // Approve: only the pending preview, and only for the current rules.
+    const rules = ac.rulesFingerprint(st.settings);
+    const acFile = path.join(m.userData, 'auto-clean.json');
+    fs.writeFileSync(acFile, JSON.stringify({ settings: { ...st.settings, pendingPreview: 'prev-1' } }));
+    const histFile = path.join(m.userData, 'history.json');
+    fs.writeFileSync(histFile, JSON.stringify([hl.finishedEntry({ id: 'prev-1', at: 1, finishedAt: 1, scope: 'auto-clean', label: 'Auto-clean preview', items: [], extra: { autoClean: { dryRun: true, rules } } })]));
+    assert.equal((await m.handlers['autoclean:approve']({}, 'other')).ok, false);
+    const ok = await m.handlers['autoclean:approve']({}, 'prev-1');
+    assert.equal(ok.ok, true);
+    assert.equal(ok.state.approved, true);
+    assert.ok(JSON.parse(fs.readFileSync(histFile, 'utf8'))[0].autoClean.approvedAt > 0);
+    // Changing a rule voids the approval.
+    st = await m.handlers['autoclean:set']({}, { staleDays: 60 });
+    assert.equal(st.approved, false);
+
+    // Undo: a staged run in userData goes back, and History says so.
+    const staging = ac.createStaging({ root: path.join(m.userData, '.cache', 'auto-clean-staging'), removeTree: async () => {} });
+    const run = staging.beginRun('ac-run-0001');
+    assert.equal(staging.stage(run, nm, { bytes: 10, kind: 'artifact' }).ok, true);
+    assert.equal(fs.existsSync(nm), false);
+    const item = { path: nm, kind: 'artifact', outcome: 'trashed', bytes: 10, reversible: 'rebuild', project: proj };
+    fs.writeFileSync(histFile, JSON.stringify([hl.finishedEntry({ id: 'ac-run-0001', at: 2, finishedAt: 2, scope: 'auto-clean', label: 'Auto-clean', items: [item], extra: { autoClean: { runId: 'ac-run-0001', stagedUntil: Date.now() + 1000 } } })]));
+    assert.equal((await m.handlers['autoclean:undo']({}, 'nope')).ok, false);
+    const u = await m.handlers['autoclean:undo']({}, 'ac-run-0001');
+    assert.deepEqual([u.ok, u.restored, u.conflicts], [true, 1, 0]);
+    assert.equal(fs.readFileSync(path.join(nm, 'dep', 'index.js'), 'utf8'), 'dep');
+    const [entry] = JSON.parse(fs.readFileSync(histFile, 'utf8'));
+    assert.ok(entry.autoClean.undoneAt > 0);
+    assert.equal(entry.items[0].reason, 'Put back by Undo.');
+    assert.equal(entry.trashedBytes, 0);
+    assert.equal((await m.handlers['autoclean:undo']({}, 'ac-run-0001')).restored, 0, 'twice is harmless');
+  } finally { m.cleanup(); }
+});
+// ---- end clean tiers and auto-clean ----

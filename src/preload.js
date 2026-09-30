@@ -77,6 +77,16 @@ contextBridge.exposeInMainWorld('api', {
   onEnrichUpdated: (cb) => sub('enrich:updated', cb),
   onBgScan: (cb) => sub('bg:scan', cb),
   onBreakdownUpdated: (cb) => sub('disk:breakdown-updated', cb),
+
+  // ---- clean tiers and auto-clean ----
+  cleanTiers: (payload) => ipcRenderer.invoke('tiers:get', payload),
+  autoCleanGet: () => ipcRenderer.invoke('autoclean:get'),
+  autoCleanSet: (patch) => ipcRenderer.invoke('autoclean:set', patch),
+  autoCleanApprove: (previewId) => ipcRenderer.invoke('autoclean:approve', previewId),
+  autoCleanUndo: (runId) => ipcRenderer.invoke('autoclean:undo', runId),
+  autoCleanPreview: () => ipcRenderer.invoke('autoclean:preview'),
+  onAutoCleanUpdated: (cb) => sub('autoclean:updated', cb),
+  // ---- end clean tiers and auto-clean ----
 });
 
 function sub(channel, cb) {

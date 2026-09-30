@@ -1253,3 +1253,327 @@ ipcMain.handle('notices:dismiss', (_e, id) => (noticesService ? noticesService.d
 ipcMain.handle('notices:open', (_e, id) => (noticesService ? noticesService.open(id) : null));
 ipcMain.handle('whatsnew:get', () => (noticesService ? noticesService.whatsNew() : null));
 ipcMain.handle('whatsnew:seen', (_e, version) => (noticesService ? noticesService.whatsNewSeen(version) : false));
+
+// ---- clean tiers and auto-clean ----
+// Tiers (clean-tiers.js) for the renderer's badges and "Clean all developer
+// files", and the opt-in auto-clean (auto-clean.js): its settings, scheduler,
+// staging folder, undo and purge. Only wiring lives here; the policy is tested
+// in tests/clean-tiers.test.js and tests/auto-clean.test.js. Cleaning itself
+// still goes through the 'clean' handler above (the renderer's Clean all), or
+// through clean-plan + clean-guard below (auto-clean), so the guard, the
+// revalidation of project folders and the confirmation gate stay authoritative.
+const cleanTiers = require('./clean-tiers');
+const autoClean = require('./auto-clean');
+
+/** Main's own view, which wins over whatever the renderer shows. */
+function tierTrust() {
+  const targetsById = new Map(system.TARGETS.map((t) => [t.id, t]));
+  const itemsByPath = new Map();
+  for (const p of cache.projects || []) for (const it of (p && p.items) || []) if (it && it.path) itemsByPath.set(it.path, it);
+  return { targetsById, itemsByPath };
+}
+
+// api.cleanTiers({ projects, sysTargets }) -> { tiers, planA, badges }.
+// A system target's paths always come from main's cache, never the renderer.
+ipcMain.handle('tiers:get', (_e, payload) => {
+  const shown = payload && typeof payload === 'object' ? payload : {};
+  const cachedById = new Map((cache.system || []).map((t) => [t && t.id, t]));
+  const input = {
+    projects: Array.isArray(shown.projects) ? shown.projects : [],
+    sysTargets: (Array.isArray(shown.sysTargets) ? shown.sysTargets : []).filter((t) => t && typeof t.id === 'string').map((t) => {
+      const c = cachedById.get(t.id);
+      return { ...t, existingPaths: c && Array.isArray(c.existingPaths) ? c.existingPaths : [], paths: c && Array.isArray(c.paths) ? c.paths : [] };
+    }),
+  };
+  const tiers = cleanTiers.classifyScan(input, tierTrust());
+  return { tiers, planA: cleanTiers.planTierA(input, tiers), badges: cleanTiers.BADGES };
+});
+
+const AUTOCLEAN_PATH = path.join(app.getPath('userData'), 'auto-clean.json');
+// Same volume as userData. Under a `.cache` folder because the project scan
+// never descends into one (scanner EXCLUDED_DIRS; covered by a test), and on
+// macOS userData is under ~/Library, which it skips too.
+const AUTOCLEAN_STAGING = path.join(app.getPath('userData'), '.cache', 'auto-clean-staging');
+function readAutoClean() {
+  try { const v = JSON.parse(fs.readFileSync(AUTOCLEAN_PATH, 'utf8')); return v && typeof v === 'object' ? v : {}; } catch { return {}; }
+}
+function writeAutoClean(v) {
+  try { writeFileAtomic(AUTOCLEAN_PATH, JSON.stringify(v)); } catch (e) { console.error('[auto-clean] save failed', e && e.message); }
+}
+function acSettings() { return autoClean.sanitizeSettings(readAutoClean().settings); }
+function acSaveSettings(s) { writeAutoClean({ ...readAutoClean(), settings: autoClean.sanitizeSettings(s) }); }
+
+const acStaging = autoClean.createStaging({ root: AUTOCLEAN_STAGING, removeTree: (p) => cleaner.deletePath(p), log: console });
+let acScheduler = null;
+let acBusy = false;
+let acPurgeTimer = null;
+
+function acEmit(channel, payload) {
+  try { if (win && !win.isDestroyed()) win.webContents.send(channel, payload); } catch (_) { /* window gone */ }
+}
+
+function acConditions() {
+  const safe = (fn, d) => { try { const v = fn(); return v === undefined ? d : v; } catch (_) { return d; } };
+  return {
+    // Unknown power state reads as battery, unknown idle time as busy: the gate fails closed.
+    onBattery: safe(() => (typeof powerMonitor.isOnBatteryPower === 'function' ? powerMonitor.isOnBatteryPower() : powerMonitor.onBatteryPower), null),
+    idleSeconds: safe(() => (typeof powerMonitor.getSystemIdleTime === 'function' ? powerMonitor.getSystemIdleTime() : null), null),
+    thermalState: safe(() => (typeof powerMonitor.getCurrentThermalState === 'function' ? powerMonitor.getCurrentThermalState() : 'unknown'), 'unknown'),
+    busy: scanCoordinator.busy() || acBusy,
+  };
+}
+
+/** Unattended jobs through the same gate and guard as a manual clean, never confirmed. */
+async function acGuard(jobs) {
+  const projectPaths = new Set();
+  for (const p of cache.projects || []) for (const it of (p && p.items) || []) if (it && it.path) projectPaths.add(it.path);
+  const known = new Set([...TARGET_INDEX.keys(), ...projectPaths]);
+  const planCtx = cleanPlan.buildPlanContext({ targetIndex: TARGET_INDEX, projects: cache.projects || [] });
+  const gate = cleanPlan.gateJobs(jobs, planCtx, false);
+  const guarded = await cleanGuard.enforceTargetRules(gate.pass, {
+    index: TARGET_INDEX,
+    toolStatus: () => work('aiToolStatus').catch(() => ({ ok: false, running: [] })),
+    known,
+    projectPaths,
+    // Unattended, a folder must be verified by git right now, not just "unambiguous".
+    revalidate: async (p) => {
+      const v = await work('revalidateArtifact', [p]).catch(() => null);
+      return v && v.ok === true && v.verified === true ? v : { ok: false, reason: (v && v.reason) || 'Git could not vouch for it just now, so auto-clean left it.' };
+    },
+  });
+  return { allowed: guarded.allowed, refused: [...gate.refused, ...guarded.refused] };
+}
+
+async function acEvidence(projects, settings) {
+  const evidence = new Map();
+  const itemEvidence = new Map();
+  const staleMs = settings.staleDays * 24 * HOUR;
+  for (const p of projects) {
+    if (isQuitting) break;
+    const a = ((p && p.items) || []).filter((it) => cleanTiers.tierOfProjectItem(it).tier === 'A');
+    if (!a.length) continue;
+    evidence.set(p.path, await autoClean.projectEvidence(p.path, { now: Date.now(), staleMs }));
+    for (const it of a) {
+      const ie = await autoClean.itemEvidence(it.path);
+      if (ie) itemEvidence.set(it.path, ie);
+    }
+  }
+  return { evidence, itemEvidence };
+}
+
+function acNotify(title, body) {
+  if (!notificationsAllowed()) return;
+  try {
+    const n = new Notification({ title, body });
+    liveNotifications.add(n);
+    const release = () => liveNotifications.delete(n);
+    n.on('click', () => { release(); showWin(); acEmit('nav:go', 'history'); });
+    n.on('close', release);
+    n.show();
+  } catch (e) { console.error('[auto-clean] notification failed', e && e.message); }
+}
+
+/** Staged paths leave the cached scan, so no screen offers them again. */
+function acForget(paths) {
+  if (!paths || !paths.length) return;
+  const set = new Set(paths);
+  for (const p of cache.projects || []) {
+    if (!p || !Array.isArray(p.items)) continue;
+    const n = p.items.length;
+    p.items = p.items.filter((it) => !set.has(it.path));
+    if (p.items.length !== n) p.cleanableSize = p.items.filter((i) => i.safe === true).reduce((s, i) => s + (i.size || 0), 0);
+  }
+  for (const t of cache.system || []) if (t && (t.existingPaths || []).some((x) => set.has(x))) t.size = 0;
+  writeCache();
+  acEmit('cache:updated', { scannedAt: cache.scannedAt });
+}
+
+function acDeps(overrides = {}) {
+  return {
+    getSettings: acSettings,
+    saveSettings: acSaveSettings,
+    getScan: () => ({ projects: cache.projects || [], system: cache.system || [] }),
+    gatherEvidence: acEvidence,
+    snapshot: () => autoClean.snapshotProcesses(),
+    aiToolStatus: () => work('aiToolStatus').catch(() => ({ ok: false, running: [] })),
+    guard: acGuard,
+    staging: acStaging,
+    historyLog,
+    putHistory,
+    notify: acNotify,
+    stillOk: () => {
+      if (isQuitting) return 'Spaci is quitting.';
+      const c = acConditions();
+      if (c.onBattery !== false) return 'the computer went on battery power.';
+      if (typeof c.idleSeconds !== 'number' || c.idleSeconds < 60) return 'you started using the computer.';
+      return null;
+    },
+    listChildren: (dir) => fsp.readdir(dir),
+    restoreHint: (c) => (c.kind === 'artifact'
+      ? restoreHints.artifactRestoreHint(c.path, [], [])
+      : restoreHints.systemRestoreHint(TARGET_INDEX.get(c.path))),
+    newId: () => 'ac-' + newHistoryId(),
+    onStaged: acForget,
+    ...overrides,
+  };
+}
+
+async function acRun() {
+  if (isQuitting) return { status: 'closed' };
+  acBusy = true;
+  try {
+    const res = await autoClean.runAutoClean(acDeps());
+    writeAutoClean({ ...readAutoClean(), lastRun: { at: Date.now(), status: res.status, dryRun: Boolean(res.dryRun), count: res.count || 0, bytes: res.bytes || 0, historyId: res.historyId || res.runId || null, stopped: res.stopped || null } });
+    acEmit('autoclean:updated', { reason: 'run' });
+    return res;
+  } finally {
+    acBusy = false;
+  }
+}
+
+function acGate(force) {
+  const s = acSettings();
+  if (s.enabled && s.pendingPreview && !autoClean.isApproved(s)) return { run: false, reason: 'awaiting-approval' };
+  return autoClean.autoCleanGate({ settings: s, onboarded: Boolean(loadPrefs().onboarded), force, ...acConditions() });
+}
+
+/** Rewrite a run's history entry once staging is gone: staged becomes removed (freed). */
+function acMarkPurged(done) {
+  if (!done || !done.length) return;
+  const byRun = new Map(done.map((d) => [d.runId, d]));
+  for (const e of readHistory()) {
+    if (!e || !e.autoClean || !byRun.has(e.autoClean.runId) || e.autoClean.purgedAt) continue;
+    const items = (e.items || []).map((it) => (it.outcome === 'trashed' ? { ...it, outcome: 'removed' } : it));
+    putHistory(historyLog.finishedEntry({
+      id: e.id, at: e.at, finishedAt: e.finishedAt || Date.now(), status: e.status === 'interrupted' ? 'interrupted' : 'done',
+      scope: e.scope, label: e.label, requested: e.requested, items,
+      extra: { autoClean: { ...e.autoClean, purgedAt: Date.now() } },
+    }));
+  }
+  acEmit('autoclean:updated', { reason: 'purged' });
+}
+
+async function acPurge() {
+  try { acMarkPurged(await acStaging.purge()); } catch (e) { console.error('[auto-clean] purge failed', e && e.message); }
+}
+
+function acState() {
+  const s = acSettings();
+  const st = readAutoClean();
+  return {
+    settings: s,
+    approved: autoClean.isApproved(s),
+    pendingPreview: s.pendingPreview,
+    lastRun: st.lastRun || null,
+    staged: acStaging.list(),
+    nextDue: acScheduler && s.enabled ? acScheduler.nextDue() : null,
+    lastDecision: acScheduler ? acScheduler.lastDecision : null,
+  };
+}
+
+ipcMain.handle('autoclean:get', () => acState());
+
+// Settings screen. approved and pendingPreview are main's own and never taken
+// from the renderer; a changed rule drops a pending preview so a new dry run
+// asks again.
+ipcMain.handle('autoclean:set', (_e, patch) => {
+  const cur = acSettings();
+  const p = patch && typeof patch === 'object' ? { ...patch } : {};
+  delete p.approved;
+  delete p.pendingPreview;
+  const next = autoClean.sanitizeSettings({ ...cur, ...p, approved: cur.approved, pendingPreview: cur.pendingPreview });
+  if (autoClean.rulesFingerprint(next) !== autoClean.rulesFingerprint(cur)) next.pendingPreview = null;
+  acSaveSettings(next);
+  if (acScheduler) acScheduler.reschedule();
+  return acState();
+});
+
+// History: approve the dry run the user is looking at, and only that one.
+ipcMain.handle('autoclean:approve', (_e, previewId) => {
+  const s = acSettings();
+  if (!s.pendingPreview || s.pendingPreview !== previewId) return { ok: false, error: 'This preview is out of date. A new one runs with your current rules.' };
+  const entry = readHistory().find((h) => h && h.id === previewId);
+  if (!entry || !entry.autoClean || entry.autoClean.rules !== autoClean.rulesFingerprint(s)) {
+    acSaveSettings({ ...s, pendingPreview: null });
+    return { ok: false, error: 'Your rules changed since this preview. A new one runs with your current rules.' };
+  }
+  acSaveSettings({ ...s, pendingPreview: null, approved: { at: Date.now(), rules: autoClean.rulesFingerprint(s), previewId } });
+  putHistory({ ...entry, autoClean: { ...entry.autoClean, approvedAt: Date.now() } });
+  if (acScheduler) acScheduler.reschedule();
+  acEmit('autoclean:updated', { reason: 'approved' });
+  return { ok: true, state: acState() };
+});
+
+// History: undo one auto-clean run while its staging folder exists.
+ipcMain.handle('autoclean:undo', async (_e, runId) => {
+  if (typeof runId !== 'string') return { ok: false, error: 'Unknown auto-clean run.' };
+  const entry = readHistory().find((h) => h && h.id === runId && h.autoClean && h.autoClean.runId === runId);
+  if (!entry) return { ok: false, error: 'Unknown auto-clean run.' };
+  if (acBusy) return { ok: false, error: 'Auto-clean is running. Try again in a moment.' };
+  const r = acStaging.restore(runId);
+  if (r.error) return { ok: false, error: r.error };
+  const m = acStaging.readManifest(runId);
+  const entries = (m && m.entries) || [];
+  // A history item is one folder (an artifact) or one cache (its children).
+  const belongs = (it, e) => e.src === it.path || path.dirname(e.src) === it.path;
+  const items = (entry.items || []).map((it) => {
+    if (it.outcome !== 'trashed') return it;
+    const mine = entries.filter((e) => belongs(it, e));
+    if (mine.length && mine.every((e) => e.state === 'restored' || e.state === 'skipped' || e.state === 'missing') && mine.some((e) => e.state === 'restored')) {
+      return { ...it, outcome: 'refused', bytes: 0, reason: 'Put back by Undo.' };
+    }
+    return it;
+  });
+  putHistory(historyLog.finishedEntry({
+    id: entry.id, at: entry.at, finishedAt: entry.finishedAt || Date.now(), status: entry.status === 'interrupted' ? 'interrupted' : 'done',
+    scope: entry.scope, label: entry.label, requested: entry.requested, items,
+    extra: { autoClean: { ...entry.autoClean, undoneAt: Date.now(), restored: r.restored.length, conflicts: r.conflicts.length, undoFailed: r.failed.length } },
+  }));
+  acEmit('autoclean:updated', { reason: 'undo' });
+  // The put-back folders are not in the cached scan any more: rescan.
+  if (bgScheduler) bgScheduler.runNow();
+  return { ok: r.ok, restored: r.restored.length, conflicts: r.conflicts.length, failed: r.failed.length, conflictReasons: r.conflicts.map((e) => ({ path: e.src, reason: e.reason })) };
+});
+
+// Settings: what auto-clean would take right now, ignoring power and idle.
+// Read only: nothing is moved and nothing is logged.
+ipcMain.handle('autoclean:preview', async () => {
+  const s = acSettings();
+  const scan = { projects: cache.projects || [], system: cache.system || [] };
+  const [ev, procs, ai] = await Promise.all([
+    acEvidence(scan.projects, s), autoClean.snapshotProcesses(), work('aiToolStatus').catch(() => ({ ok: false, running: [] })),
+  ]);
+  const sel = autoClean.selectCandidates({ ...scan, settings: s, now: Date.now(), evidence: ev.evidence, itemEvidence: ev.itemEvidence, procs, aiTools: ai });
+  return {
+    count: sel.count, bytes: sel.bytes,
+    candidates: sel.candidates.slice(0, 50).map((c) => ({ path: c.path, bytes: c.bytes, rule: c.rule, group: c.group })),
+    skipped: sel.skipped.filter((x) => !x.quiet).slice(0, 50).map((x) => ({ path: x.path, reason: x.reason })),
+  };
+});
+
+app.whenReady().then(() => {
+  if (!isPrimary || !bgScheduler || isQuitting) return; // startApp did not run (quitting or moving)
+  try { acStaging.recover(); } catch (e) { console.error('[auto-clean] recover failed', e && e.message); }
+  acPurge();
+  acPurgeTimer = setInterval(acPurge, HOUR);
+  if (acPurgeTimer && acPurgeTimer.unref) acPurgeTimer.unref();
+  acScheduler = createScheduler({
+    name: 'auto-clean',
+    task: acRun,
+    getConfig: () => ({ intervalMs: 12 * HOUR }),
+    gate: acGate,
+    getState: () => readAutoClean().schedule || {},
+    saveState: (st) => writeAutoClean({ ...readAutoClean(), schedule: { lastCompletedAt: st.lastCompletedAt || 0, lastAttemptAt: st.lastAttemptAt || 0, failures: st.failures || 0 } }),
+    // Never at login: wait a few minutes, then check every quarter hour for idle.
+    options: { startupDelayMs: 5 * MIN, deferMs: 15 * MIN, runTimeoutMs: 45 * MIN },
+  });
+  acScheduler.start();
+  for (const ev of ['resume', 'on-ac']) {
+    try { powerMonitor.on(ev, () => { if (acScheduler) acScheduler.wake(); }); } catch (_) { /* not supported here */ }
+  }
+}).catch((e) => console.error('[auto-clean] start failed', e && e.message));
+app.on('before-quit', () => {
+  if (acScheduler) acScheduler.stop();
+  if (acPurgeTimer) clearInterval(acPurgeTimer);
+});
+// ---- end clean tiers and auto-clean ----
