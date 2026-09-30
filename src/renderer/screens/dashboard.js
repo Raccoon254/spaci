@@ -126,7 +126,7 @@
       style: 'height:54px;padding:0 26px;border-radius:14px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:15px;display:flex;align-items:center;gap:9px;cursor:pointer',
       hov: 'background:var(--panel-3)',
       onclick: () => SP.go('recommendations')
-    }, ['Review', ic('arrow-right', 16)]);
+    }, ['Review', ic('chevron-right', 16)]);
 
     host.appendChild(
       el('div', { style: 'display:flex;align-items:center;gap:46px;padding:38px 44px;background:var(--panel);border:1px solid var(--border);border-radius:22px;box-shadow:var(--shadow-md);position:relative;overflow:hidden' }, [
@@ -154,7 +154,7 @@
           bannerHead,
           el('div', { style: 'color:var(--text-2);font-size:13.5px;margin-top:2px', text: bannerSub })
         ]),
-        el('button', { style: 'height:46px;padding:0 22px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer', hov: 'background:var(--accent-hover)', onclick: () => (totalReclaim ? SP.go('recommendations') : window.SP_doScan && window.SP_doScan()) }, [totalReclaim ? 'See how' : 'Scan now', ic('arrow-right', 15)])
+        el('button', { style: 'height:46px;padding:0 22px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer', hov: 'background:var(--accent-hover)', onclick: () => (totalReclaim ? SP.go('recommendations') : window.SP_doScan && window.SP_doScan()) }, [totalReclaim ? 'See how' : 'Scan now', ic('chevron-right', 15)])
       ])
     );
 
@@ -171,7 +171,7 @@
       el('div', { style: 'margin-top:16px' }, [
         el('div', { class: 'sp-hov', style: 'background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:22px;box-shadow:var(--shadow-sm);cursor:pointer', hov: 'border-color:var(--border-2)', onclick: () => SP.go('storage') }, [
           el('div', { style: 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:18px' }, [
-            el('div', { style: 'font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px' }, ['Storage breakdown', ic('arrow-right', 15, { color: 'var(--text-4)' })]),
+            el('div', { style: 'font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px' }, ['Storage breakdown', ic('chevron-right', 15, { color: 'var(--text-4)' })]),
             el('div', { style: 'font-size:13px;color:var(--text-3)', text: fmt(d.used) + ' of ' + fmt(d.total) })
           ]),
           bar,

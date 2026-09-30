@@ -357,7 +357,7 @@
         style: 'height:36px;padding:0 13px 0 11px;border-radius:9px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;display:inline-flex;align-items:center;gap:7px;cursor:pointer;font-family:inherit;margin-bottom:18px',
         hov: 'background:var(--panel);color:var(--text)',
         onclick: () => SP.go('history')
-      }, [ic('arrow-left', 16), 'History'])
+      }, [ic('chevron-left', 16), 'History'])
     );
 
     // header: scope icon + name + badge + when + freed total

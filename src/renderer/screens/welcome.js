@@ -114,7 +114,7 @@
         style: 'height:54px;padding:0 32px;border-radius:14px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:16px;display:inline-flex;align-items:center;gap:11px;cursor:pointer;font-family:inherit',
         hov: 'background:var(--accent-hover)',
         onclick: () => { if (step < STEPS.length - 1) { step += 1; render(); } else getStarted(); }
-      }, [c.btn, ic('arrow-right', 18)]);
+      }, [c.btn, ic('chevron-right', 18)]);
 
       const actions = el('div', { style: 'display:flex;gap:12px;align-items:center' }, [
         step > 0 ? el('button', {

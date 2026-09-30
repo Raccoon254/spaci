@@ -257,7 +257,7 @@
       style: 'height:36px;padding:0 13px;border-radius:9px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer;margin-bottom:18px',
       hov: 'background:var(--panel);color:var(--text)',
       onclick: () => SP.go('recommendations'),
-    }, [ic('arrow-left', 16), 'Recommendations']);
+    }, [ic('chevron-left', 16), 'Recommendations']);
     host.appendChild(back);
 
     if (!a) {

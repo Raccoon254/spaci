@@ -203,7 +203,7 @@
           el('div', { style: 'font-weight:700;font-size:15px', text: fmt(reclaim) + ' of this is reclaimable' }),
           el('div', { style: 'color:var(--text-2);font-size:13px;margin-top:2px', text: 'Mostly developer build artifacts and caches that regenerate on demand.' })
         ]),
-        el('button', { style: 'height:44px;padding:0 20px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer', hov: 'background:var(--accent-hover)', onclick: () => SP.go('recommendations') }, ['Review', ic('arrow-right', 15)])
+        el('button', { style: 'height:44px;padding:0 20px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer', hov: 'background:var(--accent-hover)', onclick: () => SP.go('recommendations') }, ['Review', ic('chevron-right', 15)])
       ]));
     }
   };
@@ -247,7 +247,7 @@
 
     function header() {
       return el('div', {}, [
-        el('button', { style: 'height:36px;padding:0 13px;border-radius:9px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer;margin-bottom:18px', hov: 'background:var(--panel);color:var(--text)', onclick: () => SP.go('storage') }, [ic('arrow-left', 16), 'Storage']),
+        el('button', { style: 'height:36px;padding:0 13px;border-radius:9px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer;margin-bottom:18px', hov: 'background:var(--panel);color:var(--text)', onclick: () => SP.go('storage') }, [ic('chevron-left', 16), 'Storage']),
         el('div', { style: 'display:flex;align-items:center;gap:18px;margin-bottom:24px' }, [
           el('div', { style: 'width:60px;height:60px;border-radius:15px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:' + color }, [ic(c.icon || 'folder', 32)]),
           el('div', { style: 'flex:1;min-width:0' }, [

@@ -926,7 +926,7 @@
       style: 'height:36px;padding:0 13px;border-radius:9px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer;font-family:inherit;margin-bottom:18px',
       hov: 'background:var(--panel);color:var(--text)',
       onclick: () => SP.go('projects'),
-    }, [ic('arrow-left', 16), 'All projects']));
+    }, [ic('chevron-left', 16), 'All projects']));
 
     // ----- header -----
     const branch = git && git.branch ? git.branch : null;
@@ -981,7 +981,7 @@
     if (git) {
       gitFields.push({ icon: 'branch', k: 'Branch', v: git.branch || 'detached', color: 'var(--text)' });
       gitFields.push({ icon: 'warning', k: 'Uncommitted', v: (git.dirty || 0) + ' file' + (git.dirty === 1 ? '' : 's'), color: git.dirty ? 'var(--danger-fg)' : 'var(--success-fg)' });
-      gitFields.push({ icon: 'arrow-right', k: 'Ahead', v: String(git.ahead || 0), color: 'var(--text)' });
+      gitFields.push({ icon: 'chevron-right', k: 'Ahead', v: String(git.ahead || 0), color: 'var(--text)' });
     } else {
       gitFields.push({ icon: 'info', k: 'Status', v: p.isGit ? 'Reading git…' : 'Not a git repo', color: 'var(--text-3)' });
     }
