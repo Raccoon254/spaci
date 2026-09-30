@@ -42,7 +42,8 @@ test('settings default to off and are clamped', () => {
 test('approval holds only for the rules it was given for', () => {
   const s = ac.sanitizeSettings({ enabled: true });
   assert.equal(ac.isApproved(s), false);
-  const approved = { ...s, approved: { at: NOW, rules: ac.rulesFingerprint(s) } };
+  assert.equal(ac.isApproved({ ...s, approved: { at: NOW, rules: ac.rulesFingerprint(s) } }), false, 'only through an approved preview');
+  const approved = { ...s, approved: { at: NOW, rules: ac.rulesFingerprint(s), previewId: 'prev-1' } };
   assert.equal(ac.isApproved(approved), true);
   assert.equal(ac.isApproved({ ...approved, staleDays: 45 }), false, 'a changed rule needs a new dry run');
   assert.equal(ac.isApproved({ ...approved, enabled: false }), true, 'switching off and on keeps the rules');
@@ -234,32 +235,39 @@ test('project evidence ignores build output and sees git activity', async () => 
 // ---------------------------------------------------------------------------
 
 test('process snapshot parses ps and lsof, and fails closed', async () => {
+  // ps is asked twice: executables (comm, keeps spaces) and command lines (args).
   const fakeExec = (outputs) => (cmd, args, opts, cb) => {
-    const o = outputs[cmd];
-    if (!o) return cb(new Error('no ' + cmd), '');
+    const key = cmd === 'ps' ? (args[1].includes('comm') ? 'ps-comm' : 'ps-args') : cmd;
+    const o = outputs[key];
+    if (!o) return cb(new Error('no ' + key), '');
     return cb(o.err || null, o.stdout);
   };
-  const ps = '  10 501 /usr/local/bin/node /usr/local/lib/node_modules/npm/bin/npm-cli.js install\n  11 501 /Applications/Safari.app/Contents/MacOS/Safari\n  12 501 cargo build --release\n  13 501 /opt/homebrew/bin/node server.mjs\n  14 0 /usr/local/bin/node /opt/daemon.js\n';
+  const comm = '  10 501 /usr/local/bin/node\n  11 501 /Applications/Safari.app/Contents/MacOS/Safari\n  12 501 cargo\n  13 501 /opt/homebrew/bin/node\n  14 0 /usr/local/bin/node\n';
+  const args = '  10 /usr/local/bin/node /usr/local/lib/node_modules/npm/bin/npm-cli.js install\n  11 /Applications/Safari.app/Contents/MacOS/Safari\n  12 cargo build --release\n  13 /opt/homebrew/bin/node server.mjs\n  14 /usr/local/bin/node /opt/daemon.js\n';
   const lsof = 'p10\nfcwd\nn/code/a\np12\nfcwd\nn/code/b\np13\nfcwd\nn/code/c\n';
-  const snap = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { stdout: ps }, lsof: { stdout: lsof } }), selfPid: 1, uid: 501 });
+  const ok = { 'ps-comm': { stdout: comm }, 'ps-args': { stdout: args } };
+  const snap = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ...ok, lsof: { stdout: lsof } }), selfPid: 1, uid: 501 });
   assert.equal(snap.ok, true);
   assert.deepEqual(snap.list.map((p) => [p.pid, p.names, p.cwd]), [
     [10, ['node', 'npm'], '/code/a'],
     [12, ['cargo'], '/code/b'],
     [13, ['node', 'server'], '/code/c'],
   ], 'root\'s node daemon (uid 0) is not ours');
-  const failed = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { err: new Error('boom'), stdout: '' } }) });
+  assert.equal(snap.list[2].args, '/opt/homebrew/bin/node server.mjs', 'the command line is kept for the path check');
+  const failed = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ 'ps-comm': { err: new Error('boom'), stdout: '' }, 'ps-args': { stdout: args } }) });
   assert.deepEqual(failed, { ok: false, list: [] });
-  const none = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { stdout: '  11 501 /Applications/Safari.app/Contents/MacOS/Safari\n' } }), uid: 501 });
+  const noArgs = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ 'ps-comm': { stdout: comm }, 'ps-args': { err: new Error('boom'), stdout: '' } }) });
+  assert.deepEqual(noArgs, { ok: false, list: [] }, 'without command lines the path check cannot run: fail closed');
+  const none = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ 'ps-comm': { stdout: '  11 501 /Applications/Safari.app/Contents/MacOS/Safari\n' }, 'ps-args': { stdout: '' } }), uid: 501 });
   assert.deepEqual(none, { ok: true, list: [] });
   // lsof failing outright leaves cwd unknown, which selection treats as "skip".
-  const noLsof = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { stdout: ps }, lsof: { err: new Error('x'), stdout: '' } }), uid: 501 });
+  const noLsof = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ...ok, lsof: { err: new Error('x'), stdout: '' } }), uid: 501 });
   assert.ok(noLsof.list.length === 3 && noLsof.list.every((p) => p.cwd === null));
   // lsof answering for some pids only: the rest stay unknown (projects get skipped).
-  const partial = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { stdout: ps }, lsof: { err: new Error('exit 1'), stdout: 'p10\nn/code/a\n' } }), uid: 501 });
+  const partial = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ...ok, lsof: { err: new Error('exit 1'), stdout: 'p10\nn/code/a\n' } }), uid: 501 });
   assert.deepEqual(partial.list.map((p) => p.cwd), ['/code/a', null, null]);
-  const lin = await ac.snapshotProcesses({ platform: 'linux', exec: fakeExec({ ps: { stdout: '  20 1000 node x.js\n' } }), fs: { promises: { readlink: async () => '/code/l' } }, uid: 1000 });
-  assert.deepEqual(lin.list.map((p) => p.cwd), ['/code/l']);
+  const lin = await ac.snapshotProcesses({ platform: 'linux', exec: fakeExec({ 'ps-comm': { stdout: '  20 1000 node\n' }, 'ps-args': { stdout: '  20 node x.js\n' } }), fs: { promises: { readlink: async () => '/code/l' } }, uid: 1000 });
+  assert.deepEqual(lin.list.map((p) => [p.names, p.cwd]), [[['node', 'x'], '/code/l']]);
   const win = await ac.snapshotProcesses({ platform: 'win32', exec: fakeExec({ tasklist: { stdout: '"node.exe","30","Console","1","10 K"\r\n"explorer.exe","31","Console","1","10 K"\r\n' } }) });
   assert.deepEqual(win.list.map((p) => [p.names[0], p.cwd]), [['node', null]]);
 });
@@ -562,7 +570,7 @@ test('first run is a dry run: nothing moves, one preview entry, one notification
 
 test('an approved run stages, logs history v2, notifies once, and undo restores', async () => {
   const h = harness();
-  h.settings = { enabled: true, approved: { at: NOW, rules: ac.rulesFingerprint({ enabled: true }) } };
+  h.settings = { enabled: true, approved: { at: NOW, rules: ac.rulesFingerprint({ enabled: true }), previewId: 'prev-000001' } };
   let stagedPaths = null;
   h.deps.onStaged = (p) => { stagedPaths = p; };
   const r = await ac.runAutoClean(h.deps);
@@ -593,7 +601,7 @@ test('an approved run stages, logs history v2, notifies once, and undo restores'
 
 test('a run stops at the first failure and when the machine is no longer idle', async () => {
   const h = harness();
-  h.settings = { enabled: true, approved: { at: NOW, rules: ac.rulesFingerprint({ enabled: true }) } };
+  h.settings = { enabled: true, approved: { at: NOW, rules: ac.rulesFingerprint({ enabled: true }), previewId: 'prev-000001' } };
   let calls = 0;
   h.deps.stillOk = () => (++calls > 1 ? 'you started using the computer.' : null);
   const r = await ac.runAutoClean(h.deps);
@@ -617,7 +625,7 @@ test('a run stops at the first failure and when the machine is no longer idle', 
 
 test('the guard is authoritative: refused jobs are logged and never moved', async () => {
   const h = harness();
-  h.settings = { enabled: true, approved: { at: NOW, rules: ac.rulesFingerprint({ enabled: true }) } };
+  h.settings = { enabled: true, approved: { at: NOW, rules: ac.rulesFingerprint({ enabled: true }), previewId: 'prev-000001' } };
   h.deps.guard = async (jobs) => ({ allowed: jobs.filter((j) => j.path !== h.nm), refused: [{ path: h.nm, reason: 'git tracks files inside it.' }] });
   const r = await ac.runAutoClean(h.deps);
   assert.equal(r.count, 1);

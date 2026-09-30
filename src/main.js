@@ -1388,6 +1388,11 @@ function acForget(paths) {
   acEmit('cache:updated', { scannedAt: cache.scannedAt });
 }
 
+/** Running containers, for projects with a Compose file. Fails closed. */
+function acDocker() {
+  return dockerCall('runningContainers', [{}]).then((r) => (r && typeof r.ok === 'boolean' ? r : { ok: false, running: 0 }), () => ({ ok: false, running: 0 }));
+}
+
 function acDeps(overrides = {}) {
   return {
     getSettings: acSettings,
@@ -1396,6 +1401,8 @@ function acDeps(overrides = {}) {
     gatherEvidence: acEvidence,
     snapshot: () => autoClean.snapshotProcesses(),
     aiToolStatus: () => work('aiToolStatus').catch(() => ({ ok: false, running: [] })),
+    dockerStatus: acDocker,
+    cloudCheck: (paths) => autoClean.cloudReasons(paths),
     guard: acGuard,
     staging: acStaging,
     historyLog,
@@ -1491,13 +1498,14 @@ ipcMain.handle('autoclean:set', (_e, patch) => {
 });
 
 // History: approve the dry run the user is looking at, and only that one.
+// An empty preview is never approvable (autoClean.approvalCheck).
 ipcMain.handle('autoclean:approve', (_e, previewId) => {
   const s = acSettings();
-  if (!s.pendingPreview || s.pendingPreview !== previewId) return { ok: false, error: 'This preview is out of date. A new one runs with your current rules.' };
-  const entry = readHistory().find((h) => h && h.id === previewId);
-  if (!entry || !entry.autoClean || entry.autoClean.rules !== autoClean.rulesFingerprint(s)) {
-    acSaveSettings({ ...s, pendingPreview: null });
-    return { ok: false, error: 'Your rules changed since this preview. A new one runs with your current rules.' };
+  const entry = s.pendingPreview && s.pendingPreview === previewId ? readHistory().find((h) => h && h.id === previewId) : null;
+  const check = autoClean.approvalCheck(s, entry, previewId);
+  if (!check.ok) {
+    if (check.clearPending) acSaveSettings({ ...s, pendingPreview: null });
+    return { ok: false, error: check.error };
   }
   acSaveSettings({ ...s, pendingPreview: null, approved: { at: Date.now(), rules: autoClean.rulesFingerprint(s), previewId } });
   putHistory({ ...entry, autoClean: { ...entry.autoClean, approvedAt: Date.now() } });
@@ -1542,10 +1550,16 @@ ipcMain.handle('autoclean:undo', async (_e, runId) => {
 ipcMain.handle('autoclean:preview', async () => {
   const s = acSettings();
   const scan = { projects: cache.projects || [], system: cache.system || [] };
-  const [ev, procs, ai] = await Promise.all([
+  const scanPaths = [...scan.projects.map((p) => p && p.path), ...scan.system.flatMap((t) => (t && Array.isArray(t.existingPaths) ? t.existingPaths : []))].filter((p) => typeof p === 'string');
+  const [ev, procs, ai, docker, cloud] = await Promise.all([
     acEvidence(scan.projects, s), autoClean.snapshotProcesses(), work('aiToolStatus').catch(() => ({ ok: false, running: [] })),
+    acDocker(), autoClean.cloudReasons(scanPaths).catch(() => null),
   ]);
-  const sel = autoClean.selectCandidates({ ...scan, settings: s, now: Date.now(), evidence: ev.evidence, itemEvidence: ev.itemEvidence, procs, aiTools: ai });
+  const sel = autoClean.selectCandidates({
+    ...scan, settings: s, now: Date.now(), evidence: ev.evidence, itemEvidence: ev.itemEvidence, procs, aiTools: ai, docker,
+    cloudOf: cloud ? (p) => cloud.get(p) || null : () => 'Spaci could not check whether it is in a cloud-synced folder.',
+    sameDisk: (p) => acStaging.sameDisk(p),
+  });
   return {
     count: sel.count, bytes: sel.bytes,
     candidates: sel.candidates.slice(0, 50).map((c) => ({ path: c.path, bytes: c.bytes, rule: c.rule, group: c.group })),
