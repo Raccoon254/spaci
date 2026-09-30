@@ -54,6 +54,11 @@ function initUpdater(winGetter, opts = {}) {
     },
     notifyReady: opts.onReady || (() => {}),
     beforeInstall: opts.beforeInstall || (() => {}),
+    onReadyWithdrawn: opts.onReadyWithdrawn || (() => {}),
+    onInstallAbandoned: opts.onInstallAbandoned || (() => {}),
+    // MacUpdater emits update-downloaded before Squirrel.Mac has the zip; only
+    // the resolved download means the update can really be installed.
+    readyOn: process.platform === 'darwin' ? 'resolve' : 'event',
   });
 
   ipcMain.handle('app:version', () => app.getVersion());

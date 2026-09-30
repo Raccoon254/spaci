@@ -87,6 +87,7 @@ const OFFLINE = /ENOTFOUND|EAI_AGAIN|ENETUNREACH|ENETDOWN|ECONNREFUSED|ECONNRESE
 
 function classifyError(err) {
   const text = `${(err && err.code) || ''} ${(err && err.message) || err || ''}`;
+  if (/SPACI_TIMEOUT/.test(text)) return 'timeout';
   if (OFFLINE.test(text)) return 'offline';
   if (/sha512 checksum mismatch|ERR_CHECKSUM_MISMATCH|ERR_UPDATER_NO_CHECKSUM|checksum/i.test(text)) return 'checksum';
   if (/code signature|did not pass validation|not signed|codesign/i.test(text)) return 'signature';
@@ -102,6 +103,8 @@ const FRIENDLY = {
   checksum: 'The downloaded update did not match its checksum and was discarded. Spaci will try again later.',
   signature: 'The downloaded update failed signature verification and was not installed.',
   unknown: 'The update check failed. Spaci will try again later.',
+  timeout: 'The update server stopped responding. Spaci will try again later.',
+  slow: 'The update server is slow to respond. Spaci will keep trying in the background.',
   'download-failed': 'The update could not be downloaded. Spaci will try again later.',
   'feed-refused': 'The update offered by the server is not valid, so it was not downloaded.',
 };
@@ -120,9 +123,14 @@ const FRIENDLY = {
  */
 function createUpdateController({
   updater, currentVersion, isPackaged = true, isOnline = () => true, getPrefs = () => ({}),
-  send = () => {}, notifyReady = () => {}, beforeInstall = () => {}, log = console,
-  now = () => Date.now(), setTimer = setTimeout, clearTimer = clearTimeout,
+  send = () => {}, notifyReady = () => {}, beforeInstall = () => {},
+  onReadyWithdrawn = () => {}, onInstallAbandoned = () => {},
+  // 'resolve' on macOS: MacUpdater emits update-downloaded before Squirrel.Mac
+  // has fetched the zip, and only resolves downloadUpdate() once it has.
+  readyOn = 'event',
+  log = console, now = () => Date.now(), setTimer = setTimeout, clearTimer = clearTimeout,
   defer = (fn) => setImmediate(fn), schedule = {},
+  checkTimeoutMs = 30 * MIN, manualWaitMs = 60 * 1000, installTimeoutMs = 2 * MIN,
 }) {
   let phase = 'idle'; // idle | checking | downloading | ready
   let status = { state: 'idle' };
@@ -130,6 +138,10 @@ function createUpdateController({
   let manualWaiting = false;
   let readyVersion = null;
   let notifiedVersion = null;
+  let downloadedInfo = null;
+  let checkGen = 0;
+  let installRequested = false;
+  let installTimer = null;
   let schedState = { lastCompletedAt: 0, lastAttemptAt: 0, failures: 0 };
 
   const setStatus = (s) => {
@@ -137,6 +149,7 @@ function createUpdateController({
     try { send(status); } catch (e) { log.warn('[update] could not send status:', e && e.message); }
     return status;
   };
+  const safe = (fn, what) => { try { fn(); } catch (e) { log.warn(`[update] ${what} failed:`, e && e.message); } };
 
   // Configure the real updater. Downloads are started by us, after the offer
   // passes evaluateUpdate. `channel` is left alone on purpose: setting it
@@ -155,21 +168,35 @@ function createUpdateController({
     setStatus({ state: 'ready', version });
     if (version && notifiedVersion !== version) {
       notifiedVersion = version;
-      try { notifyReady(version); } catch (e) { log.warn('[update] notify failed:', e && e.message); }
+      safe(() => notifyReady(version), 'notify');
     }
   }
 
   function fail(err, stage) {
-    const kind = stage === 'download' && classifyError(err) === 'unknown' ? 'download-failed' : classifyError(err);
+    const raw = classifyError(err);
+    const kind = stage === 'download' && raw === 'unknown' ? 'download-failed' : raw;
     log.warn(`[update] ${stage} failed (${kind}):`, (err && err.message) || err);
     if (manualWaiting) setStatus({ state: 'error', kind, message: FRIENDLY[kind] || FRIENDLY.unknown });
-    else if (status.state === 'checking' || status.state === 'available' || status.state === 'downloading') {
+    else if (['checking', 'available', 'downloading', 'ready'].includes(status.state)) {
       setStatus({ state: 'idle', lastError: kind });
     }
-    // Even an offline-looking error backs off: net.isOnline() said we were
-    // online, so the problem may be DNS or the server, and polling it every few
-    // minutes would not help.
+    // Even an offline-looking error backs off: the problem may be DNS or the
+    // server, and polling it every few minutes would not help.
     return { status: 'failed', reason: kind };
+  }
+
+  /** Readiness turned out to be false (Squirrel failed after the fact): undo it everywhere. */
+  function withdrawReady(err, stage) {
+    const wasInstalling = installRequested;
+    installRequested = false;
+    if (installTimer) { clearTimer(installTimer); installTimer = null; }
+    phase = 'idle';
+    readyVersion = null;
+    downloadedInfo = null;
+    notifiedVersion = null;
+    safe(() => onReadyWithdrawn(), 'onReadyWithdrawn');
+    if (wasInstalling) safe(() => onInstallAbandoned(), 'onInstallAbandoned');
+    return fail(err, stage);
   }
 
   if (updater && typeof updater.on === 'function') {
@@ -188,13 +215,17 @@ function createUpdateController({
     updater.on('update-downloaded', (info) => {
       // Only a download we started and approved can become "ready".
       if (phase !== 'downloading') { log.warn('[update] ignoring unexpected update-downloaded'); return; }
-      markReady(info);
+      downloadedInfo = info || null;
+      if (readyOn === 'event') markReady(info);
     });
     // Errors also reject the promise we await; this catches the ones that only
-    // arrive as events (Squirrel.Mac staging, signature checks after download).
+    // arrive as events (Squirrel.Mac staging and signature checks after the
+    // download, which can come after we already said "ready").
     updater.on('error', (err) => {
-      if (phase === 'downloading' && !inflight) {
+      if (phase === 'ready') withdrawReady(err, 'install');
+      else if (phase === 'downloading' && !inflight) {
         phase = 'idle';
+        readyVersion = null;
         fail(err, 'download');
       } else {
         log.warn('[update] updater error event:', (err && err.message) || err);
@@ -202,20 +233,25 @@ function createUpdateController({
     });
   }
 
-  async function doCheck() {
-    if (!isOnline()) {
-      if (manualWaiting) setStatus({ state: 'error', kind: 'offline', message: FRIENDLY.offline });
-      return { status: 'deferred', reason: 'offline' };
-    }
+  const TIMED_OUT = { status: 'failed', reason: 'timeout' };
+
+  async function doCheck(gen) {
+    const stale = () => gen !== checkGen;
+    // Chromium's online flag can be wrong (some Linux and VPN setups), so it
+    // only gates background checks; a manual check just tries.
+    if (!manualWaiting && !isOnline()) return { status: 'deferred', reason: 'offline' };
     phase = 'checking';
+    downloadedInfo = null;
     if (manualWaiting) setStatus({ state: 'checking' });
     let result;
     try {
       result = await updater.checkForUpdates();
     } catch (e) {
+      if (stale()) return TIMED_OUT;
       phase = 'idle';
       return fail(e, 'check');
     }
+    if (stale()) return TIMED_OUT;
     const info = result && result.updateInfo;
     if (!result || !result.isUpdateAvailable || !info) {
       phase = 'idle';
@@ -239,12 +275,16 @@ function createUpdateController({
     try {
       await updater.downloadUpdate();
     } catch (e) {
-      if (phase === 'ready') return { status: 'ok' };
+      if (stale()) return TIMED_OUT;
+      if (phase === 'ready') return withdrawReady(e, 'download');
       phase = 'idle';
+      readyVersion = null;
       return fail(e, 'download');
     }
-    // Some platforms resolve before emitting update-downloaded; the event (or an
-    // error event) finishes the job.
+    if (stale()) return TIMED_OUT;
+    // macOS: resolving means Squirrel.Mac has the zip. Elsewhere the
+    // update-downloaded event (already seen, or still to come) decides.
+    if (phase === 'downloading' && (readyOn === 'resolve' || downloadedInfo)) markReady(downloadedInfo || info);
     return { status: 'ok' };
   }
 
@@ -261,9 +301,25 @@ function createUpdateController({
       return Promise.resolve({ status: 'ok' });
     }
     if (inflight) return inflight;
-    inflight = (async () => {
-      try { return await doCheck(); } catch (e) { phase = 'idle'; return fail(e, 'check'); }
-    })().finally(() => { inflight = null; manualWaiting = false; });
+    const gen = ++checkGen;
+    const work = (async () => {
+      try { return await doCheck(gen); } catch (e) {
+        if (gen !== checkGen) return TIMED_OUT;
+        phase = 'idle';
+        return fail(e, 'check');
+      }
+    })();
+    // Watchdog: a request or download that never settles must not wedge the
+    // updater. Its late result is ignored (the generation moved on).
+    let timer = null;
+    const watchdog = new Promise((res) => { timer = setTimer(() => res(null), checkTimeoutMs); });
+    inflight = Promise.race([work, watchdog]).then((r) => {
+      clearTimer(timer);
+      if (r) return r;
+      checkGen++;
+      if (phase !== 'ready') { phase = 'idle'; readyVersion = null; }
+      return fail(Object.assign(new Error('update check timed out'), { code: 'SPACI_TIMEOUT' }), 'check');
+    }).finally(() => { inflight = null; manualWaiting = false; });
     return inflight;
   }
 
@@ -284,7 +340,7 @@ function createUpdateController({
     getState: () => schedState,
     saveState: (s) => { schedState = s; },
     log, now, setTimer, clearTimer,
-    options: { startupDelayMs: 20 * 1000, retryBaseMs: 30 * MIN, deferMs: 15 * MIN, ...schedule },
+    options: { startupDelayMs: 20 * 1000, retryBaseMs: 30 * MIN, deferMs: 15 * MIN, runTimeoutMs: checkTimeoutMs + 5 * MIN, ...schedule },
   });
 
   return {
@@ -295,11 +351,22 @@ function createUpdateController({
     stop: () => scheduler.stop(),
     reschedule: () => scheduler.reschedule(),
     wake: () => scheduler.wake(),
-    /** Manual check from Settings: always allowed, reports errors. */
+    /**
+     * Manual check from Settings: always allowed, reports errors, and answers
+     * within manualWaitMs even if the server hangs (the check carries on).
+     */
     async checkNow() {
-      const r = await check({ manual: true });
+      const p = check({ manual: true });
+      let t = null;
+      const cap = new Promise((res) => { t = setTimer(() => res(null), manualWaitMs); });
+      const r = await Promise.race([p, cap]);
+      clearTimer(t);
+      if (!r) {
+        if (phase === 'checking') setStatus({ state: 'error', kind: 'slow', message: FRIENDLY.slow });
+        return status;
+      }
       // A successful manual check resets the periodic clock.
-      if (r && r.status === 'ok') schedState = { ...schedState, lastCompletedAt: now(), lastAttemptAt: now(), failures: 0 };
+      if (r.status === 'ok') schedState = { ...schedState, lastCompletedAt: now(), lastAttemptAt: now(), failures: 0 };
       return status;
     },
     status: () => status,
@@ -307,9 +374,20 @@ function createUpdateController({
     /** Restart into the downloaded update. Only after a verified download. */
     install() {
       if (!isPackaged || phase !== 'ready') return false;
-      try { beforeInstall(); } catch (e) { log.warn('[update] beforeInstall failed:', e && e.message); }
+      installRequested = true;
+      safe(() => beforeInstall(), 'beforeInstall');
+      // If the app is still running after installTimeoutMs, the install did not
+      // happen: let the app stop acting as if it were quitting.
+      if (installTimer) clearTimer(installTimer);
+      installTimer = setTimer(() => {
+        installTimer = null;
+        if (!installRequested) return;
+        installRequested = false;
+        log.warn('[update] install did not complete in time');
+        safe(() => onInstallAbandoned(), 'onInstallAbandoned');
+      }, installTimeoutMs);
       defer(() => {
-        try { updater.quitAndInstall(false, true); } catch (e) { fail(e, 'install'); }
+        try { updater.quitAndInstall(false, true); } catch (e) { withdrawReady(e, 'install'); }
       });
       return true;
     },

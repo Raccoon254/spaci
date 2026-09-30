@@ -132,13 +132,13 @@ class FakeUpdater extends EventEmitter {
 
 const available = (u, i) => { u.lastInfo = i; u.nextCheck = async () => ({ isUpdateAvailable: true, updateInfo: i }); };
 
-function ctl({ prefs = {}, online = true, packaged = true, current = '2.1.0' } = {}) {
+function ctl({ prefs = {}, online = true, packaged = true, current = '2.1.0', readyOn } = {}) {
   const clock = fakeClock();
   const updater = new FakeUpdater();
   const statuses = [];
   const ready = [];
   const log = quietLog();
-  const env = { online, prefs, beforeInstall: 0 };
+  const env = { online, prefs, beforeInstall: 0, withdrawn: 0, abandoned: 0 };
   const c = createUpdateController({
     updater,
     currentVersion: current,
@@ -148,6 +148,9 @@ function ctl({ prefs = {}, online = true, packaged = true, current = '2.1.0' } =
     send: (s) => statuses.push(s),
     notifyReady: (v) => ready.push(v),
     beforeInstall: () => { env.beforeInstall++; },
+    onReadyWithdrawn: () => { env.withdrawn++; },
+    onInstallAbandoned: () => { env.abandoned++; },
+    readyOn,
     log,
     now: clock.now,
     setTimer: clock.setTimer,
@@ -253,10 +256,11 @@ test('a manual check reports failures in plain words', async () => {
   assert.equal(s.state, 'error');
   assert.equal(s.message, FRIENDLY.offline);
 
+  // Chromium's online flag can be wrong, so a manual check still tries.
   const off = ctl({ online: false });
   const s2 = await off.c.checkNow();
-  assert.equal(s2.state, 'error');
-  assert.equal(off.updater.checks, 0);
+  assert.equal(s2.state, 'current');
+  assert.equal(off.updater.checks, 1);
 });
 
 test('a manual check with nothing new says so', async () => {
@@ -391,4 +395,141 @@ test('stop() on quit cancels future checks', async () => {
   t.c.stop();
   await t.clock.advance(24 * HOUR);
   assert.equal(t.updater.checks, 0);
+});
+
+// ---------- regressions from review (scratchpad liveness.js) ----------
+
+/** MacUpdater order: update-downloaded fires, then Squirrel fetches the zip, then the promise settles. */
+function macDownload(u, { squirrelError = null } = {}) {
+  u.downloadUpdate = async function () {
+    this.downloads++;
+    this.emit('download-progress', { percent: 100 });
+    this.emit('update-downloaded', this.lastInfo);
+    await new Promise((r) => setImmediate(r));
+    if (squirrelError) { this.emit('error', squirrelError); throw squirrelError; }
+    return [];
+  };
+}
+
+test('macOS: update-downloaded alone is not "ready"; only the resolved download is', async () => {
+  const t = ctl({ readyOn: 'resolve' });
+  available(t.updater, info('2.2.0'));
+  macDownload(t.updater);
+  await t.c.checkNow();
+  assert.equal(t.c.phase, 'ready');
+  assert.deepEqual(t.ready, ['2.2.0']);
+  assert.equal(t.states().filter((x) => x === 'ready').length, 1);
+});
+
+test('macOS: Squirrel failing after update-downloaded never leaves Spaci stuck on "ready"', async () => {
+  const t = ctl({ readyOn: 'resolve' });
+  available(t.updater, info('2.2.0'));
+  macDownload(t.updater, { squirrelError: new Error('Code signature at URL file:///x did not pass validation') });
+  t.c.start();
+  await t.clock.advance(20 * 1000);
+  assert.equal(t.c.phase, 'idle');
+  assert.deepEqual(t.ready, [], 'the user was never told it was ready');
+  assert.equal(t.c.install(), false);
+  // The scheduler keeps going (backoff), and a manual check reaches the server.
+  await t.clock.advance(31 * MIN);
+  assert.equal(t.updater.checks, 2);
+  const before = t.updater.checks;
+  await t.c.checkNow();
+  assert.equal(t.updater.checks, before + 1);
+});
+
+test('event mode: readiness withdrawn when the download promise rejects after update-downloaded', async () => {
+  const t = ctl();
+  available(t.updater, info('2.2.0'));
+  macDownload(t.updater, { squirrelError: new Error('ENOSPC: no space left on device') });
+  await t.c.checkNow();
+  assert.equal(t.c.phase, 'idle');
+  assert.equal(t.env.withdrawn, 1, 'tray "Restart to Update" cleared');
+  assert.notEqual(t.c.status().state, 'ready');
+  assert.equal(t.c.install(), false);
+});
+
+test('an error after install() was clicked withdraws readiness and ends the quitting state', async () => {
+  const t = ctl();
+  available(t.updater, info('2.2.0'));
+  t.updater.quitAndInstall = function () { this.installs.push('waiting for Squirrel'); };
+  await t.c.checkNow();
+  assert.equal(t.c.install(), true);
+  assert.equal(t.env.beforeInstall, 1);
+  t.updater.emit('error', new Error('Code signature did not pass validation'));
+  assert.equal(t.c.phase, 'idle');
+  assert.equal(t.env.withdrawn, 1);
+  assert.equal(t.env.abandoned, 1, 'isQuitting reset so close-to-tray works again');
+  await t.clock.advance(10 * MIN);
+  assert.equal(t.env.abandoned, 1, 'install timer cleared, not fired again');
+});
+
+test('an install that never completes gives the app back after the install timeout', async () => {
+  const t = ctl();
+  available(t.updater, info('2.2.0'));
+  t.updater.quitAndInstall = () => {};
+  await t.c.checkNow();
+  t.c.install();
+  await t.clock.advance(2 * MIN - 1000);
+  assert.equal(t.env.abandoned, 0);
+  await t.clock.advance(1000);
+  assert.equal(t.env.abandoned, 1);
+  assert.equal(t.c.phase, 'ready', 'still installable on the next quit');
+});
+
+test('a hung check times out; a manual check answers within a minute and never waits on it forever', async () => {
+  const t = ctl();
+  t.updater.nextCheck = () => new Promise(() => {});
+  t.c.start();
+  await t.clock.advance(20 * 1000);
+  assert.equal(t.updater.checks, 1);
+  let answered = null;
+  t.c.checkNow().then((s) => { answered = s; });
+  await t.clock.advance(60 * 1000);
+  assert.ok(answered, 'manual check answered');
+  assert.equal(answered.state, 'error');
+  assert.equal(answered.kind, 'slow');
+  // The watchdog releases the check after 30 minutes, then backoff retries.
+  await t.clock.advance(30 * MIN);
+  assert.equal(t.c.phase, 'idle');
+  t.updater.nextCheck = null;
+  await t.clock.advance(31 * MIN);
+  assert.equal(t.updater.checks, 2, 'retried after the timeout');
+  assert.equal(t.c.status().state, 'current');
+});
+
+test('a late result from a timed-out check is ignored', async () => {
+  const t = ctl();
+  const d = deferred();
+  t.updater.nextCheck = () => d.promise;
+  const p = t.c.checkNow();
+  await t.clock.advance(30 * MIN);
+  await p;
+  d.resolve({ isUpdateAvailable: true, updateInfo: info('2.2.0') });
+  await flush();
+  assert.equal(t.updater.downloads, 0, 'stale check did not start a download');
+  assert.equal(t.c.phase, 'idle');
+});
+
+test('liveness per platform: first check, or after three server errors, ends ready and installable', async () => {
+  for (const readyOn of ['resolve', 'event']) {
+    for (const failFirst of [0, 3]) {
+      const t = ctl({ readyOn, current: '2.2.0' });
+      let n = failFirst;
+      const i = info('2.2.1');
+      t.updater.lastInfo = i;
+      t.updater.nextCheck = async () => {
+        if (n-- > 0) throw new Error('HttpError: 500 Internal Server Error');
+        return { isUpdateAvailable: true, updateInfo: i };
+      };
+      if (readyOn === 'resolve') macDownload(t.updater);
+      t.c.start();
+      await t.clock.advance(20 * HOUR);
+      assert.equal(t.c.phase, 'ready', `${readyOn} failFirst=${failFirst}`);
+      assert.equal(t.updater.checks, failFirst + 1);
+      assert.deepEqual(t.ready, ['2.2.1']);
+      assert.equal(t.c.install(), true);
+      assert.deepEqual(t.updater.installs, [[false, true]]);
+    }
+  }
 });
