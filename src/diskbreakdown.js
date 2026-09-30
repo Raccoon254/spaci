@@ -463,7 +463,7 @@ function assemble({ total, used, free, reserved = 0, defs, sizes, osItems = [], 
   const upperBound = [...categories, ...additive].filter((x) => x.confidence === 'upper-bound' || x.duBytes > x.bytes).map((x) => x.label);
 
   const sys = systemCategory(systemBytes, { platform, home });
-  sys.confidence = partial ? 'partial' : 'exact';
+  sys.confidence = partial ? 'measuring' : 'exact';
   sys.os = osLayer;
   sys.areas = areas.sort((a, b) => b.bytes - a.bytes);
   sys.unclassified = unclassified ? unclassified.slice(0, MAX_UNCLASSIFIED) : null;

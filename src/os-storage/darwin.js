@@ -390,7 +390,7 @@ async function measureClones(dir, { fsp, measure, cloneSize }) {
   });
 }
 
-function gb(n) { const g = n / 1024 ** 3; return (g >= 10 ? g.toFixed(0) : g >= 1 ? g.toFixed(1) : g.toFixed(2)) + ' GB'; }
+function gb(n) { const g = n / 1024 ** 3; if (g < 1) return Math.max(1, Math.round(n / 1024 ** 2)) + ' MB'; return (g >= 10 ? g.toFixed(0) : g.toFixed(1)) + ' GB'; }
 
 /** Top children for a drill-down, compact enough to keep in cache.json. */
 function topList(children, limit = 12) {
