@@ -132,7 +132,7 @@ class FakeUpdater extends EventEmitter {
 
 const available = (u, i) => { u.lastInfo = i; u.nextCheck = async () => ({ isUpdateAvailable: true, updateInfo: i }); };
 
-function ctl({ prefs = {}, online = true, packaged = true, current = '2.1.0', readyOn } = {}) {
+function ctl({ prefs = {}, online = true, packaged = true, current = '2.1.0', readyOn, installOnQuit } = {}) {
   const clock = fakeClock();
   const updater = new FakeUpdater();
   const statuses = [];
@@ -151,6 +151,7 @@ function ctl({ prefs = {}, online = true, packaged = true, current = '2.1.0', re
     onReadyWithdrawn: () => { env.withdrawn++; },
     onInstallAbandoned: () => { env.abandoned++; },
     readyOn,
+    installOnQuit,
     log,
     now: clock.now,
     setTimer: clock.setTimer,
@@ -167,6 +168,11 @@ test('the updater is configured to never take prereleases or downgrades, and cha
   assert.equal(updater.allowPrerelease, false);
   assert.equal(updater.allowDowngrade, false);
   assert.equal(updater.channelSet, false, 'setting channel would flip allowDowngrade on');
+});
+
+test('a deb install never installs on quit: pkexec must not prompt while the app is closing', () => {
+  const { updater } = ctl({ installOnQuit: false });
+  assert.equal(updater.autoInstallOnAppQuit, false);
 });
 
 test('startup: first check after a delay, then every six hours; startup never blocks', async () => {

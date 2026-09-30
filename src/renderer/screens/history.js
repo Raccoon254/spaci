@@ -3,8 +3,12 @@
    Faithful to design/spaci-v2-reference.html (data-screen-label="History" and
    data-screen-label="Action detail").
    Data comes from window.api.historyGet(); each entry is the shape written by
-   the main process clean handler (src/main.js):
-     { at, scope, label, count, freed, reversible, items } */
+   the main process clean handler (src/main.js). Two shapes are read:
+     v2:  { v:2, id, at, status, scope, label, requested, count, failedCount,
+            refusedCount, freed, items:[{ path, kind, outcome, bytes, reason,
+            reversible, restoreHint }], itemsTruncated }
+     old: { at, scope, label, count, freed, reversible:boolean, items:[path] }
+   Every field is optional: nothing here assumes a v2 field exists. */
 (function () {
   const SP = window.SP;
   const { el, ic, ring, fmt } = SP;
@@ -44,6 +48,54 @@
     if (scope === 'system') return count === 1 ? 'cache' : 'caches';
     if (scope === 'largefiles' || scope === 'large-files') return count === 1 ? 'file' : 'files';
     return count === 1 ? 'item' : 'items';
+  }
+
+  const isV2 = (e) => !!e && e.v === 2;
+  const num = (x) => Number(x) || 0;
+  const REV_TEXT = { rebuild: 'Rebuilds on next install/build', trash: 'In your Trash', none: 'Permanent', mixed: 'Mixed' };
+  const REV_ICON = { rebuild: 'refresh', trash: 'trash', none: 'lock', mixed: 'info' };
+
+  // One word for what an entry means for recovery: 'rebuild' | 'trash' |
+  // 'none' | 'mixed'. Only items that were actually removed or trashed count.
+  function revKind(e) {
+    if (isV2(e) && Array.isArray(e.items) && e.items.length) {
+      const set = new Set();
+      e.items.forEach((it) => {
+        if (it && (it.outcome === 'removed' || it.outcome === 'trashed') && it.reversible) set.add(it.reversible);
+      });
+      if (set.size > 1) return 'mixed';
+      if (set.size === 1) return Array.from(set)[0];
+    }
+    if (typeof e.reversible === 'string' && REV_TEXT[e.reversible]) return e.reversible;
+    if (isV2(e)) return 'none';
+    return e.reversible ? 'rebuild' : 'none';
+  }
+
+  // Outcome counts for a v2 entry. Falls back to e.count when items are absent.
+  function counts(e) {
+    const items = Array.isArray(e.items) ? e.items : [];
+    const c = { removed: 0, trashed: 0, failed: 0, refused: 0 };
+    if (items.length && typeof items[0] === 'object') {
+      items.forEach((it) => { if (it && c[it.outcome] != null) c[it.outcome] += 1; });
+      // Items beyond the stored cap are not in the list: trust entry totals.
+      if (e.itemsTruncated || c.failed + c.refused === 0) {
+        c.failed = Math.max(c.failed, num(e.failedCount));
+        c.refused = Math.max(c.refused, num(e.refusedCount));
+      }
+      const done = num(e.count);
+      if (done > c.removed + c.trashed) c.removed += done - (c.removed + c.trashed);
+      return c;
+    }
+    c.removed = num(e.count);
+    c.failed = num(e.failedCount);
+    c.refused = num(e.refusedCount);
+    return c;
+  }
+
+  function statusBadge(e) {
+    if (e.status === 'interrupted') return el('span', { class: 'sp-badge-warn', style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700', text: 'Interrupted' });
+    if (e.status === 'started') return el('span', { class: 'sp-badge-accent', style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700', text: 'In progress' });
+    return null;
   }
 
   // Relative time for recent events, readable date for older ones.
@@ -167,9 +219,20 @@
   }
 
   function row(e) {
-    const reversible = !!e.reversible;
-    const count = Number(e.count) || 0;
-    const meta = count + ' ' + itemNoun(e, count) + ' · ' + whenOf(e.at);
+    const rk = revKind(e);
+    const c = counts(e);
+    const parts = [];
+    if (isV2(e)) {
+      if (c.removed) parts.push(c.removed + ' removed');
+      if (c.trashed) parts.push(c.trashed + ' trashed');
+      if (c.failed) parts.push(c.failed + ' failed');
+      if (c.refused) parts.push(c.refused + ' left alone');
+      if (!parts.length) parts.push('0 ' + itemNoun(e, 0));
+    } else {
+      const count = num(e.count);
+      parts.push(count + ' ' + itemNoun(e, count));
+    }
+    const meta = parts.join(', ') + ' · ' + whenOf(e.at);
 
     return el('div', {
       class: 'sp-hov',
@@ -179,18 +242,19 @@
     }, [
       el('div', { style: 'width:52px;height:52px;border-radius:14px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic(scopeIcon(e), 24)]),
       el('div', { style: 'flex:1;min-width:0' }, [
-        el('div', { style: 'font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px' }, [
+        el('div', { style: 'font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px;flex-wrap:wrap' }, [
           el('span', { text: titleOf(e) }),
           el('span', {
-            class: reversible ? 'sp-badge-safe' : 'sp-badge-warn',
+            class: rk === 'none' || rk === 'mixed' ? 'sp-badge-warn' : 'sp-badge-safe',
             style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700',
-            text: reversible ? 'reversible' : 'permanent'
-          })
+            text: REV_TEXT[rk]
+          }),
+          statusBadge(e)
         ]),
         el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px', text: meta })
       ]),
       el('div', { style: 'font-weight:700;font-size:15px;color:var(--accent-fg);flex:none', text: fmt(e.freed) }),
-      ic(reversible ? 'undo-arrow' : 'lock', 17, { color: 'var(--text-4)' }),
+      ic(REV_ICON[rk], 17, { color: 'var(--text-4)' }),
       ic('chevron-right', 18, { color: 'var(--text-4)' })
     ]);
   }
@@ -202,7 +266,7 @@
         el('div', { style: 'color:var(--accent-fg)' }, [ring('orbit', 56)]),
         el('div', {}, [
           el('div', { style: 'font-size:19px;font-weight:700;letter-spacing:-.4px', text: 'Nothing cleaned yet' }),
-          el('div', { style: 'color:var(--text-3);font-size:13.5px;margin-top:7px;max-width:380px', text: 'Once you reclaim space with Spaci, every cleanup shows up here with what was freed and whether it can be undone.' })
+          el('div', { style: 'color:var(--text-3);font-size:13.5px;margin-top:7px;max-width:380px', text: 'Once you reclaim space with Spaci, every cleanup shows up here with what was freed and what happened to each item.' })
         ]),
         el('button', {
           style: 'height:44px;padding:0 22px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer;font-family:inherit',
@@ -320,36 +384,108 @@
     return last.indexOf('.') > 0 ? 'file' : 'folder';
   }
 
-  // Restore-note copy depends on whether the cleanup can be undone, and on what
-  // kind of data it removed.
-  function restoreCopy(e) {
+  // Recovery note. Spaci never restores files itself: it only says where they
+  // went and how to get them back.
+  function restoreCopy(e, rk) {
     const scope = (e.scope || '').toLowerCase();
-    if (!e.reversible) {
+    if (rk === 'none') {
       return {
-        title: 'Permanent deletion',
-        text: 'This was a permanent deletion of files on disk and cannot be undone. The items below were removed for good, so make sure you no longer need them.'
+        title: 'Permanent',
+        text: 'Items marked Permanent were removed for good. Spaci cannot bring them back, and there is nothing in the Trash to restore.'
       };
     }
-    if (scope === 'system') {
+    if (rk === 'trash') {
       return {
-        title: 'How to restore',
-        text: 'These caches regenerate automatically the next time the apps that own them run. Nothing to do, and nothing is lost.'
+        title: 'In your Trash',
+        text: 'These files are in your Trash. Restore them from Finder or the Recycle Bin. The space comes back only when you empty the Trash.'
+      };
+    }
+    if (rk === 'mixed') {
+      return {
+        title: 'Mixed results',
+        text: 'Some items are in your Trash, some rebuild on your next install or build, and some are permanent. Each item below says which.'
+      };
+    }
+    if (!isV2(e)) {
+      return {
+        title: 'Rebuilds on next install/build',
+        text: scope === 'system'
+          ? 'This entry is from an older version of Spaci, which did not record individual items. Caches regenerate when the apps that own them run.'
+          : 'This entry is from an older version of Spaci, which did not record individual items. Build artifacts come back when you re-run your install or build.'
       };
     }
     return {
-      title: 'How to restore',
-      text: 'These are build artifacts and dependencies, so this is fully reversible. Restore them by re-running your install or build (npm install, pod install, cargo build, and so on).'
+      title: 'Rebuilds on next install/build',
+      text: scope === 'system'
+        ? 'Spaci does not restore files. These caches regenerate automatically when the apps that own them run.'
+        : 'Spaci does not restore files. Re-run your install or build to bring these back. Each item below lists the command.'
     };
+  }
+
+  const PAGE = 100;
+
+  function outcomeBadge(outcome) {
+    const map = {
+      removed: ['sp-badge-safe', 'Removed'],
+      trashed: ['sp-badge-accent', 'Trashed'],
+      failed: ['sp-badge-warn', 'Failed'],
+      refused: ['sp-badge-warn', 'Left alone']
+    };
+    const m = map[outcome];
+    if (!m) return null;
+    return el('span', { class: m[0], style: 'display:inline-flex;padding:2px 8px;border-radius:7px;font-size:10.5px;font-weight:700;flex:none', text: m[1] });
+  }
+
+  function itemNote(it) {
+    if (it.outcome === 'failed') {
+      // A known error code gets plain English; otherwise the recorded reason is
+      // already written for people (interrupted, trash failed), so show it as is.
+      const mapped = SP.plainError ? SP.plainError({ code: it.code, error: it.reason || '' }) : '';
+      const text = mapped && mapped !== 'Could not be removed.' ? mapped : (it.reason || 'Could not be removed.');
+      return { text, raw: it.reason || '' };
+    }
+    if (it.outcome === 'refused') {
+      return { text: it.reason === 'needs-confirmation' ? 'Needed your confirmation.' : (it.reason || 'Spaci left this alone.'), raw: '' };
+    }
+    if (it.outcome === 'trashed') return { text: 'In your Trash: restore from Finder/Recycle Bin.', raw: '' };
+    return null;
+  }
+
+  // One item row. Every value is set as text, never as HTML.
+  function itemRow(e, it) {
+    const obj = it && typeof it === 'object';
+    const path = obj ? it.path : it;
+    const children = [
+      ic(obj && it.kind === 'file' ? 'file' : obj && it.kind === 'trash' ? 'trash' : pathIcon(e, path), 18, { color: 'var(--text-3)' }),
+      el('div', { style: 'flex:1;min-width:0' }, [
+        el('div', { class: 'mono', title: String(path || ''), style: 'font-size:12.5px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: String(path || '') })
+      ])
+    ];
+    if (obj) {
+      const box = children[1];
+      const note = itemNote(it);
+      const rk = it.outcome === 'removed' || it.outcome === 'trashed' ? it.reversible : null;
+      if (note) box.appendChild(el('div', { title: note.raw, style: 'color:var(--text-3);font-size:12px;margin-top:3px;line-height:1.5', text: note.text }));
+      if (rk && REV_TEXT[rk] && it.outcome !== 'trashed') box.appendChild(el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:3px', text: REV_TEXT[rk] }));
+      if (it.restoreHint && it.outcome === 'removed') {
+        box.appendChild(el('div', { class: 'mono', style: 'color:var(--text-2);font-size:12px;margin-top:4px;white-space:pre-wrap;word-break:break-word', text: String(it.restoreHint) }));
+      }
+      children.push(outcomeBadge(it.outcome));
+      if (it.bytes != null) children.push(el('div', { style: 'font-size:12.5px;color:var(--text-3);font-weight:600;flex:none', text: fmt(num(it.bytes)) }));
+    }
+    return el('div', { style: 'display:flex;align-items:center;gap:13px;padding:12px 15px;border-radius:12px;background:var(--panel);border:1px solid var(--border)' }, children);
   }
 
   SP.screens.historydetail = function (host) {
     const e = S.currentHistory;
     if (!e) { SP.go('history'); return; }
 
-    const reversible = !!e.reversible;
-    const count = Number(e.count) || 0;
+    const rk = revKind(e);
+    const c = counts(e);
+    const count = num(e.count);
     const items = Array.isArray(e.items) ? e.items : [];
-    const note = restoreCopy(e);
+    const extra = num(e.itemsTruncated);
+    const note = restoreCopy(e, rk);
 
     // back button -> History
     host.appendChild(
@@ -368,9 +504,10 @@
           el('div', { style: 'font-size:25px;font-weight:700;letter-spacing:-.7px;display:flex;align-items:center;gap:11px;flex-wrap:wrap' }, [
             el('span', { text: titleOf(e) }),
             el('span', {
-              class: reversible ? 'sp-badge-safe' : 'sp-badge-warn',
+              class: rk === 'none' || rk === 'mixed' ? 'sp-badge-warn' : 'sp-badge-safe',
               style: 'display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:8px;font-size:11.5px;font-weight:700'
-            }, reversible ? [ic('undo-arrow', 13), 'Reversible'] : [ic('lock', 13), 'Permanent'])
+            }, [ic(REV_ICON[rk], 13), REV_TEXT[rk]]),
+            statusBadge(e)
           ]),
           el('div', { style: 'color:var(--text-3);font-size:13px;margin-top:5px', text: whenExact(e.at) })
         ]),
@@ -378,64 +515,87 @@
       ])
     );
 
-    // stats strip: space freed / items / when
-    const detailStats = [
-      { icon: 'hard-drive', label: 'Space freed', value: fmt(e.freed), color: 'var(--accent-fg)' },
-      { icon: 'box', label: 'Items', value: String(count), color: 'var(--text)' },
-      { icon: 'clock', label: 'When', value: whenOf(e.at), color: 'var(--text)' }
-    ];
+    // stats strip: space freed / outcome counts / when
+    const detailStats = [{ icon: 'hard-drive', label: 'Space freed', value: fmt(e.freed), color: 'var(--accent-fg)' }];
+    // Trashed files are not freed until the Trash is emptied; show them apart.
+    if (Number(e.trashedBytes) > 0) detailStats.push({ icon: 'trash', label: 'In your Trash', value: fmt(e.trashedBytes), color: 'var(--text)' });
+    if (isV2(e)) {
+      detailStats.push({ icon: 'check', label: 'Removed', value: String(c.removed), color: 'var(--text)' });
+      if (c.trashed) detailStats.push({ icon: 'trash', label: 'Trashed', value: String(c.trashed), color: 'var(--text)' });
+      if (c.failed) detailStats.push({ icon: 'warning', label: 'Failed', value: String(c.failed), color: 'var(--danger-fg)' });
+      if (c.refused) detailStats.push({ icon: 'info', label: 'Left alone', value: String(c.refused), color: 'var(--text)' });
+    } else {
+      detailStats.push({ icon: 'box', label: 'Items', value: String(count), color: 'var(--text)' });
+    }
+    detailStats.push({ icon: 'clock', label: 'When', value: whenOf(e.at), color: 'var(--text)' });
     host.appendChild(
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:10px 32px;padding:16px 2px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:22px' },
-        detailStats.map((s) => el('div', { style: 'display:flex;align-items:center;gap:9px;font-size:13.5px;color:var(--text-2)' }, [
-          ic(s.icon, 16, { color: 'var(--text-3)' }),
-          el('span', { text: s.label }),
-          el('b', { style: 'color:' + s.color + ';font-weight:700', text: s.value })
+        detailStats.map((st) => el('div', { style: 'display:flex;align-items:center;gap:9px;font-size:13.5px;color:var(--text-2)' }, [
+          ic(st.icon, 16, { color: 'var(--text-3)' }),
+          el('span', { text: st.label }),
+          el('b', { style: 'color:' + st.color + ';font-weight:700', text: st.value })
         ])))
     );
 
-    // restore note card, with a Restore affordance when reversible
-    const noteChildren = [
-      el('div', { style: 'flex:none;color:var(--accent-fg);margin-top:2px' }, [ic(reversible ? 'undo' : 'lock', 22)]),
-      el('div', { style: 'flex:1' }, [
-        el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: note.title }),
-        el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: note.text })
-      ])
-    ];
-    if (reversible) {
-      noteChildren.push(
-        el('button', {
-          style: 'height:42px;padding:0 18px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none;align-self:center',
-          hov: 'background:var(--accent-hover)',
-          onclick: () => {
-            if (SP.toast) SP.toast('Restoring.', 'Re-run install or build to bring these artifacts back');
-          }
-        }, [ic('undo-arrow', 15), 'Restore'])
+    // interrupted banner
+    if (e.status === 'interrupted') {
+      host.appendChild(
+        el('div', { style: 'display:flex;align-items:flex-start;gap:14px;padding:16px 20px;border-radius:16px;background:var(--warn-soft);border:1px solid var(--border);margin-bottom:16px' }, [
+          ic('warning', 22, { color: 'var(--warn-fg)' }),
+          el('div', { style: 'flex:1' }, [
+            el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: 'Interrupted' }),
+            el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: 'Spaci closed before this cleanup finished. Some of the items below may not have been removed, and the freed figure may be incomplete. Run a scan to see what is left.' })
+          ])
+        ])
       );
+    }
+
+    // recovery note card (text only: Spaci does not restore anything)
+    const noteLines = [
+      el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: note.title }),
+      el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: note.text })
+    ];
+    if (e.restoreHint) {
+      noteLines.push(el('div', { class: 'mono', style: 'color:var(--text-2);font-size:12.5px;margin-top:8px;white-space:pre-wrap;word-break:break-word', text: String(e.restoreHint) }));
     }
     host.appendChild(
       el('div', {
-        style: 'display:flex;align-items:flex-start;gap:14px;padding:18px 20px;border-radius:16px;background:' + (reversible ? 'var(--accent-soft)' : 'var(--panel)') + ';border:1px solid var(--border);margin-bottom:20px'
-      }, noteChildren)
+        style: 'display:flex;align-items:flex-start;gap:14px;padding:18px 20px;border-radius:16px;background:' + (rk === 'none' ? 'var(--panel)' : 'var(--accent-soft)') + ';border:1px solid var(--border);margin-bottom:20px'
+      }, [
+        el('div', { style: 'flex:none;color:var(--accent-fg);margin-top:2px' }, [ic(REV_ICON[rk], 22)]),
+        el('div', { style: 'flex:1' }, noteLines)
+      ])
     );
 
-    // list of cleaned items / paths
-    host.appendChild(el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin-bottom:12px', text: 'Cleaned items' + (items.length ? ' (' + items.length + ')' : '') }));
+    // list of cleaned items / paths, with the true total and a Show all
+    const total = items.length + extra;
+    const listHost = el('div', { class: 'sp-stagger', style: 'display:flex;flex-direction:column;gap:7px' });
+    host.appendChild(el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin-bottom:12px', text: 'Items' + (total ? ' (' + total + ')' : '') }));
 
     if (!items.length) {
       host.appendChild(
         el('div', { style: 'padding:18px 20px;border-radius:14px;background:var(--panel);border:1px solid var(--border);color:var(--text-3);font-size:13px', text: 'No individual paths were recorded for this cleanup.' })
       );
-    } else {
-      host.appendChild(
-        el('div', { class: 'sp-stagger', style: 'display:flex;flex-direction:column;gap:7px' },
-          items.map((p) =>
-            el('div', { style: 'display:flex;align-items:center;gap:13px;padding:12px 15px;border-radius:12px;background:var(--panel);border:1px solid var(--border)' }, [
-              ic(pathIcon(e, p), 18, { color: 'var(--text-3)' }),
-              el('div', { class: 'mono', style: 'flex:1;min-width:0;font-size:12.5px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: String(p) })
-            ])
-          )
-        )
-      );
+      return;
     }
+    let shown = 0;
+    const more = el('div', {});
+    function renderMore(all) {
+      const end = all ? items.length : Math.min(items.length, shown + PAGE);
+      for (; shown < end; shown++) listHost.appendChild(itemRow(e, items[shown]));
+      more.textContent = '';
+      if (shown < items.length) {
+        more.appendChild(el('button', {
+          style: 'margin-top:10px;height:38px;padding:0 16px;border-radius:10px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:13px;cursor:pointer;font-family:inherit',
+          hov: 'background:var(--panel-3)',
+          onclick: () => renderMore(true)
+        }, ['Show all ' + items.length + ' (showing ' + shown + ')']));
+      } else if (extra) {
+        more.appendChild(el('div', { style: 'margin-top:10px;color:var(--text-3);font-size:12.5px', text: 'Spaci keeps the first ' + items.length + ' items of this cleanup. ' + extra + ' more were processed but are not listed.' }));
+      }
+    }
+    host.appendChild(listHost);
+    host.appendChild(more);
+    renderMore(false);
   };
 })();

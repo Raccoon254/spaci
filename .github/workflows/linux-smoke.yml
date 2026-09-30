@@ -1,0 +1,102 @@
+name: Linux smoke
+
+# Launches the Linux builds on a stock Ubuntu 24.04 runner, which has the same
+# AppArmor user-namespace restriction and missing libfuse2 as a fresh desktop
+# install. A build passes only if the app is still running after 25 seconds.
+on:
+  push:
+    branches: ['hotfix/**']
+    paths: ['package.json', 'build/**', 'src/main.js', '.github/workflows/linux-smoke.yml']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Also launch the AppImage published for this release tag (for example v2.2.1-rc.1)'
+        required: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Environment
+        run: |
+          lsb_release -ds
+          echo "apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo n/a)"
+          dpkg -s libfuse2t64 >/dev/null 2>&1 && echo "libfuse2t64 installed" || echo "libfuse2t64 missing"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb >/dev/null
+
+      - name: Launch helper
+        run: |
+          cat > "$RUNNER_TEMP/launch.sh" <<'EOF'
+          #!/bin/bash
+          # launch.sh <label> <command...>: pass when the app is still running after 25 s.
+          label="$1"; shift
+          log="$RUNNER_TEMP/$label.log"
+          xvfb-run -a timeout 25 "$@" --user-data-dir="$(mktemp -d)" >"$log" 2>&1
+          code=$?
+          echo "---- $label (exit $code) ----"; tail -n 25 "$log"
+          if [ "$code" = 124 ] && ! grep -q "FATAL" "$log"; then echo "PASS $label"; else echo "FAIL $label"; echo "FAIL $label" >> "$RUNNER_TEMP/failures"; fi
+          EOF
+          chmod +x "$RUNNER_TEMP/launch.sh"
+
+      - name: Reproduce with a published AppImage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || 'v2.2.1-rc.1' }}
+        run: |
+          gh release download "$TAG" -p '*.AppImage' -D published
+          chmod +x published/*.AppImage
+          "$RUNNER_TEMP/launch.sh" published-no-fuse published/*.AppImage || true
+          rm -f "$RUNNER_TEMP/failures"   # the published build is evidence, not a gate
+
+      - name: Build AppImage and deb from this commit
+        run: |
+          npm install --no-audit --no-fund
+          npx electron-builder --linux AppImage --publish never
+          npx electron-builder --linux deb --publish never
+          ls -la release
+          # The AppImage must not carry the deb marker, or it would update with a .deb.
+          ( cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/release/*.AppImage --appimage-extract >/dev/null )
+          if [ -e "$RUNNER_TEMP/squashfs-root/resources/package-type" ]; then echo "FAIL appimage-package-type"; echo "FAIL appimage-package-type" >> "$RUNNER_TEMP/failures"; else echo "AppImage has no package-type marker"; fi
+          ls "$RUNNER_TEMP/squashfs-root/usr/share/icons/hicolor/"
+          rm -rf "$RUNNER_TEMP/squashfs-root"
+
+      - name: deb installs icon, menu entry and AppArmor profile, and launches
+        run: |
+          sudo apt-get install -y ./release/*.deb 2>&1 | tee "$RUNNER_TEMP/deb-install.log"
+          if grep -q "AppArmor parser error" "$RUNNER_TEMP/deb-install.log"; then echo "FAIL deb-apparmor-parse" >> "$RUNNER_TEMP/failures"; fi
+          sudo aa-status 2>/dev/null | grep -w spaci || echo "spaci profile not loaded"
+          ls /usr/share/icons/hicolor/*/apps/ | head -20
+          for sz in 128x128 256x256 512x512; do
+            test -e /usr/share/icons/hicolor/$sz/apps/spaci.png || { echo "FAIL deb-icon-$sz" >> "$RUNNER_TEMP/failures"; echo "no $sz icon"; }
+          done
+          test ! -e /usr/share/icons/hicolor/0x0 || { echo "FAIL deb-icon-0x0" >> "$RUNNER_TEMP/failures"; echo "icon installed as 0x0"; }
+          sudo apparmor_parser -QT /etc/apparmor.d/spaci && echo "profile parses" || echo "FAIL deb-apparmor-parse" >> "$RUNNER_TEMP/failures"
+          cat /opt/Spaci/resources/package-type
+          grep -E '^(Name|Exec|Icon)=' /usr/share/applications/spaci.desktop
+          if [ -d /etc/apparmor.d ]; then cat /etc/apparmor.d/spaci || echo "FAIL deb-apparmor" >> "$RUNNER_TEMP/failures"; fi
+          ls -la /opt/Spaci/chrome-sandbox /opt/Spaci/spaci /opt/Spaci/spaci-bin
+          head -3 /opt/Spaci/spaci
+          "$RUNNER_TEMP/launch.sh" deb /opt/Spaci/spaci
+
+      - name: AppImage launches once libfuse2 is present
+        run: |
+          sudo apt-get install -y -qq libfuse2t64 >/dev/null
+          chmod +x release/*.AppImage
+          "$RUNNER_TEMP/launch.sh" appimage release/*.AppImage
+
+      - name: deb removes cleanly
+        run: |
+          sudo apt-get remove -y spaci
+          test ! -e /etc/apparmor.d/spaci || { echo "FAIL deb-remove"; echo "FAIL deb-remove" >> "$RUNNER_TEMP/failures"; }
+
+      - name: Verdict
+        run: |
+          if [ -s "$RUNNER_TEMP/failures" ]; then cat "$RUNNER_TEMP/failures"; exit 1; fi
+          echo "All Linux launch checks passed"

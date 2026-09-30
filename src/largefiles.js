@@ -102,4 +102,6 @@ async function scanLargeFiles(root, minBytes, onProgress, signal) {
   return { files, scanned };
 }
 
-module.exports = { scanLargeFiles };
+const { trashFiles } = require('./trash-files');
+
+module.exports = { scanLargeFiles, trashFiles };

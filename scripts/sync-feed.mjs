@@ -61,6 +61,7 @@ function parseYml(text) {
 function classify(file) {
   if (/\.exe$/i.test(file)) return { platform: 'windows', arch: 'x64' };
   if (/\.AppImage$/i.test(file)) return { platform: 'linux', arch: 'x86_64' };
+  if (/\.deb$/i.test(file)) return { platform: 'linux', arch: 'Ubuntu, Debian (.deb)' };
   if (/\.dmg$/i.test(file) || /\.zip$/i.test(file)) {
     return { platform: 'mac', arch: /arm64/i.test(file) ? 'Apple Silicon' : 'Intel' };
   }
@@ -75,7 +76,9 @@ function humanize(bytes) {
 const changelog = JSON.parse(readFileSync('changelog.json', 'utf8'));
 const entry = changelog[0];
 
-const ymlNames = ['latest-mac.yml', 'latest.yml', 'latest-linux.yml'];
+// deb-linux.yml is written by the release workflow in the same shape: there is
+// no electron-updater feed for a .deb.
+const ymlNames = ['latest-mac.yml', 'latest.yml', 'latest-linux.yml', 'deb-linux.yml'];
 const files = [];
 const seen = new Set();
 let version = entry.version;

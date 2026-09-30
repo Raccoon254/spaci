@@ -241,3 +241,57 @@ test('excludePaths survive, and are matched case-insensitively on macOS and Wind
     fsx.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('errors carry the OS error code, and per-job results say what was really removed', async () => {
+  const root = fixture();
+  const stuck = path.join(root, 'stuck');
+  const fine = path.join(root, 'fine');
+  const gone = path.join(root, 'gone');
+  write(path.join(stuck, 'a.txt'));
+  write(path.join(fine, 'b.txt'));
+  const fsp = fs.promises;
+  const realUnlink = fsp.unlink;
+  fsp.unlink = async (p) => {
+    if (p.endsWith('a.txt')) throw Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
+    return realUnlink.call(fsp, p);
+  };
+  try {
+    const res = await cleaner.clean([{ path: stuck }, { path: fine }, { path: gone }]);
+    assert.equal(res.errors.length, 1);
+    assert.equal(res.errors[0].code, 'EBUSY');
+    assert.deepEqual(res.results.map((r) => [r.path, r.ok, r.missing, r.code]), [
+      [stuck, false, false, 'EBUSY'],
+      [fine, true, false, undefined],
+      [gone, false, true, 'ENOENT'],
+    ]);
+    assert.ok(res.results[1].freed > 0);
+    assert.equal(res.results[2].freed, 0);
+    assert.equal(res.results.filter((r) => r.ok).length, 1, 'only one job actually removed');
+    assert.equal(res.totalFreed, res.results.reduce((s, r) => s + r.freed, 0));
+  } finally {
+    fsp.unlink = realUnlink;
+    unlockAndRemove(root);
+  }
+});
+
+test('a contents job whose folder cannot be listed is a failure with its code', async (t) => {
+  if (process.getuid && process.getuid() === 0) return t.skip('root ignores permission bits');
+  const root = fixture();
+  const dir = path.join(root, 'cache');
+  write(path.join(dir, 'x.bin'));
+  const fsp = fs.promises;
+  const realReaddir = fsp.readdir;
+  fsp.readdir = async (p, ...rest) => {
+    if (p === dir) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    return realReaddir.call(fsp, p, ...rest);
+  };
+  try {
+    const res = await cleaner.clean([{ path: dir, mode: 'contents' }]);
+    assert.equal(res.results[0].ok, false);
+    assert.equal(res.results[0].code, 'EACCES');
+    assert.equal(res.errors[0].code, 'EACCES');
+  } finally {
+    fsp.readdir = realReaddir;
+    unlockAndRemove(root);
+  }
+});

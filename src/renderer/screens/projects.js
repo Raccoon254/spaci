@@ -606,17 +606,22 @@
     }
 
     // Clean every cleanable item across the selected projects. Reuses the same
-    // job shape and api.clean call the detail screen builds (safe / reversible,
-    // so no confirm modal). Mirrors the detail's post-clean bookkeeping.
+    // job shape and api.clean call the detail screen builds. Asks first when
+    // confirmBeforeClean is on. Mirrors the detail's post-clean bookkeeping.
     async function cleanSelectedProjects(chosen) {
       if (S.projCleaning || !chosen.length) return;
       const jobs = [];
       chosen.forEach((p) => safeItems(p).forEach((it) => jobs.push({ path: it.path, isDir: it.isDir, size: it.size })));
       if (!jobs.length) return;
       const sent = new Set(jobs.map((j) => j.path));
+      const cf = await SP.confirmClean({ count: jobs.length, bytes: jobs.reduce((s, j) => s + (j.size || 0), 0), note: 'Build artifacts and dependencies from ' + chosen.length + ' project' + (chosen.length === 1 ? '' : 's') + '. They rebuild on your next install or build.' });
+      if (!cf.go) return;
       S.projCleaning = true;
+      SP.setCleaning(true);
       try {
-        const res = await api.clean(jobs, { scope: 'projects', label: chosen.length + ' project' + (chosen.length === 1 ? '' : 's'), reversible: true });
+        const meta = { scope: 'projects', label: chosen.length + ' project' + (chosen.length === 1 ? '' : 's') };
+        if (cf.confirmed) meta.confirmed = true;
+        const res = await api.clean(jobs, meta);
         const sum = SP.reportClean(res, {
           fallbackFreed: jobs.reduce((s, j) => s + (j.size || 0), 0),
           burstLabel: 'across ' + chosen.length + ' project' + (chosen.length === 1 ? '' : 's')
@@ -1042,7 +1047,7 @@
     function updateAfterToggle() { renderSelectAllLabel(); syncDetailActionBar(); }
 
     // Floating action bar drives cleaning for this project. It is the only
-    // clean trigger. Safe / reversible, so no confirm modal ("safe by design").
+    // clean trigger. Asks first when confirmBeforeClean is on.
     function syncDetailActionBar() {
       const chosenItems = selectedItems();
       const n = chosenItems.length;
@@ -1062,10 +1067,16 @@
       if (S.projCleaning) return;
       const chosenItems = selectedItems();
       if (!chosenItems.length) return;
+      const jobs = chosenItems.filter((it) => it.safe === true).map((it) => ({ path: it.path, isDir: it.isDir, size: it.size }));
+      if (!jobs.length) return;
+      const cf = await SP.confirmClean({ count: jobs.length, bytes: jobs.reduce((s, j) => s + (j.size || 0), 0), note: 'Build artifacts and dependencies from ' + p.name + '. They rebuild on your next install or build.' });
+      if (!cf.go) return;
       S.projCleaning = true;
+      SP.setCleaning(true);
       try {
-        const jobs = chosenItems.filter((it) => it.safe === true).map((it) => ({ path: it.path, isDir: it.isDir, size: it.size }));
-        const res = await api.clean(jobs, { scope: 'projects', label: p.name, reversible: true });
+        const meta = { scope: 'projects', label: p.name };
+        if (cf.confirmed) meta.confirmed = true;
+        const res = await api.clean(jobs, meta);
         const sum = SP.reportClean(res, {
           fallbackFreed: chosenItems.reduce((s, i) => s + (i.size || 0), 0),
           burstLabel: 'from ' + p.name

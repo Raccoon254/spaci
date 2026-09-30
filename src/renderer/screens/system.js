@@ -47,7 +47,7 @@
   function preselect(targets) {
     const sel = selSet();
     sel.clear();
-    targets.forEach((t) => { if (t.safe) sel.add(t.id); });
+    targets.forEach((t) => { if (t.safe && !isPermanent(t)) sel.add(t.id); });
   }
   // Irreversible data (AI tool session history, SQLite databases). Never
   // preselected, never swept up by Select all, and confirmed before deleting.
@@ -126,29 +126,32 @@
       if (!jobs.length) return;
       const permanent = chosen.filter(isPermanent);
       const risky = chosen.filter((t) => !t.safe || isPermanent(t));
-      if (risky.length) {
-        // Each target says in its own words what deleting it means.
-        const body = risky.slice(0, 4).map((t) => t.name + ': ' + (t.description || 'Review before deleting.') + (isPermanent(t) ? ' This cannot be undone.' : '')).join('\n')
-          + (risky.length > 4 ? '\nand ' + (risky.length - 4) + ' more.' : '');
-        const ok = await SP.confirm({
-          title: permanent.length ? 'Permanently delete ' + risky.length + (risky.length === 1 ? ' item?' : ' items?') : 'Clean ' + risky.length + ' item' + (risky.length === 1 ? '' : 's') + ' marked Review?',
-          body,
-          confirmLabel: 'Delete',
-          danger: true,
-          icon: 'trash'
-        });
-        if (!ok) return;
-      }
+      const review = risky.filter((t) => !isPermanent(t));
+      // Each Review target says in its own words what deleting it means.
+      const note = review.length
+        ? review.slice(0, 4).map((t) => t.name + ': ' + (t.description || 'Review before deleting.')).join('\n')
+          + (review.length > 4 ? '\nand ' + (review.length - 4) + ' more.' : '')
+        : undefined;
+      const cf = await SP.confirmClean({
+        force: risky.length > 0,
+        count: chosen.length,
+        bytes: chosen.reduce((a, t) => a + (t.size || 0), 0),
+        permanent: permanent.map((t) => t.name),
+        note
+      });
+      if (!cf.go) return;
       const nameOf = (id) => { const t = targets.find((x) => x.id === id); return t ? t.name : ''; };
       const noun = permanent.length ? 'item' : 'cache';
       S.systemCleaning = true; paint();
+      SP.setCleaning(true);
       let needsRescan = false;
       try {
-        const res = await api.clean(jobs, {
+        const meta = {
           scope: 'system',
-          label: chosen.length + ' system ' + (chosen.length === 1 ? noun : noun + 's'),
-          reversible: permanent.length === 0
-        });
+          label: chosen.length + ' system ' + (chosen.length === 1 ? noun : noun + 's')
+        };
+        if (cf.confirmed) meta.confirmed = true;
+        const res = await api.clean(jobs, meta);
         const sum = SP.reportClean(res, {
           fallbackFreed: chosen.reduce((a, t) => a + (t.size || 0), 0),
           names: nameOf,
@@ -199,7 +202,7 @@
       const on = sel.has(t.id);
       const badgeSafe = t.safe;
       const permanent = isPermanent(t);
-      const badgeClass = badgeSafe ? 'sp-badge-safe' : 'sp-badge-warn';
+      const badgeClass = badgeSafe && !permanent ? 'sp-badge-safe' : 'sp-badge-warn';
       const badgeText = permanent ? 'Permanent' : (badgeSafe ? 'Safe' : 'Review');
       return el('div', {
         class: 'sp-hov',
@@ -245,6 +248,8 @@
 
     async function runPrune(kind, label) {
       if (S.dockerPruning) return;
+      const cf = await SP.confirmClean({ title: 'Run Docker cleanup?', count: 1, note: label + '. Docker rebuilds this cache the next time you build.' });
+      if (!cf.go) return;
       S.dockerPruning = kind;
       S.dockerResult = null;
       paint();
@@ -445,7 +450,7 @@
     function selectAllRow(targets) {
       const sel = selSet();
       // Select all only takes the safe ones. Permanent items are opt-in one by one.
-      const pickable = targets.filter((t) => t.safe);
+      const pickable = targets.filter((t) => t.safe && !isPermanent(t));
       const hasOptIn = pickable.length < targets.length;
       const allOn = pickable.length > 0 && pickable.every((t) => sel.has(t.id));
       return el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin:26px 0 0' }, [

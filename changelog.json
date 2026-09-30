@@ -1,8 +1,32 @@
 [
   {
-    "version": "2.2.0",
+    "version": "2.2.1",
     "date": "2026-09-30",
     "tag": "Latest",
+    "major": false,
+    "summary": "A safety and honesty update: nothing irreversible is deleted without asking, large files go to the Trash, and History records exactly what happened.",
+    "added": [],
+    "improved": [
+      "History now records every item: what was removed, what failed, what was skipped and why, how much space each freed, and how to get it back.",
+      "Restore hints match your project. A cleaned node_modules folder tells you to run pnpm, yarn, bun or npm, based on the lockfile the project actually uses.",
+      "When \"Confirm before cleaning\" is on (the default), every clean asks first and shows the number of items and their size.",
+      "Error messages are in plain English, with steps to fix permission problems such as granting Full Disk Access."
+    ],
+    "fixed": [
+      "Emptying the Trash was preselected and labelled reversible. It is no longer preselected, it always asks first, and it is marked permanent. Xcode Archives are marked permanent too.",
+      "Large files are now moved to the Trash instead of being deleted permanently, so you can put them back.",
+      "Files moved to the Trash are no longer counted as space freed, since the space only comes back when the Trash is emptied.",
+      "History had a Restore button that did nothing. It has been removed, and the app no longer claims it can restore cleaned items.",
+      "History counted items that failed or were skipped as cleaned. Counts now reflect what was actually removed, and a clean interrupted by a crash is recorded as interrupted.",
+      "The tray showed a \"Guard on\" status, and the Tools screens showed sample figures as if they were real. Previews are now labelled as previews.",
+      "The \"Desktop notifications\" setting is now respected.",
+      "Tightened what the app window is allowed to ask the background process to open, read or scan. The large-file scan now looks only in your home folder and in folders you choose."
+    ]
+  },
+  {
+    "version": "2.2.0",
+    "date": "2026-09-30",
+    "tag": "Feature",
     "major": false,
     "summary": "Spaci now finds the space AI coding tools and developer caches take up, explains what macOS calls System Data, and never deletes a folder it cannot prove is build output.",
     "added": [

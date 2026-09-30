@@ -146,7 +146,7 @@ function renderOverlays() {
       el('div', { style: 'font-size:13px;color:var(--text-2);font-weight:600;line-height:1.5;margin-bottom:8px', text: label }),
       el('div', { style: 'display:flex;flex-direction:column;gap:7px' }, rows)
     ]) : null;
-    const line = (name, path, note) => el('div', { style: 'padding:10px 12px;border-radius:10px;background:var(--panel-2);border:1px solid var(--border);min-width:0' }, [
+    const line = (name, path, note, raw) => el('div', { title: raw || '', style: 'padding:10px 12px;border-radius:10px;background:var(--panel-2);border:1px solid var(--border);min-width:0' }, [
       name ? el('div', { style: 'font-weight:600;font-size:13px', text: name }) : null,
       path ? el('div', { class: 'mono', style: 'color:var(--text-3);font-size:11.5px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: path }) : null,
       note ? el('div', { style: 'color:var(--text-2);font-size:12.5px;margin-top:3px;line-height:1.5', text: note }) : null
@@ -161,7 +161,7 @@ function renderOverlays() {
       blocks.push(section(g.reason, rows));
     });
     if ((rp.errors || []).length) {
-      const rows = shown(rp.errors).map((er) => line(null, er.path, er.message));
+      const rows = shown(rp.errors).map((er) => line(null, er.path, er.message, er.raw));
       const extra = more(rp.errors);
       if (extra) rows.push(extra);
       blocks.push(section('Could not be removed', rows));
@@ -198,18 +198,76 @@ function renderOverlays() {
   }
 }
 function setActionBar(cfg) { S.actionBar = cfg || null; renderOverlays(); }
-// Run the action bar's clean: flip the button to a colored loader IMMEDIATELY
-// (before the async clean even starts), guard against double-clicks, then reset
-// when the clean settles. The screen's own clean handler still does its work.
+// Run the action bar's clean. The screen's onClean handler shows any confirm
+// dialog FIRST and only then calls SP.setCleaning(true), so the button never
+// flips to "Cleaning" while the user is still deciding. Double clicks are
+// ignored while a clean or a confirm dialog is already open.
+let cleanBusy = false;
+function setCleaning(on) { S.cleaning = !!on; renderOverlays(); }
 function runClean(ab) {
-  if (S.cleaning) return;
-  S.cleaning = true;
-  renderOverlays();
+  if (S.cleaning || cleanBusy || S.confirmCfg) return;
+  cleanBusy = true;
   Promise.resolve(ab && ab.onClean ? ab.onClean() : null)
     .catch(() => {})
-    .then(() => { S.cleaning = false; renderOverlays(); });
+    .then(() => { cleanBusy = false; S.cleaning = false; renderOverlays(); });
 }
 function confirmDialog(opts) { return new Promise((resolve) => { S.confirmCfg = Object.assign({ resolve }, opts || {}); renderOverlays(); }); }
+// Shared pre-clean confirmation. spec:
+//   count, bytes        what will run (title: "Delete 3 items (4.5 GB)?")
+//   permanent: [names]  items that cannot be recovered (listed by name)
+//   trash: [{name,size}] files that go to the system Trash (listed with sizes)
+//   force: true         always ask (irreversible or large-file work), even when
+//                       the confirmBeforeClean preference is off
+//   note                optional extra line for ordinary rebuildable work
+// Resolves { go, confirmed }. go: carry on with the clean. confirmed: the user
+// accepted a dialog, which is the only case that may send meta.confirmed.
+async function confirmClean(spec) {
+  spec = spec || {};
+  const permanent = spec.permanent || [];
+  const trash = spec.trash || [];
+  let ask = !!spec.force || permanent.length > 0 || trash.length > 0;
+  if (!ask) {
+    let pref = true;
+    try { const p = await window.api.getPrefs(); if (p && p.confirmBeforeClean === false) pref = false; } catch (_) {}
+    ask = pref;
+  }
+  if (!ask) return { go: true, confirmed: false };
+  const n = spec.count != null ? spec.count : (permanent.length + trash.length);
+  const only = trash.length > 0 && !permanent.length && trash.length === n;
+  const total = spec.bytes != null ? ' (' + fmt(spec.bytes) + ')' : '';
+  const plural = n === 1 ? '' : 's';
+  const title = spec.title || (only ? 'Move ' + n + ' file' + plural + total + ' to the Trash?' : 'Delete ' + n + ' item' + plural + total + '?');
+  const lines = [];
+  if (trash.length) {
+    lines.push('These go to your Trash. Space comes back only when you empty it.');
+    trash.slice(0, 6).forEach((f) => lines.push(f.name + (f.size != null ? ' (' + fmt(f.size) + ')' : '')));
+    if (trash.length > 6) lines.push('and ' + (trash.length - 6) + ' more.');
+  }
+  if (permanent.length) {
+    lines.push((trash.length ? '\n' : '') + 'Permanent, cannot be undone: ' + permanent.slice(0, 6).join(', ') + (permanent.length > 6 ? ' and ' + (permanent.length - 6) + ' more' : '') + '.');
+  }
+  if (spec.note) lines.push((lines.length ? '\n' : '') + spec.note);
+  else if (!trash.length && !permanent.length) lines.push('Caches and build output. They rebuild on your next install or build.');
+  const ok = await confirmDialog({
+    title, body: lines.join('\n'),
+    confirmLabel: only ? 'Move to Trash' : 'Delete',
+    danger: permanent.length > 0 || only,
+    icon: 'trash'
+  });
+  return { go: !!ok, confirmed: !!ok };
+}
+// Plain-English text for a failed item. Raw text stays available on hover.
+function plainError(er) {
+  const code = er && er.code;
+  const raw = (er && (er.error || er.message)) || '';
+  const m = raw.match(/\b(EACCES|EPERM|EBUSY|ENOENT|ENOTEMPTY)\b/);
+  const c = code || (m && m[1]) || '';
+  if (c === 'EACCES' || c === 'EPERM') return 'Spaci does not have permission. On macOS, grant Full Disk Access in System Settings > Privacy & Security.';
+  if (c === 'EBUSY') return 'In use by another app. Quit it and try again.';
+  if (c === 'ENOENT') return 'Already gone.';
+  if (c === 'ENOTEMPTY') return 'Something is still using this folder. Try again.';
+  return 'Could not be removed.';
+}
 function burst(size, label) {
   S.burstCfg = { size, label };
   renderOverlays();
@@ -234,18 +292,23 @@ function summariseClean(res, opts) {
   const refused = ok && Array.isArray(res.refused) ? res.refused.filter(Boolean) : [];
   const errors = ok && Array.isArray(res.errors) ? res.errors.filter(Boolean) : [];
   const freed = ok ? (res.totalFreed != null ? Number(res.totalFreed) || 0 : (opts.fallbackFreed || 0)) : 0;
+  // Files moved to the Trash still use the disk until it is emptied, so they
+  // are reported apart from freed space, never as reclaimed.
+  const trashedCount = ok && Array.isArray(res.trashed) ? res.trashed.length : 0;
+  const trashedBytes = ok ? Number(res.trashedBytes) || 0 : 0;
+  const moved = freed > 0 || trashedCount > 0;
   const issues = refused.length + errors.length;
   let state = 'done';
   if (!ok) state = 'failed';
-  else if (issues && freed > 0) state = 'partial';
+  else if (issues && moved) state = 'partial';
   else if (issues) state = 'blocked';
-  else if (freed <= 0) state = 'empty';
+  else if (!moved) state = 'empty';
   const refusedPaths = new Set(refused.map((r) => r.path));
   const refusedTargets = new Set(refused.map((r) => r.target).filter(Boolean));
   const errorPaths = errors.map((e) => e.path).filter(Boolean);
   const sep = /^[a-zA-Z]:[\\/]/.test(errorPaths[0] || '') ? '\\' : '/';
   return {
-    ok, state, freed, refused, errors, issues, refusedTargets,
+    ok, state, freed, trashedCount, trashedBytes, refused, errors, issues, refusedTargets,
     error: !ok ? ((res && res.error) || 'Clean failed') : null,
     // True when this path was refused or reported a failure at or below it.
     blocked: (p) => refusedPaths.has(p) || errorPaths.some((ep) => ep === p || ep.indexOf(p + sep) === 0)
@@ -261,7 +324,12 @@ function reportClean(res, opts) {
   const sum = summariseClean(res, opts);
   const noun = (n) => n + ' item' + (n === 1 ? '' : 's');
   if (sum.state === 'done') {
-    burst(fmt(sum.freed), opts.burstLabel);
+    if (sum.trashedCount && sum.freed <= 0) {
+      toast('Moved ' + sum.trashedCount + (sum.trashedCount === 1 ? ' file' : ' files') + ' (' + fmt(sum.trashedBytes) + ') to the Trash',
+        'The space comes back when you empty the Trash. Until then you can put them back.');
+    } else {
+      burst(fmt(sum.freed), opts.burstLabel);
+    }
     return sum;
   }
   if (sum.state === 'failed') {
@@ -272,7 +340,7 @@ function reportClean(res, opts) {
     const names = opts.names || (() => '');
     const byReason = new Map();
     sum.refused.forEach((r) => {
-      const reason = r.reason || 'Spaci left this alone.';
+      const reason = r.reason === 'needs-confirmation' ? 'Spaci needs your confirmation for this. Try again and confirm.' : (r.reason || 'Spaci left this alone.');
       if (!byReason.has(reason)) byReason.set(reason, []);
       byReason.get(reason).push({ name: names(r.target) || '', path: shortHome(r.path) });
     });
@@ -281,10 +349,12 @@ function reportClean(res, opts) {
     if (sum.errors.length) lead.push(noun(sum.errors.length) + ' could not be removed.');
     S.reportCfg = {
       tone: sum.state === 'partial' ? 'accent' : 'danger',
-      title: sum.state === 'partial' ? 'Freed ' + fmt(sum.freed) + ', with some items left' : 'Nothing was cleaned',
+      title: sum.state === 'partial'
+        ? (sum.trashedCount && sum.freed <= 0 ? 'Moved ' + fmt(sum.trashedBytes) + ' to the Trash, with some items left' : 'Freed ' + fmt(sum.freed) + ', with some items left')
+        : 'Nothing was cleaned',
       lead: lead.join(' ') + (sum.state === 'partial' ? '' : ' No space was freed.'),
       groups: Array.from(byReason, ([reason, items]) => ({ reason, items })),
-      errors: sum.errors.map((e) => ({ path: shortHome(e.path), message: e.error || 'Unknown error' }))
+      errors: sum.errors.map((e) => ({ path: shortHome(e.path), message: plainError(e), raw: e.error || '' }))
     };
   }
   renderOverlays();
@@ -389,9 +459,9 @@ const NAV_TOP = [
   { key: 'recommendations', label: 'Recommendations', icon: 'sparkles', hot: true, count: () => (S.recs || []).filter((r) => !(r.action && r.action.type === 'none')).length }
 ];
 const NAV_SOON = [
-  { label: 'Scheduled Scans', icon: 'calendar', route: 'scheduled' },
-  { label: 'Duplicate Finder', icon: 'copy', route: 'duplicate' },
-  { label: 'Spaci Guard', icon: 'shield', route: 'guard' }
+  { label: 'Scheduled Scans', icon: 'calendar', route: 'scheduled', preview: true },
+  { label: 'Duplicate Finder', icon: 'copy', route: 'duplicate', preview: true },
+  { label: 'Spaci Guard', icon: 'shield', route: 'guard', preview: true }
 ];
 const NAV_BOTTOM = [
   { key: 'history', label: 'History', icon: 'log' },
@@ -400,7 +470,7 @@ const NAV_BOTTOM = [
 
 SP_REGISTRY();
 function SP_REGISTRY() {
-  window.SP = { screens: {}, go, state: S, el, ic, tic, ring, fmt, ago, toast, setActionBar, confirm: confirmDialog, burst, beginScan, endScan, scanBanner, scanActive, scanCard, summariseClean, reportClean };
+  window.SP = { screens: {}, go, state: S, el, ic, tic, ring, fmt, ago, toast, setActionBar, confirm: confirmDialog, burst, setCleaning, confirmClean, plainError, beginScan, endScan, scanBanner, scanActive, scanCard, summariseClean, reportClean };
 }
 
 // ---------- shell (built once, then reused; only content swaps on nav) ----------
@@ -487,7 +557,9 @@ function navItem(item) {
     class: isActive(item) ? 'sp-nav-on sp-hov' : 'sp-hov',
     style: 'display:flex;align-items:center;gap:13px;padding:10px 12px;border-radius:11px;cursor:pointer;font-weight:500;font-size:14px;color:var(--text-2);user-select:none',
     onclick: () => { if (item.key) go(item.key); else { if (item.soon) S.activeSoon = item.soon; go(item.route); } }
-  }, [ic(item.icon, 19), el('span', { style: 'flex:1' }, [item.label]), countEl]);
+  }, [ic(item.icon, 19), el('span', { style: 'flex:1' }, [item.label]),
+    item.preview ? el('span', { class: 'sp-badge-accent', style: 'font-size:10px;font-weight:700;padding:2px 8px;border-radius:99px;letter-spacing:.3px', text: 'Soon' }) : null,
+    countEl]);
   // Hover background, but never on the active row (its bg comes from .sp-nav-on).
   row.addEventListener('mouseenter', () => { if (!row.classList.contains('sp-nav-on')) row.style.background = 'var(--panel)'; });
   row.addEventListener('mouseleave', () => { if (!row.classList.contains('sp-nav-on')) row.style.background = ''; });

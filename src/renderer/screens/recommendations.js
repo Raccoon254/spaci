@@ -70,7 +70,7 @@
         reversible: true,
         jobs: [],
         items: [{ icon: 'box', path: act.kind === 'build-cache' ? 'docker builder prune' : 'docker image prune' }],
-        meta: { scope: 'docker', label: rec.title || 'Docker', reversible: true },
+        meta: { scope: 'docker', label: rec.title || 'Docker' },
       };
     }
     if (rec.kind === 'project' || act.type === 'open-project') {
@@ -93,7 +93,7 @@
         // remove the whole artifact folder (cleaner: no 'contents' = remove path)
         jobs: safeOnly.map((i) => ({ path: i.path })),
         items: safeOnly.map((i) => ({ icon: i.isDir ? 'folder-2' : 'file', path: i.path, name: i.name, note: i.note, size: i.size })),
-        meta: { scope: 'projects', label: (proj && proj.name) || rec.title || '', reversible },
+        meta: { scope: 'projects', label: (proj && proj.name) || rec.title || '' },
       };
     }
     // system cache
@@ -112,7 +112,7 @@
       reversible,
       jobs: paths.map((p) => ({ path: p, mode: (tgt && tgt.mode) || 'contents' })),
       items: paths.map((p) => ({ icon: 'folder-2', path: p })),
-      meta: { scope: 'system', label: (tgt && tgt.name) || rec.title || '', reversible },
+      meta: { scope: 'system', label: (tgt && tgt.name) || rec.title || '' },
     };
   }
 
@@ -301,7 +301,7 @@
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:10px 32px;padding:16px 2px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:22px' }, [
         stat('hard-drive', 'Reclaimable', fmt(a.savings), 'var(--accent-fg)'),
         stat('box', 'Locations', String(a.count), 'var(--text)'),
-        stat(reversible ? 'undo' : 'lock', 'Reversible', reversible ? 'Yes, rebuilds' : 'Permanent', reversible ? 'var(--text)' : 'var(--danger-fg)'),
+        stat(reversible ? 'undo' : 'lock', 'After cleaning', reversible ? 'Rebuilds on next install/build' : 'Permanent', reversible ? 'var(--text)' : 'var(--danger-fg)'),
       ])
     );
 
@@ -310,7 +310,7 @@
       el('div', { style: 'display:flex;align-items:flex-start;gap:14px;padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid var(--border);margin-bottom:20px' }, [
         ic(reversible ? 'undo' : 'shield', 22, { color: reversible ? 'var(--accent-fg)' : 'var(--danger-fg)' }),
         el('div', { style: 'flex:1' }, [
-          el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: reversible ? 'Safe and reversible' : 'Permanent removal' }),
+          el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: reversible ? 'Rebuilds on next install or build' : 'Permanent removal' }),
           el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: reversible
             ? 'These are regenerable caches and build output. Your tools rebuild them automatically the next time you build or install.'
             : 'These files will not be regenerated automatically. Make sure you no longer need them before applying.' }),
@@ -322,16 +322,26 @@
     host.appendChild(el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin-bottom:12px', text: a.count ? 'What will be removed' : 'Nothing to remove' }));
 
     if ((a.items || []).length) {
-      host.appendChild(
-        el('div', { style: 'display:flex;flex-direction:column;gap:7px;margin-bottom:24px' },
-          (a.items || []).slice(0, 80).map((it) => el('div', {
-            style: 'display:flex;align-items:center;gap:13px;padding:12px 15px;border-radius:12px;background:var(--panel);border:1px solid var(--border)',
-          }, [
-            ic(it.icon || 'folder-2', 18, { color: 'var(--text-3)' }),
-            el('div', { class: 'mono', style: 'flex:1;min-width:0;color:var(--text-2);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: it.path }),
-            it.size != null ? el('div', { style: 'font-size:12.5px;color:var(--text-3);font-weight:600;flex:none', text: fmt(it.size) }) : null,
-          ])))
-      );
+      const listEl = el('div', { style: 'display:flex;flex-direction:column;gap:7px;margin-bottom:24px' });
+      const itemEl = (it) => el('div', {
+        style: 'display:flex;align-items:center;gap:13px;padding:12px 15px;border-radius:12px;background:var(--panel);border:1px solid var(--border)',
+      }, [
+        ic(it.icon || 'folder-2', 18, { color: 'var(--text-3)' }),
+        el('div', { class: 'mono', style: 'flex:1;min-width:0;color:var(--text-2);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: it.path }),
+        it.size != null ? el('div', { style: 'font-size:12.5px;color:var(--text-3);font-weight:600;flex:none', text: fmt(it.size) }) : null,
+      ]);
+      const all = a.items;
+      const LIMIT = 100;
+      all.slice(0, LIMIT).forEach((it) => listEl.appendChild(itemEl(it)));
+      if (all.length > LIMIT) {
+        const btn = el('button', {
+          style: 'height:38px;padding:0 16px;border-radius:10px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:13px;cursor:pointer;font-family:inherit;align-self:flex-start',
+          hov: 'background:var(--panel-3)',
+          onclick: () => { all.slice(LIMIT).forEach((it) => listEl.insertBefore(itemEl(it), btn)); btn.remove(); },
+        }, ['Show all ' + all.length + ' (showing ' + LIMIT + ')']);
+        listEl.appendChild(btn);
+      }
+      host.appendChild(listEl);
     } else {
       host.appendChild(el('div', { style: 'color:var(--text-3);font-size:13.5px;margin-bottom:24px', text: 'The scan no longer lists files for this action. Re-scan to refresh.' }));
     }
@@ -348,13 +358,13 @@
             : r.state === 'empty' ? 'Nothing was freed' : 'Could not clean';
       const reasons = Array.from(new Set((r.refused || []).map((x) => x.reason).filter(Boolean)));
       const lines = [];
-      if (done) lines.push('Space reclaimed. The artifacts will rebuild when you next need them.');
+      if (done) lines.push('Space reclaimed. Build artifacts rebuild on your next install or build.');
       else if (r.state === 'empty') lines.push('The selected items were already empty or gone.');
       else if (r.state === 'failed') lines.push((r.error || 'Something went wrong while removing files.') + '.');
       else {
         if (reasons.length) lines.push(reasons.slice(0, 2).join(' '));
         if ((r.refused || []).length > 1) lines.push(r.refused.length + ' items were left alone.');
-        if ((r.errors || []).length) lines.push(r.errors.length + ' item' + (r.errors.length === 1 ? '' : 's') + ' could not be removed: ' + (r.errors[0].error || 'unknown error') + '.');
+        if ((r.errors || []).length) lines.push(r.errors.length + ' item' + (r.errors.length === 1 ? '' : 's') + ' could not be removed: ' + SP.plainError(r.errors[0]) + '.');
       }
       host.appendChild(
         el('div', { style: `display:flex;align-items:center;gap:14px;padding:18px 20px;border-radius:16px;background:${done ? 'var(--success-soft)' : partial ? 'var(--warn-soft)' : 'var(--danger-soft)'};border:1px solid var(--border);margin-bottom:20px` }, [
@@ -396,12 +406,26 @@
 
     async function apply() {
       if (S.actionCleaning || !applicable) return;
+      let confirmed = false;
+      {
+        const permanentNames = (!reversible && a.kind !== 'docker') ? [a.name] : [];
+        const cf = await SP.confirmClean({
+          title: a.kind === 'docker' ? 'Run Docker cleanup?' : undefined,
+          force: !safe || !reversible,
+          count: a.kind === 'docker' ? 1 : a.jobs.length,
+          bytes: a.savings != null ? a.savings : undefined,
+          permanent: permanentNames,
+          note: a.kind === 'docker' ? 'Docker prunes ' + a.name + '. Docker rebuilds this cache the next time you build.' : undefined
+        });
+        if (!cf.go) return;
+        confirmed = cf.confirmed;
+      }
       S.actionCleaning = true;
       if (S.route === 'action') SP.go('action'); // reflect the cleaning state
       try {
         const res = a.kind === 'docker'
           ? await api.dockerPrune(a.dockerKind).then((r) => (r && r.ok ? { ok: true, totalFreed: r.freed } : r))
-          : await api.clean(a.jobs, a.meta);
+          : await api.clean(a.jobs, confirmed ? Object.assign({}, a.meta, { confirmed: true }) : a.meta);
         if (a.kind !== 'docker' && res && res.ok !== false) {
           // Try again resends only what was not removed.
           const sumR = SP.summariseClean(res);

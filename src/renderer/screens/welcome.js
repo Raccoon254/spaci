@@ -1,7 +1,7 @@
 'use strict';
 /* Welcome / onboarding, Spaci v2. Faithful to design/spaci-v2-reference.html
-   (the "WELCOME (full-screen, no sidebar)" block). A 3-step flow: intro, choose
-   what to clean (toggleable targets), and a safety recap, with step dots and
+   (the "WELCOME (full-screen, no sidebar)" block). A 3-step flow: intro, what a
+   scan looks at (informational, no toggles), and a safety recap, with step dots and
    Back/Next. The final step persists onboarding completion via
    api.setPrefs({ onboarded: true }), routes to the dashboard, and starts the
    first scan. */
@@ -10,43 +10,35 @@
   const { el, ic, ring } = SP;
 
   const STEPS = [
-    { title: 'A cleaner Mac, the safe way', body: 'Spaci reclaims gigabytes from regenerable caches and build artifacts, never your code or real files.', anim: 'spiral', color: 'var(--accent-fg)', btn: 'Get started' },
-    { title: 'What should Spaci clean?', body: 'Pick what Spaci targets. Everything here is regenerable, so it is always safe to remove.', anim: 'aperture', color: 'var(--accent-fg)', btn: 'Continue' },
+    { title: 'A cleaner Mac, the safe way', body: 'Spaci finds gigabytes in caches and build artifacts, and removes only what you choose.', anim: 'spiral', color: 'var(--accent-fg)', btn: 'Get started' },
+    { title: 'What Spaci looks at', body: 'Spaci scans these places and lists what it finds. Nothing is removed until you review it and choose it.', anim: 'aperture', color: 'var(--accent-fg)', btn: 'Continue' },
     { title: "You're all set.", body: 'A quick reminder of how Spaci keeps you safe before your first scan.', anim: 'elastic', color: 'var(--success-fg)', btn: 'Start scanning' }
   ];
 
-  // Step 2: toggleable scan targets (everything regenerable, default on).
+  // Step 2: what a scan covers. Informational only: there are no toggles, since
+  // no setting backs them.
   const OPTIONS = [
     { key: 'projects', icon: 'folder-2', title: 'Project build artifacts', sub: 'node_modules, target, dist, .next and friends.' },
     { key: 'devcaches', icon: 'broom', title: 'Developer caches', sub: 'Package managers, build tools and SDK caches.' },
-    { key: 'system', icon: 'cpu', title: 'System and app caches', sub: 'Regenerable caches and logs across your Mac.' }
+    { key: 'system', icon: 'cpu', title: 'System and app caches', sub: 'Caches, logs and app data across your Mac, with risky items marked.' }
   ];
-  const targets = { projects: true, devcaches: true, system: true };
-
+  
   // Step 3: safety recap value props.
   const FEATURES = [
     { icon: 'scanner', title: 'One Smart Scan finds it all', sub: 'Project build output, package caches and system junk, surfaced in seconds.' },
-    { icon: 'shield', title: 'Safe by design', sub: 'Spaci only targets regenerable caches and build output, never your source.' },
-    { icon: 'undo-arrow', title: 'Reversible cleanups', sub: 'Every action is logged in History, and most can be restored in one click.' }
+    { icon: 'shield', title: 'You stay in control', sub: 'Spaci removes nothing until you review it and choose it. Items that cannot be undone are marked Permanent.' },
+    { icon: 'undo-arrow', title: 'Every clean is logged', sub: 'History records what was removed. Build artifacts rebuild on your next install or build.' }
   ];
 
-  function optionRow(o, onToggle) {
-    const on = targets[o.key];
+  function optionRow(o) {
     return el('div', {
-      class: 'sp-hov',
-      style: 'display:flex;align-items:center;gap:14px;padding:16px 18px;background:var(--panel);border:1px solid var(--border);border-radius:14px;text-align:left;cursor:pointer',
-      hov: 'border-color:var(--border-2)',
-      onclick: onToggle
+      style: 'display:flex;align-items:center;gap:14px;padding:16px 18px;background:var(--panel);border:1px solid var(--border);border-radius:14px;text-align:left'
     }, [
       ic(o.icon, 22, { color: 'var(--accent-fg)' }),
       el('div', { style: 'flex:1' }, [
         el('div', { style: 'font-size:14.5px;font-weight:600', text: o.title }),
         el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:1px', text: o.sub })
-      ]),
-      el('div', {
-        class: 'sp-check' + (on ? ' sp-check-on' : ''),
-        style: 'width:24px;height:24px;border-radius:50%;border:1.5px solid var(--border-2);flex:none;display:grid;place-items:center;color:transparent;transition:.14s'
-      }, [ic('tick', 14)])
+      ])
     ]);
   }
 
@@ -105,7 +97,7 @@
         el('div', { style: 'font-size:40px;font-weight:700;letter-spacing:-1.4px;line-height:1.08;margin-bottom:14px', text: c.title }),
         el('div', { style: 'font-size:16px;line-height:1.6;color:var(--text-2);margin-bottom:34px;max-width:430px', text: c.body }),
         step === 1 ? el('div', { style: 'display:flex;flex-direction:column;gap:10px;margin-bottom:34px;width:100%' },
-          OPTIONS.map((o) => optionRow(o, () => { targets[o.key] = !targets[o.key]; render(); }))) : null,
+          OPTIONS.map(optionRow)) : null,
         step === 2 ? el('div', { style: 'display:flex;flex-direction:column;gap:10px;margin-bottom:34px;width:100%' },
           FEATURES.map(featureRow)) : null
       ]);
