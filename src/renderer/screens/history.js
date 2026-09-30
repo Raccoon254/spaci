@@ -30,6 +30,44 @@
     return SCOPE_ICON[(e.scope || '').toLowerCase()] || 'box';
   }
 
+  function itemPath(it) { return it && typeof it === 'object' ? it.path : it; }
+  function lastSeg(p) { const s = String(p || '').replace(/[\\/]+$/, ''); return s.split(/[\\/]/).pop() || ''; }
+  // What an entry belongs to: Docker, or one app when every recorded path is
+  // that app's (all of it ~/.claude, say). Mixed or unknown entries keep the
+  // scope glyph.
+  function brandOfEntry(e) {
+    if ((e.scope || '').toLowerCase() === 'docker') return 'docker';
+    const B = window.SpaciBrandIcon;
+    if (!B || !B.forPath || !Array.isArray(e.items) || !e.items.length) return null;
+    let brand;
+    for (const it of e.items) {
+      const b = B.forPath(itemPath(it));
+      if (!b || (brand && b !== brand)) return null;
+      brand = b;
+    }
+    return brand || null;
+  }
+  function entryMark(e, size) {
+    const brand = brandOfEntry(e);
+    if (brand && SP.bic) return SP.bic(brand, size, { label: brand, fallback: scopeIcon(e) });
+    return ic(scopeIcon(e), size);
+  }
+  // A cleaned path's mark: the app's logo (browser, AI tool, Docker), the
+  // tech of a build folder (node_modules, target...), else folder or file.
+  function itemMark(e, it, fallback, size) {
+    const p = itemPath(it);
+    const B = window.SpaciBrandIcon;
+    const brand = B && B.forPath ? B.forPath(p) : null;
+    if (brand && SP.bic) return SP.bic(brand, size, { label: brand, fallback });
+    const scope = (e.scope || '').toLowerCase();
+    const T = window.SpaciTechIcon;
+    if ((scope === 'projects' || scope === 'project') && T && T.forArtifact && SP.tic) {
+      const tech = T.forArtifact({ name: lastSeg(p) }, null, null);
+      if (tech) return SP.tic(tech, size, { label: tech });
+    }
+    return ic(fallback, size, { color: 'var(--text-3)' });
+  }
+
   // A human title for an entry: prefer its label, fall back to the scope.
   function titleOf(e) {
     if (e.label) return e.label;
@@ -152,7 +190,7 @@
     const newest = list.reduce((a, e) => Math.max(a, Number(e.at) || 0), 0);
     const stats = [
       { icon: 'hard-drive', label: 'Total freed', value: fmt(totalFreed), color: 'var(--accent-fg)' },
-      { icon: 'box', label: 'Clean-ups', value: String(list.length), color: 'var(--text)' },
+      { icon: 'log', label: 'Clean-ups', value: String(list.length), color: 'var(--text)' },
       { icon: 'clock', label: 'Last clean', value: lastCleanLabel(newest), color: 'var(--text)' }
     ];
     host.appendChild(
@@ -240,12 +278,12 @@
       hov: 'border-color:var(--border-2);transform:translateX(2px)',
       onclick: () => { S.currentHistory = e; SP.go('historydetail'); }
     }, [
-      el('div', { style: 'width:52px;height:52px;border-radius:14px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic(scopeIcon(e), 24)]),
+      el('div', { style: 'width:52px;height:52px;border-radius:14px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [entryMark(e, 24)]),
       el('div', { style: 'flex:1;min-width:0' }, [
         el('div', { style: 'font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px;flex-wrap:wrap' }, [
           el('span', { text: titleOf(e) }),
           el('span', {
-            class: rk === 'none' || rk === 'mixed' ? 'sp-badge-warn' : 'sp-badge-safe',
+            class: rk === 'none' ? 'sp-badge-warn' : rk === 'mixed' ? 'sp-badge-caution' : 'sp-badge-safe',
             style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700',
             text: REV_TEXT[rk]
           }),
@@ -271,8 +309,8 @@
         el('button', {
           style: 'height:44px;padding:0 22px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer;font-family:inherit',
           hov: 'background:var(--accent-hover)',
-          onclick: () => SP.go('dashboard')
-        }, [ic('scanner', 16), 'Run a Smart Scan'])
+          onclick: () => { SP.go('dashboard'); if (window.SP_doScan) window.SP_doScan(); }
+        }, [ic('scanner', 16), 'Scan'])
       ])
     );
   }
@@ -456,7 +494,7 @@
     const obj = it && typeof it === 'object';
     const path = obj ? it.path : it;
     const children = [
-      ic(obj && it.kind === 'file' ? 'file' : obj && it.kind === 'trash' ? 'trash' : pathIcon(e, path), 18, { color: 'var(--text-3)' }),
+      itemMark(e, it, obj && it.kind === 'file' ? 'file' : obj && it.kind === 'trash' ? 'trash' : pathIcon(e, path), 18),
       el('div', { style: 'flex:1;min-width:0' }, [
         el('div', { class: 'mono', title: String(path || ''), style: 'font-size:12.5px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: String(path || '') })
       ])
@@ -499,12 +537,12 @@
     // header: scope icon + name + badge + when + freed total
     host.appendChild(
       el('div', { style: 'display:flex;align-items:center;gap:18px;margin-bottom:22px' }, [
-        el('div', { style: 'width:58px;height:58px;border-radius:15px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic(scopeIcon(e), 31)]),
+        el('div', { style: 'width:58px;height:58px;border-radius:15px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [entryMark(e, 31)]),
         el('div', { style: 'flex:1;min-width:0' }, [
           el('div', { style: 'font-size:25px;font-weight:700;letter-spacing:-.7px;display:flex;align-items:center;gap:11px;flex-wrap:wrap' }, [
             el('span', { text: titleOf(e) }),
             el('span', {
-              class: rk === 'none' || rk === 'mixed' ? 'sp-badge-warn' : 'sp-badge-safe',
+              class: rk === 'none' ? 'sp-badge-warn' : rk === 'mixed' ? 'sp-badge-caution' : 'sp-badge-safe',
               style: 'display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:8px;font-size:11.5px;font-weight:700'
             }, [ic(REV_ICON[rk], 13), REV_TEXT[rk]]),
             statusBadge(e)
