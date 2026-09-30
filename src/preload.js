@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('api', {
   icon: (name) => ipcRenderer.invoke('icon:get', name),
   iconSvg: (name) => ipcRenderer.invoke('icon:get', name),
   techIcon: (id, flavor) => ipcRenderer.invoke('techicon:get', id, flavor),
+  brandIcon: (id, theme) => ipcRenderer.invoke('brandicon:get', id, theme),
   logo: (name) => ipcRenderer.invoke('logo:get', name),
   cacheGet: () => ipcRenderer.invoke('cache:get'),
   scanNow: () => ipcRenderer.invoke('scan:now'),
