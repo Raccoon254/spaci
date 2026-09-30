@@ -1432,9 +1432,29 @@ function resetCache() {
   binaryCache = undefined;
 }
 
+/**
+ * How many containers run on this machine's Docker, for auto-clean: a project
+ * with a Compose file is left alone while any do (a container may bind-mount
+ * its node_modules). Docker missing or stopped runs nothing: 0. A Docker that
+ * cannot be asked is { ok: false }, which auto-clean treats as "maybe".
+ * @returns {Promise<{ok:boolean, running:number}>}
+ */
+async function runningContainers(options = {}) {
+  const st = await status(options);
+  if (!st.running) {
+    if (st.state === 'not-installed' || st.state === 'stopped') return { ok: true, running: 0 };
+    return { ok: false, running: 0 };
+  }
+  // A remote engine's containers cannot bind-mount folders on this machine.
+  if (st.remote) return { ok: true, running: 0 };
+  const r = await runDocker(['ps', '-q'], options);
+  if (!r.ok) return { ok: false, running: 0 };
+  return { ok: true, running: r.stdout.split('\n').filter((l) => l.trim()).length };
+}
+
 module.exports = {
   PRUNE_KINDS, DISK_NOTE, diskNote,
-  status, inventory, prune, desktopDisk, desktopDiskPaths,
+  status, inventory, runningContainers, prune, desktopDisk, desktopDiskPaths,
   detect, composeServices, usageByProject, reclaimSuggestions,
   // exported for tests
   parseSize, parseReclaimable, parseLabels, parseInventory, parseSummary,

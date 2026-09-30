@@ -127,7 +127,7 @@ test('generic docker routing: allowlisted names only, onProgress injected into t
     assert.equal((await h.reply(i)).error.code, 'EUNKNOWNOP', name);
   }
   assert.deepEqual(Object.keys(DOCKER_ALLOWLIST).sort(), [
-    'composeServices', 'desktopDisk', 'inventory', 'listVolumes', 'prune', 'removeVolume', 'resetCache', 'restartDesktop', 'status',
+    'composeServices', 'desktopDisk', 'inventory', 'listVolumes', 'prune', 'removeVolume', 'resetCache', 'restartDesktop', 'runningContainers', 'status',
   ]);
 });
 
