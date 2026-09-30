@@ -223,8 +223,18 @@
     card.appendChild(
       row(
         'Background scans',
-        'Let Spaci scan periodically while it runs in the background.',
+        'Let Spaci scan periodically while it runs in the background. Paused on battery power or when your computer is busy.',
         toggle(!!p.backgroundScans, () => patchPrefs(store, { backgroundScans: !p.backgroundScans }, true))
+      )
+    );
+
+    // Automatic update checks. Stored as `autoCheckUpdates`: on unless it has
+    // been switched off (unset counts as on). The manual button always works.
+    card.appendChild(
+      row(
+        'Check for updates automatically',
+        'Spaci checks a few times a day and asks before restarting.',
+        toggle(p.autoCheckUpdates !== false, () => patchPrefs(store, { autoCheckUpdates: p.autoCheckUpdates === false }, true))
       )
     );
 

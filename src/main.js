@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, powerMonitor, Notification } = require('electron');
 const os = require('os');
 const fs = require('fs');
 const fsp = fs.promises;
@@ -15,9 +15,23 @@ const cleanGuard = require('./clean-guard');
 const telemetry = require('./telemetry');
 const largefiles = require('./largefiles');
 const diskbreakdown = require('./diskbreakdown');
-const { initUpdater } = require('./updater');
+const { initUpdater, getUpdateController } = require('./updater');
+const { createCacheStore } = require('./scan-cache');
+const { createScanCoordinator, singleFlight, keyedSingleFlight } = require('./scan-coordinator');
+const { createScheduler, backgroundGate, clampIntervalHours, HOUR } = require('./scheduler');
+const { createScanService } = require('./background');
+const { startupRole, focusPlan } = require('./instance');
 
 const isDev = process.argv.includes('--dev');
+
+// ---------- single instance ----------
+// One Spaci per user-data dir: a second launch (login item plus a manual open,
+// a dock click while the tray app runs) must not start a second scheduler that
+// races this one on cache.json and history.json. The lock is per user-data dir,
+// so --user-data-dir=<other> still runs an isolated copy. A secondary instance
+// quits before any window, tray or timer exists (see the whenReady guard).
+const isPrimary = startupRole(app.requestSingleInstanceLock()) === 'primary';
+if (!isPrimary) app.quit();
 let win;
 let tray = null;
 let isQuitting = false;
@@ -33,6 +47,7 @@ const DEFAULT_PREFS = {
   staleDays: 60,
   backgroundScans: true,
   scanIntervalHours: 6,
+  autoCheckUpdates: true,
 };
 function loadPrefs() {
   try { return { ...DEFAULT_PREFS, ...JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8')) }; }
@@ -65,19 +80,17 @@ function sendUsagePing() {
 }
 
 // ---------- scan cache + background scanning ----------
+// The cache is read through scan-cache.normalizeCache, so a truncated or
+// old-format cache.json starts fresh instead of crashing, and every write is
+// atomic (temp file, then rename). `cache` is the store's live object.
 const CACHE_PATH = path.join(app.getPath('userData'), 'cache.json');
-let cache = readCache() || { projects: [], system: [], scannedAt: 0, root: '', meta: {} };
-if (!cache.enrich) cache.enrich = {}; // path -> { totalSize, git, at }
-if (!cache.meta) cache.meta = {};
-let bgTimer = null;
-let bgRunning = false;
-
-function readCache() {
-  try { return JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8')); } catch { return null; }
-}
-function writeCache() {
-  try { fs.writeFileSync(CACHE_PATH, JSON.stringify(cache)); } catch (e) { /* ignore */ }
-}
+const cacheStore = createCacheStore({ file: CACHE_PATH });
+if (cacheStore.loadStatus === 'corrupt') console.warn('[cache] cache.json was unreadable; it will be rebuilt by the next scan');
+const cache = cacheStore.get();
+function writeCache() { return cacheStore.write(); }
+const scanCoordinator = createScanCoordinator();
+let scanService = null; // created below, once refreshDocker/refreshBreakdown exist
+let bgScheduler = null; // started in app.whenReady (powerMonitor needs a ready app)
 
 // ---------- cleanup history (logs of cleaned projects/caches) ----------
 const HISTORY_PATH = path.join(app.getPath('userData'), 'history.json');
@@ -87,7 +100,11 @@ function appendHistory(entry) {
 }
 
 // ---------- disk usage breakdown (by category) ----------
-async function refreshBreakdown() {
+// Single flight: every cache:updated makes the renderer ask for the breakdown
+// again, and each refresh walks the whole home folder. Concurrent callers share
+// one walk, and a reader only triggers a new walk when the last one is stale.
+const BREAKDOWN_FRESH_MS = 10 * 60 * 1000;
+const refreshBreakdown = singleFlight(async () => {
   const started = Date.now();
   try {
     const b = await diskbreakdown.diskBreakdown(os.homedir());
@@ -95,7 +112,13 @@ async function refreshBreakdown() {
     writeCache();
     if (win && !win.isDestroyed()) win.webContents.send('disk:breakdown-updated', cache.diskBreakdown);
     return cache.diskBreakdown;
-  } catch (_) { return cache.diskBreakdown || null; }
+  } catch (e) {
+    console.error('[breakdown] failed:', e && e.message);
+    return cache.diskBreakdown || null;
+  }
+});
+function breakdownIsFresh() {
+  return Boolean(cache.diskBreakdown && Date.now() - (cache.diskBreakdown.at || 0) < BREAKDOWN_FRESH_MS);
 }
 // ---------- docker ----------
 /**
@@ -104,10 +127,15 @@ async function refreshBreakdown() {
  * heavy lists out of `cache` matters, they are written to disk on every scan.
  */
 async function refreshDocker(projects, options = {}) {
+  cache.docker = await computeDocker(projects, options);
+  return cache.docker;
+}
+/** The Docker summary for a scan, without touching the cache (scans commit it). */
+async function computeDocker(projects, options = {}) {
   try {
     const { inventory } = await scanner.attachDockerUsage(projects || [], options);
     const disk = await docker.desktopDisk();
-    cache.docker = inventory && inventory.ok
+    return inventory && inventory.ok
       ? {
         ok: true,
         approximate: Boolean(inventory.approximate),
@@ -122,10 +150,8 @@ async function refreshDocker(projects, options = {}) {
       // Desktop is up but its engine is down, the disk image is still the
       // biggest thing Spaci can explain to the user.
       : { ok: false, reason: inventory ? inventory.reason : 'unavailable', status: inventory ? inventory.status : null, state: inventory ? inventory.state : null, desktopDisk: disk, at: Date.now() };
-    return cache.docker;
   } catch (e) {
-    cache.docker = { ok: false, reason: 'error', error: e && e.message, at: Date.now() };
-    return cache.docker;
+    return { ok: false, reason: 'error', error: e && e.message, at: Date.now() };
   }
 }
 
@@ -141,83 +167,54 @@ function updateTrayTitle() {
   tray.setToolTip(reclaim > 0 ? `Spaci · ${fmt(reclaim)} reclaimable` : 'Spaci');
 }
 
-async function runBackgroundScan() {
-  if (bgRunning) return;
-  const started = Date.now();
-  bgRunning = true;
-  if (win && !win.isDestroyed()) win.webContents.send('bg:scan', { active: true });
-  const errors = [];
-  const phaseMeta = {};
-  try {
-    const prefs = loadPrefs();
-    const root = (prefs.scanRoots && prefs.scanRoots[0]) || os.homedir();
-    const ac = new AbortController();
-    try {
-      const phaseStart = Date.now();
-      const { projects } = await scanner.scanProjects(root, null, ac.signal);
-      const dockerStart = Date.now();
-      await refreshDocker(projects);
-      phaseMeta.docker = { source: 'background-scan', durationMs: Date.now() - dockerStart, partial: false };
-      phaseMeta.projects = { source: 'background-scan', durationMs: Date.now() - phaseStart, partial: ac.signal.aborted };
-      cache.projects = projects.filter(keepProject);
-      cache.root = root;
-      cache.scannedAt = Date.now();
-      cache.meta = { source: 'background-scan', startedAt: started, partial: false, errors, phases: phaseMeta };
-      writeCache();
-      if (win && !win.isDestroyed()) win.webContents.send('cache:updated', cache);
-    } catch (e) {
-      errors.push({ phase: 'projects', message: e && e.message ? e.message : String(e) });
-    }
+scanService = createScanService({
+  coordinator: scanCoordinator,
+  store: cacheStore,
+  scanProjects: (root, onProgress, signal) => scanner.scanProjects(root, onProgress, signal),
+  scanSystem: (onProgress, signal) => system.scanSystem(onProgress, signal),
+  computeDocker: (projects) => computeDocker(projects),
+  enrichProject: (dir, signal) => scanner.enrichProject(dir, signal),
+  refreshBreakdown: () => refreshBreakdown(),
+  keepProject,
+  getRoot: () => (loadPrefs().scanRoots || [])[0] || os.homedir(),
+  emit: (channel, payload) => { if (win && !win.isDestroyed()) win.webContents.send(channel, payload); },
+  onCommitted: () => updateTrayTitle(),
+});
 
-    try {
-      const phaseStart = Date.now();
-      const targets = await system.scanSystem(null, ac.signal);
-      phaseMeta.system = { source: 'background-scan', durationMs: Date.now() - phaseStart, partial: ac.signal.aborted };
-      cache.system = targets;
-      cache.scannedAt = Date.now();
-      cache.root = root;
-      cache.meta = { source: 'background-scan', startedAt: started, partial: false, errors, phases: phaseMeta };
-      writeCache();
-      updateTrayTitle();
-      if (win && !win.isDestroyed()) win.webContents.send('cache:updated', cache);
-    } catch (e) {
-      errors.push({ phase: 'system', message: e && e.message ? e.message : String(e) });
-    }
-
-    // pre-enrich the largest projects so their details pages open instantly
-    const top = [...cache.projects].sort((a, b) => b.cleanableSize - a.cleanableSize).slice(0, 25);
-    const enrichStart = Date.now();
-    for (const pr of top) {
-      try { const r = await scanner.enrichProject(pr.path, new AbortController().signal); cache.enrich[pr.path] = { totalSize: r.totalSize, git: r.git, at: Date.now() }; } catch (_) { /* */ }
-    }
-    phaseMeta.enrich = { source: 'background-scan', durationMs: Date.now() - enrichStart, partial: false };
-    writeCache();
-    try {
-      const b = await refreshBreakdown();
-      phaseMeta.breakdown = { source: 'background-scan', durationMs: b && b.meta ? b.meta.durationMs : 0, partial: false };
-    } catch (e) {
-      errors.push({ phase: 'breakdown', message: e && e.message ? e.message : String(e) });
-    }
-  } catch (e) {
-    errors.push({ phase: 'background', message: e && e.message ? e.message : String(e) });
-  }
-  finally {
-    cache.meta = { source: 'background-scan', startedAt: started, durationMs: Date.now() - started, partial: errors.length > 0, errors, phases: phaseMeta };
-    writeCache();
-    if (win && !win.isDestroyed()) win.webContents.send('cache:updated', cache);
-    bgRunning = false; if (win && !win.isDestroyed()) win.webContents.send('bg:scan', { active: false });
-  }
+/** Inputs for the "is now a good time for a heavy scan" decision. */
+function scanConditions() {
+  const safe = (fn, d) => { try { const v = fn(); return v === undefined ? d : v; } catch (_) { return d; } };
+  return {
+    onBattery: safe(() => (typeof powerMonitor.isOnBatteryPower === 'function' ? powerMonitor.isOnBatteryPower() : powerMonitor.onBatteryPower), false),
+    thermalState: safe(() => (typeof powerMonitor.getCurrentThermalState === 'function' ? powerMonitor.getCurrentThermalState() : 'unknown'), 'unknown'),
+    loadRatio: safe(() => os.loadavg()[0] / Math.max(1, os.cpus().length), 0),
+    busy: scanCoordinator.busy(),
+  };
 }
 
-function scheduleBackground() {
-  if (bgTimer) { clearInterval(bgTimer); bgTimer = null; }
-  const prefs = loadPrefs();
-  if (!prefs.backgroundScans) return;
-  const hrs = Math.max(1, prefs.scanIntervalHours || 6);
-  bgTimer = setInterval(runBackgroundScan, hrs * 3600 * 1000);
-  // If the cache is missing or older than the interval, refresh it soon after launch.
-  const stale = !cache.scannedAt || (Date.now() - cache.scannedAt) > hrs * 3600 * 1000;
-  if (prefs.onboarded && stale) setTimeout(runBackgroundScan, 8000);
+/** A manual scan of both kinds counts as a completed run for the scheduler. */
+function scheduleState() {
+  const s = cache.schedule || {};
+  const k = cache.kindScannedAt || {};
+  const manual = Math.min(k.projects || 0, k.system || 0);
+  return { ...s, lastCompletedAt: Math.max(s.lastCompletedAt || 0, manual) };
+}
+
+function createBackgroundScheduler() {
+  return createScheduler({
+    name: 'bg-scan',
+    task: () => scanService.backgroundRun(),
+    getConfig: () => ({ intervalMs: clampIntervalHours(loadPrefs().scanIntervalHours) * HOUR }),
+    gate: (force) => {
+      const prefs = loadPrefs();
+      return backgroundGate({ enabled: Boolean(prefs.backgroundScans), onboarded: Boolean(prefs.onboarded), force, ...scanConditions() });
+    },
+    getState: scheduleState,
+    saveState: (st) => {
+      cache.schedule = { ...(cache.schedule || {}), lastCompletedAt: st.lastCompletedAt || 0, lastAttemptAt: st.lastAttemptAt || 0, failures: st.failures || 0 };
+      writeCache();
+    },
+  });
 }
 
 // ---------- window ----------
@@ -245,6 +242,25 @@ function createWindow() {
 
 function showWin() { if (!win || win.isDestroyed()) createWindow(); else { win.show(); win.focus(); } }
 
+/** A second launch was attempted: bring this instance's main window forward. */
+function focusExisting() {
+  const plan = focusPlan({
+    exists: Boolean(win),
+    destroyed: Boolean(win && win.isDestroyed()),
+    minimized: Boolean(win && !win.isDestroyed() && win.isMinimized && win.isMinimized()),
+  });
+  for (const step of plan) {
+    if (step === 'create') createWindow();
+    else if (step === 'restore') win.restore();
+    else if (step === 'show') win.show();
+    else if (step === 'focus' && win && !win.isDestroyed()) win.focus();
+  }
+  if (process.platform === 'darwin') { try { app.focus({ steal: true }); } catch (_) { /* older macOS */ } }
+}
+if (isPrimary) {
+  app.on('second-instance', () => { app.whenReady().then(focusExisting); });
+}
+
 // ---------- menu bar widget (tray popover) ----------
 let trayWin = null;
 const TRAY_W = 372;
@@ -271,7 +287,9 @@ function createTrayWindow() {
   });
   trayWin.loadFile(path.join(__dirname, 'renderer', 'tray.html'));
   trayWin.on('blur', () => { if (trayWin && !trayWin.isDestroyed()) trayWin.hide(); });
-  trayWin.on('close', (e) => { e.preventDefault(); trayWin.hide(); });
+  // Hide instead of closing, except when quitting: a prevented close cancels
+  // app.quit(), which would block both "Quit Spaci" and restart-to-update.
+  trayWin.on('close', (e) => { if (!isQuitting) { e.preventDefault(); trayWin.hide(); } });
 }
 
 function toggleTrayPopover() {
@@ -291,6 +309,40 @@ function toggleTrayPopover() {
   trayWin.focus();
 }
 
+let updateReadyVersion = null;
+function buildTrayMenu() {
+  const items = [
+    { label: 'Open Spaci', click: showWin },
+    { label: 'Smart Scan', click: () => { showWin(); win && win.webContents.send('tray:scan'); } },
+  ];
+  if (updateReadyVersion) {
+    items.push({ type: 'separator' }, {
+      label: `Restart to Update (${updateReadyVersion})`,
+      click: () => { const u = getUpdateController(); if (u) u.install(); },
+    });
+  }
+  items.push({ type: 'separator' }, { label: 'Quit Spaci', click: () => { isQuitting = true; app.quit(); } });
+  return Menu.buildFromTemplate(items);
+}
+
+/** A verified update finished downloading: say so once, outside the Settings screen too. */
+function announceUpdate(version) {
+  updateReadyVersion = version;
+  try {
+    if (Notification.isSupported()) {
+      const n = new Notification({
+        title: `Spaci ${version} is ready`,
+        body: 'Restart Spaci to finish updating, or it will update the next time you quit.',
+      });
+      n.on('click', () => {
+        showWin();
+        if (win && !win.isDestroyed()) win.webContents.send('nav:go', 'settings');
+      });
+      n.show();
+    }
+  } catch (e) { console.warn('[update] notification failed:', e && e.message); }
+}
+
 function createTray() {
   let image = nativeImage.createEmpty();
   try {
@@ -303,19 +355,15 @@ function createTray() {
   }
   tray = new Tray(image);
   tray.setToolTip('Spaci');
-  const menu = Menu.buildFromTemplate([
-    { label: 'Open Spaci', click: showWin },
-    { label: 'Smart Scan', click: () => { showWin(); win && win.webContents.send('tray:scan'); } },
-    { type: 'separator' },
-    { label: 'Quit Spaci', click: () => { isQuitting = true; app.quit(); } },
-  ]);
-  // Left click opens the popover widget; right click shows the classic menu.
+  // Left click opens the popover widget; right click shows the classic menu,
+  // rebuilt each time so it can offer a downloaded update.
   tray.on('click', toggleTrayPopover);
-  tray.on('right-click', () => tray.popUpContextMenu(menu));
+  tray.on('right-click', () => tray.popUpContextMenu(buildTrayMenu()));
   createTrayWindow();
 }
 
 app.whenReady().then(() => {
+  if (!isPrimary) return; // quitting: no window, tray, timers or updater
   // Off the startup path; the interval catches an app left open past midnight.
   setTimeout(sendUsagePing, 10000);
   setInterval(sendUsagePing, 6 * 3600 * 1000);
@@ -325,13 +373,35 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   updateTrayTitle();
-  scheduleBackground();
-  initUpdater(() => win);
+  bgScheduler = createBackgroundScheduler();
+  bgScheduler.start();
+  const updates = initUpdater(() => win, {
+    getPrefs: loadPrefs,
+    beforeInstall: () => { isQuitting = true; },
+    onReady: announceUpdate,
+  });
+  // After sleep, screen unlock or plugging in, re-check once (never a burst):
+  // the schedulers recompute from the last completed run.
+  const wake = () => { if (bgScheduler) bgScheduler.wake(); updates.wake(); };
+  for (const ev of ['resume', 'unlock-screen', 'on-ac']) {
+    try { powerMonitor.on(ev, wake); } catch (_) { /* event not supported on this platform */ }
+  }
   app.on('activate', () => showWin());
 });
 // Keep running in the background (menu-bar tray) even with no windows open.
 app.on('window-all-closed', () => { /* intentionally no quit */ });
-app.on('before-quit', () => { isQuitting = true; });
+app.on('before-quit', () => {
+  isQuitting = true;
+  // Stop timers and abort every scan; aborted scans can no longer commit.
+  if (bgScheduler) bgScheduler.stop();
+  const u = getUpdateController();
+  if (u) u.stop();
+  scanCoordinator.abortAll('quit');
+});
+app.on('will-quit', () => {
+  // Past this point nothing is written: a scan that settles late is dropped.
+  scanService.close();
+});
 
 // ---------- helpers ----------
 // Cross-platform disk usage via fs.statfs (macOS/Linux/Windows), with a df fallback.
@@ -460,7 +530,15 @@ function fmt(b) {
 
 // ---------- IPC ----------
 ipcMain.handle('prefs:get', () => loadPrefs());
-ipcMain.handle('prefs:set', (_e, patch) => { const p = { ...loadPrefs(), ...patch }; savePrefs(p); scheduleBackground(); return p; });
+ipcMain.handle('prefs:set', (_e, patch) => {
+  const p = { ...loadPrefs(), ...(patch && typeof patch === 'object' ? patch : {}) };
+  savePrefs(p);
+  // Debounced and idempotent: a theme toggle never triggers a scan by itself.
+  if (bgScheduler) bgScheduler.reschedule();
+  const u = getUpdateController();
+  if (u) u.reschedule();
+  return p;
+});
 ipcMain.handle('app:home', () => os.homedir());
 ipcMain.handle('win:show', (_e, route) => {
   showWin();
@@ -470,7 +548,7 @@ ipcMain.handle('win:show', (_e, route) => {
 ipcMain.handle('app:quit', () => { isQuitting = true; app.quit(); });
 ipcMain.handle('disk:usage', (_e, p) => diskUsage(p));
 ipcMain.handle('disk:breakdown', async () => {
-  if (cache.diskBreakdown) { refreshBreakdown(); return cache.diskBreakdown; }
+  if (cache.diskBreakdown) { if (!breakdownIsFresh()) refreshBreakdown(); return cache.diskBreakdown; }
   return await refreshBreakdown();
 });
 ipcMain.handle('icon:get', (_e, name) => getIcon(name));
@@ -479,7 +557,8 @@ ipcMain.handle('icon:get', (_e, name) => getIcon(name));
 ipcMain.handle('fs:top-children', (_e, dirs) => diskbreakdown.topChildren(Array.isArray(dirs) ? dirs : [], 25));
 ipcMain.handle('logo:get', (_e, name) => getLogo(name));
 ipcMain.handle('cache:get', () => cache);
-ipcMain.handle('scan:now', () => { runBackgroundScan(); return true; });
+// Explicit request: bypasses the battery/load gate, joins a run in flight.
+ipcMain.handle('scan:now', () => { if (bgScheduler) bgScheduler.runNow(); return true; });
 ipcMain.handle('project:icon', async (_e, p) => {
   try {
     if (!p) return null;
@@ -498,35 +577,29 @@ ipcMain.handle('dialog:pick-folder', async () => {
   return r.canceled ? null : r.filePaths[0];
 });
 
-ipcMain.handle('scan:projects', async (e, root) => {
+// A progress sender that survives the window closing mid-scan.
+function progressTo(sender, channel) {
+  return (p) => { try { if (!sender.isDestroyed()) sender.send(channel, p); } catch (_) { /* window gone */ } };
+}
+
+// Manual scans go through the scan service: at most one per kind, a newer
+// manual scan supersedes an older one (whose caller then gets the newer
+// result), and a background scan of the same kind is pre-empted.
+ipcMain.handle('scan:projects', (e, root) => {
   // Default to the configured scan root (the home folder) so Projects scans
   // automatically without the user having to pick a folder first.
   root = root || (loadPrefs().scanRoots || [])[0] || os.homedir();
-  aborts.projects?.abort();
-  aborts.projects = new AbortController();
-  const onProgress = (p) => e.sender.send('scan:progress', p);
-  try {
-    const res = await scanner.scanProjects(root, onProgress, aborts.projects.signal);
-    // One daemon call after the walk. The renderer keeps its running strip up
-    // until this resolves, so no extra progress event is emitted here.
-    await refreshDocker(res.projects || []);
-    cache.projects = (res.projects || []).filter(keepProject); cache.root = root; cache.scannedAt = Date.now(); writeCache(); updateTrayTitle();
-    return { ok: true, ...res, projects: cache.projects, docker: cache.docker };
-  } catch (err) { return { ok: false, error: err.message }; }
+  return scanService.manualProjects(root, progressTo(e.sender, 'scan:progress'));
 });
 
-ipcMain.handle('scan:system', async (e) => {
-  aborts.system?.abort();
-  aborts.system = new AbortController();
-  const onProgress = (p) => e.sender.send('system:progress', p);
-  try {
-    const targets = await system.scanSystem(onProgress, aborts.system.signal);
-    cache.system = targets; cache.scannedAt = Date.now(); writeCache(); updateTrayTitle();
-    return { ok: true, targets };
-  } catch (err) { return { ok: false, error: err.message }; }
-});
+ipcMain.handle('scan:system', (e) => scanService.manualSystem(progressTo(e.sender, 'system:progress')));
 
-ipcMain.handle('scan:cancel', (_e, type) => { if (type) aborts[type]?.abort(); else Object.values(aborts).forEach((a) => a && a.abort()); return true; });
+ipcMain.handle('scan:cancel', (_e, type) => {
+  if (type === 'projects' || type === 'system') scanService.cancel(type);
+  else if (type) aborts[type]?.abort();
+  else { scanService.cancel(); Object.values(aborts).forEach((a) => a && a.abort()); }
+  return true;
+});
 
 // ---------- docker ----------
 // Cheap and cached: the System screen asks on every paint.
@@ -559,7 +632,7 @@ ipcMain.handle('docker:prune', async (_e, kind) => {
   return res;
 });
 
-async function refreshEnrich(p) {
+const refreshEnrich = keyedSingleFlight(async (p) => {
   try {
     const r = await scanner.enrichProject(p, new AbortController().signal);
     cache.enrich = cache.enrich || {};
@@ -570,7 +643,7 @@ async function refreshEnrich(p) {
   } catch {
     return (cache.enrich && cache.enrich[p]) || { totalSize: 0, git: null };
   }
-}
+});
 // Returns cached git/size instantly (refreshing in the background); pass force to recompute now.
 ipcMain.handle('project:enrich', async (_e, p, force) => {
   if (!force && cache.enrich && cache.enrich[p]) { refreshEnrich(p); return cache.enrich[p]; }
