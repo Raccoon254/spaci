@@ -30,6 +30,9 @@ const PRUNE_TIMEOUT_MS = 120000;
 // How long a status/inventory result stays fresh. Docker sizes move slowly and
 // the UI polls on every screen paint, so a short cache avoids a CLI storm.
 const CACHE_MS = 60000;
+// A probe that timed out is not an answer: a big build can make a healthy engine
+// slow for a moment. Remember it only briefly so the UI recovers fast.
+const TIMEOUT_CACHE_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // Finding the binary
@@ -193,6 +196,7 @@ function parseLabels(value) {
 // ---------------------------------------------------------------------------
 
 let statusCache = null;
+let statusTtl = CACHE_MS;
 
 // The engine probe must fail fast: on a wedged Docker Desktop `docker version`
 // can hang for minutes, and the UI polls this.
@@ -211,7 +215,7 @@ function backendRunning(options = {}, platform = process.platform) {
     const exec = options.processExec || execFile;
     const [cmd, args] = platform === 'win32'
       ? ['tasklist', ['/FI', 'IMAGENAME eq com.docker.backend.exe', '/NH']]
-      : ['pgrep', ['-f', 'com.docker.backend']];
+      : ['pgrep', ['-x', 'com.docker.backend']];
     try {
       exec(cmd, args, { timeout: 3000 }, (err, stdout) => {
         if (platform === 'win32') return resolve(/com\.docker\.backend/i.test(String(stdout || '')));
@@ -219,6 +223,31 @@ function backendRunning(options = {}, platform = process.platform) {
       });
     } catch { resolve(false); }
   });
+}
+
+/** Only a local socket or pipe means the engine runs on this machine. */
+function isLocalEndpoint(host) {
+  return /^(unix|npipe):\/\//i.test(String(host || '').trim());
+}
+
+/**
+ * The endpoint the CLI will talk to: DOCKER_HOST wins (the CLI honours it over
+ * the context), else the current context's host. null when it cannot be read.
+ */
+async function currentEndpoint(options = {}) {
+  const env = options.env || process.env;
+  if (env.DOCKER_HOST && String(env.DOCKER_HOST).trim()) return String(env.DOCKER_HOST).trim();
+  const res = await runDocker(['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], {
+    ...options,
+    timeout: ENGINE_PROBE_MS,
+  });
+  const host = res.ok ? res.stdout.trim() : '';
+  return host || null;
+}
+
+/** Linux without the docker group: the socket exists but may not be opened. */
+function isPermissionError(message) {
+  return /permission denied/i.test(String(message || '')) && /docker\.sock/i.test(String(message || ''));
 }
 
 /**
@@ -231,10 +260,13 @@ function backendRunning(options = {}, platform = process.platform) {
  *   stopped        CLI present, no Desktop backend process
  *   engine-down    Desktop backend running but the engine does not answer
  *   running        engine answered
- * `installed` and `running` stay for existing callers.
+ *   no-permission  engine socket exists but this user may not open it (Linux)
+ * `installed` and `running` stay for existing callers. `remote` is true when
+ * the current context points at another host (ssh://, tcp://); the answer then
+ * describes that host, not this machine.
  */
 async function status(options = {}) {
-  if (!options.force && statusCache && Date.now() - statusCache.checkedAt < CACHE_MS) {
+  if (!options.force && statusCache && Date.now() - statusCache.checkedAt < statusTtl) {
     return statusCache;
   }
   const res = await runDocker(['version', '--format', '{{json .}}'], {
@@ -255,8 +287,11 @@ async function status(options = {}) {
   let state = 'running';
   if (!running) {
     if (!installed) state = 'not-installed';
+    else if (isPermissionError(res.error)) state = 'no-permission';
     else state = (await backendRunning(options)) ? 'engine-down' : 'stopped';
   }
+
+  const endpoint = running ? await currentEndpoint(options) : null;
 
   const value = {
     state,
@@ -266,9 +301,12 @@ async function status(options = {}) {
     serverVersion: server ? server.Version : null,
     platform: server && server.Platform ? server.Platform.Name : null,
     error: res.ok ? null : res.error,
+    endpoint,
+    remote: Boolean(endpoint) && !isLocalEndpoint(endpoint),
     checkedAt: Date.now(),
   };
   statusCache = value;
+  statusTtl = res.error === 'docker timed out' ? TIMEOUT_CACHE_MS : CACHE_MS;
   return value;
 }
 
@@ -436,7 +474,7 @@ async function inventory(options = {}) {
   }
   const st = options.status || (await status(options));
   if (!st.running) {
-    const value = { ok: false, reason: st.installed ? 'daemon-not-running' : 'not-installed', state: st.state, status: st };
+    const value = { ok: false, reason: !st.installed ? 'not-installed' : st.state === 'no-permission' ? 'no-permission' : 'daemon-not-running', state: st.state, status: st };
     inventoryCache = { at: Date.now(), value };
     return value;
   }
@@ -720,7 +758,10 @@ const SUGGEST_HIGH = 5 * 1024 ** 3;
  */
 function reclaimSuggestions(info) {
   if (!info) return [];
+  // Prune refuses on a remote context, so do not offer it.
+  if (info.status && info.status.remote) return [];
   const out = [];
+  const platform = info.platform || process.platform;
   const disk = info.desktopDisk || info.disk || null;
 
   if (!info.ok || !info.categories) {
@@ -738,7 +779,9 @@ function reclaimSuggestions(info) {
         message: state === 'engine-down'
           ? 'Docker is open but its engine is not answering. Its disk image is still using space.'
           : 'Docker is not running. Its disk image is still using space.',
-        guidance: 'Start Docker and let it finish starting to clean it from inside. ' + DISK_NOTE,
+        guidance: (state === 'engine-down'
+          ? 'Restart Docker Desktop and let it finish starting to clean it from inside. '
+          : 'Start Docker Desktop and let it finish starting to clean it from inside. ') + diskNote(platform),
         sizeNote: disk.apparentBytes > (disk.allocatedBytes != null ? disk.allocatedBytes : disk.bytes)
           ? 'The file claims a larger size, but only the space it really uses counts.'
           : null,
@@ -756,7 +799,7 @@ function reclaimSuggestions(info) {
       total: buildCache.count,
       unused: buildCache.count - buildCache.active,
       severity: buildCache.reclaimable > SUGGEST_HIGH ? 'high' : 'normal',
-      note: disk ? DISK_NOTE : null,
+      note: disk ? diskNote(platform) : null,
     });
   }
   if (images && images.reclaimable >= SUGGEST_MIN_IMAGES) {
@@ -766,7 +809,7 @@ function reclaimSuggestions(info) {
       total: images.count,
       unused: images.count - images.active,
       severity: images.reclaimable > SUGGEST_HIGH ? 'high' : 'normal',
-      note: disk ? DISK_NOTE : null,
+      note: disk ? diskNote(platform) : null,
     });
   }
   // Volumes are never suggested, however large: they are the only Docker
@@ -791,7 +834,18 @@ const VOLUME_PRUNE = {
   description: 'Removes volumes no container uses. Databases and uploads live here and cannot be recovered.',
 };
 
-const DISK_NOTE = 'The Docker disk image on your Mac will not shrink right away. Docker hands the space back over time, or when it restarts.';
+/** Why freed space may not show up on the host, worded for each platform. */
+function diskNote(platform = process.platform) {
+  if (platform === 'win32') {
+    return 'Docker keeps its data in a WSL2 disk image (VHDX) that will not shrink by itself unless sparse VHDX is enabled in Docker Desktop. Freed space stays reserved on your drive until then.';
+  }
+  if (platform === 'linux') {
+    return 'Docker on Linux stores its data directly on your disk, so freed space comes back right away.';
+  }
+  return 'The Docker disk image (Docker.raw) on your Mac will not shrink right away. Docker hands the space back over time, or when it restarts.';
+}
+
+const DISK_NOTE = diskNote();
 
 /**
  * Run one prune. Unknown kinds are refused, never passed through. Volumes need
@@ -809,30 +863,42 @@ async function prune(kind, options = {}) {
 
   const st = options.status || (await status(options));
   if (!st.running) {
-    const error = st.state === 'engine-down' ? 'Docker is open but its engine is not answering'
+    const error = st.state === 'engine-down' ? 'Docker is open but its engine is not answering. Restart Docker Desktop.'
+      : st.state === 'no-permission' ? 'Docker refused access to its socket. Add your user to the docker group or use rootless Docker.'
       : st.installed ? 'Docker is not running' : 'Docker is not installed';
     return { ok: false, error, freed: 0 };
+  }
+
+  // Prune acts on the current context, so make sure that is this machine. Checked
+  // fresh: the context can change inside the status cache window.
+  const endpoint = await currentEndpoint(options);
+  if (!endpoint) {
+    return { ok: false, error: 'Could not tell which Docker host is selected, so nothing was removed', freed: 0 };
+  }
+  if (!isLocalEndpoint(endpoint)) {
+    return { ok: false, error: `Docker is pointed at a remote host (${endpoint}). Switch to a local context to clean up`, freed: 0 };
   }
 
   const res = await runDocker(spec.args, { ...options, timeout: options.timeout || PRUNE_TIMEOUT_MS });
   // Sizes changed underneath us.
   inventoryCache = null;
   if (!res.ok) return { ok: false, error: res.error, freed: 0 };
-  return { ok: true, kind, freed: parseReclaimed(res.stdout), output: res.stdout.trim(), note: DISK_NOTE };
+  return { ok: true, kind, freed: parseReclaimed(res.stdout), output: res.stdout.trim(), note: diskNote(options.platform) };
 }
 
 /** Drop the status/inventory caches (used after a prune or an explicit rescan). */
 function resetCache() {
   statusCache = null;
+  statusTtl = CACHE_MS;
   inventoryCache = null;
   binaryCache = undefined;
 }
 
 module.exports = {
-  PRUNE_KINDS, DISK_NOTE,
+  PRUNE_KINDS, DISK_NOTE, diskNote,
   status, inventory, prune, desktopDisk, desktopDiskPaths,
   detect, composeServices, usageByProject, reclaimSuggestions,
   // exported for tests
   parseSize, parseReclaimable, parseLabels, parseInventory, parseSummary,
-  parseReclaimed, summarise, totalsOf, candidateBinaries, isDockerfile, resetCache, backendRunning,
+  parseReclaimed, summarise, totalsOf, candidateBinaries, isDockerfile, resetCache, backendRunning, isLocalEndpoint, currentEndpoint,
 };
