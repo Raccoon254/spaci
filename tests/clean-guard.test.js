@@ -139,7 +139,12 @@ test('end to end: a renderer-shaped job cleans transcripts and keeps memory', as
     write('p1/memory/MEMORY.md', '# keep me');
     write('p2/memory/fact.md', 'keep me too');
 
-    const targets = buildSystemTargets({ platform: 'darwin', home, env: {} });
+    // The host's own layout, so on Windows this exercises the real Windows
+    // target (%USERPROFILE%\\.claude\\projects), not a macOS path.
+    const env = process.platform === 'win32'
+      ? { USERPROFILE: home, APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local') }
+      : {};
+    const targets = buildSystemTargets({ platform: process.platform, home, env });
     const index = buildTargetIndex(targets);
     assert.ok(index.get(projects), 'the real classifier must define a target for ~/.claude/projects');
 
