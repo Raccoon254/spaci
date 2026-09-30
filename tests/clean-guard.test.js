@@ -156,3 +156,87 @@ test('end to end: a renderer-shaped job cleans transcripts and keeps memory', as
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('cleaning a parent excludes every nested target, whatever it is called', async () => {
+  const targets = buildSystemTargets({ platform: 'linux', home: '/home/x', env: { HF_HOME: '/home/x/.cache/hf' } });
+  const index = buildTargetIndex(targets);
+  const { allowed } = await enforceTargetRules([{ path: '/home/x/.cache', mode: 'contents' }], { index, toolStatus: notRunning });
+  assert.ok(allowed[0].excludePaths.includes('/home/x/.cache/hf'), 'custom HF_HOME must be excluded');
+  assert.ok(allowed[0].excludePaths.includes('/home/x/.cache/pip'), 'separately listed pip cache must be excluded');
+});
+
+test('end to end: a custom HF_HOME inside ~/.cache survives the generic wipe', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-hf-'));
+  try {
+    const cache = path.join(home, '.cache');
+    const put = (rel) => { const p = path.join(cache, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, 'x'); return p; };
+    const model = put('hf/hub/model.safetensors');
+    const junk = put('some-tool/blob.bin');
+    const lm = put('lm-studio/models/sideloaded.gguf');
+    const targets = buildSystemTargets({ platform: 'linux', home, env: { HF_HOME: path.join(cache, 'hf') } });
+    const { allowed } = await enforceTargetRules([{ path: cache, mode: 'contents' }], { index: buildTargetIndex(targets), toolStatus: notRunning });
+    await cleaner.clean(allowed, () => {}, new AbortController().signal);
+    assert.ok(fs.existsSync(model), 'custom HF model store must survive');
+    assert.ok(fs.existsSync(lm), 'LM Studio models must survive');
+    assert.ok(!fs.existsSync(junk), 'ordinary cache content is cleaned');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('Claude\'s CLI cache inside ~/Library/Caches survives cleaning other app caches while Claude runs', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-lib-'));
+  try {
+    const caches = path.join(home, 'Library', 'Caches');
+    const put = (rel) => { const p = path.join(caches, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, 'x'); return p; };
+    const live = put('claude-cli-nodejs/session.log');
+    const other = put('com.example.app/cache.db');
+    const targets = buildSystemTargets({ platform: 'darwin', home, env: {} });
+    const { allowed, refused } = await enforceTargetRules([{ path: caches, mode: 'contents' }], {
+      index: buildTargetIndex(targets), toolStatus: async () => ({ ok: true, running: ['claude'] }),
+    });
+    assert.equal(refused.length, 0, 'the parent itself is not an AI target and is allowed');
+    await cleaner.clean(allowed, () => {}, new AbortController().signal);
+    assert.ok(fs.existsSync(live), 'a running tool\'s data must not be reached through a parent target');
+    assert.ok(!fs.existsSync(other));
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('AI tool jobs run first, straight after the running-tool check', async () => {
+  const index = buildTargetIndex(fixtureTargets());
+  const { allowed } = await enforceTargetRules([
+    { path: '/h/.npm/_cacache' }, { path: '/h/Cursor/Cache' }, { path: '/h/projects/a/node_modules' },
+  ], { index, toolStatus: notRunning });
+  assert.equal(allowed[0].path, '/h/Cursor/Cache');
+});
+
+test('with a known-paths set, anything Spaci did not produce is refused', async () => {
+  const index = buildTargetIndex(fixtureTargets());
+  const known = new Set(['/h/projects/a/node_modules']);
+  const { allowed, refused } = await enforceTargetRules([
+    { path: '/h/projects/a/node_modules' },
+    { path: '/Users/victim/Documents' },
+    { path: '/h/.npm/_cacache' },
+  ], { index, toolStatus: notRunning, known });
+  assert.deepEqual(allowed.map((j) => j.path).sort(), ['/h/.npm/_cacache', '/h/projects/a/node_modules']);
+  assert.deepEqual(refused.map((r) => r.path), ['/Users/victim/Documents']);
+});
+
+test('project artifacts are revalidated at clean time, and doubt means keep', async () => {
+  const index = buildTargetIndex(fixtureTargets());
+  const projectPaths = new Set(['/p/ok/build', '/p/tracked/build', '/p/boom/build']);
+  const revalidate = async (p) => {
+    if (p === '/p/ok/build') return { ok: true };
+    if (p === '/p/tracked/build') return { ok: false, reason: 'It now holds files tracked by git.' };
+    throw new Error('git exploded');
+  };
+  const { allowed, refused } = await enforceTargetRules(
+    [...projectPaths].map((p) => ({ path: p })),
+    { index, toolStatus: notRunning, projectPaths, revalidate },
+  );
+  assert.deepEqual(allowed.map((j) => j.path), ['/p/ok/build']);
+  assert.equal(refused.find((r) => r.path === '/p/tracked/build').reason, 'It now holds files tracked by git.');
+  assert.match(refused.find((r) => r.path === '/p/boom/build').reason, /could not confirm/);
+});
