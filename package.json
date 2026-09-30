@@ -2,7 +2,7 @@
   "name": "spaci",
   "productName": "Spaci",
   "version": "2.2.1-rc.1",
-  "description": "Spaci: a complete dev + Mac cleaner. Reclaim disk space from build artifacts (node_modules, target, .next…) and developer/system caches, with previews, recommendations and a polished UI. Built by kentom.co.ke.",
+  "description": "Spaci: a complete dev + Mac cleaner. Reclaim disk space from build artifacts (node_modules, target, .next\u2026) and developer/system caches, with previews, recommendations and a polished UI. Built by kentom.co.ke.",
   "main": "src/main.js",
   "author": "kentom.co.ke",
   "homepage": "https://spaci.kentom.co.ke",
@@ -68,7 +68,7 @@
         "deb"
       ],
       "category": "Development",
-      "icon": "assets/branding/icon.png",
+      "icon": "build/icons",
       "executableName": "spaci",
       "synopsis": "Reclaim disk space from build artifacts and developer caches",
       "maintainer": "Raccoon254 <Raccoon254@users.noreply.github.com>"

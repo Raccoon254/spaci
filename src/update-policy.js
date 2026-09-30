@@ -128,6 +128,9 @@ function createUpdateController({
   // 'resolve' on macOS: MacUpdater emits update-downloaded before Squirrel.Mac
   // has fetched the zip, and only resolves downloadUpdate() once it has.
   readyOn = 'event',
+  // false for a deb install: DebUpdater installs with pkexec, which must not
+  // prompt for a password while the app is quitting.
+  installOnQuit = true,
   log = console, now = () => Date.now(), setTimer = setTimeout, clearTimer = clearTimeout,
   defer = (fn) => setImmediate(fn), schedule = {},
   checkTimeoutMs = 30 * MIN, manualWaitMs = 60 * 1000, installTimeoutMs = 2 * MIN,
@@ -156,7 +159,7 @@ function createUpdateController({
   // flips allowDowngrade on in electron-updater.
   if (updater) {
     updater.autoDownload = false;
-    updater.autoInstallOnAppQuit = true;
+    updater.autoInstallOnAppQuit = installOnQuit;
     updater.allowPrerelease = false;
     updater.allowDowngrade = false;
   }

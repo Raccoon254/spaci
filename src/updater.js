@@ -22,6 +22,12 @@ const { createUpdateController } = require('./update-policy');
 
 let controller = null;
 
+// electron-builder writes resources/package-type ("deb") into deb builds only.
+function isDebInstall() {
+  if (process.platform !== 'linux' || !process.resourcesPath) return false;
+  try { return require('fs').readFileSync(require('path').join(process.resourcesPath, 'package-type'), 'utf8').trim() === 'deb'; } catch { return false; }
+}
+
 /**
  * @param {() => Electron.BrowserWindow|null} winGetter
  * @param {object} [opts]
@@ -59,6 +65,7 @@ function initUpdater(winGetter, opts = {}) {
     // MacUpdater emits update-downloaded before Squirrel.Mac has the zip; only
     // the resolved download means the update can really be installed.
     readyOn: process.platform === 'darwin' ? 'resolve' : 'event',
+    installOnQuit: !isDebInstall(),
   });
 
   ipcMain.handle('app:version', () => app.getVersion());

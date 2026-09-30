@@ -272,6 +272,8 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1180, height: 780, minWidth: 920, minHeight: 620,
     backgroundColor: '#202020',
+    // Linux has no bundle icon to fall back on when no .desktop entry matches.
+    ...(process.platform === 'linux' ? { icon: path.join(__dirname, '..', 'assets', 'branding', 'icon.png') } : {}),
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     trafficLightPosition: { x: 18, y: 22 },
     webPreferences: {

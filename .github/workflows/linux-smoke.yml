@@ -58,8 +58,14 @@ jobs:
       - name: Build AppImage and deb from this commit
         run: |
           npm install --no-audit --no-fund
-          npx electron-builder --linux AppImage deb --publish never
+          npx electron-builder --linux AppImage --publish never
+          npx electron-builder --linux deb --publish never
           ls -la release
+          # The AppImage must not carry the deb marker, or it would update with a .deb.
+          ( cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/release/*.AppImage --appimage-extract >/dev/null )
+          if [ -e "$RUNNER_TEMP/squashfs-root/resources/package-type" ]; then echo "FAIL appimage-package-type"; echo "FAIL appimage-package-type" >> "$RUNNER_TEMP/failures"; else echo "AppImage has no package-type marker"; fi
+          ls "$RUNNER_TEMP/squashfs-root/usr/share/icons/hicolor/"
+          rm -rf "$RUNNER_TEMP/squashfs-root"
 
       - name: deb installs icon, menu entry and AppArmor profile, and launches
         run: |
@@ -67,7 +73,12 @@ jobs:
           if grep -q "AppArmor parser error" "$RUNNER_TEMP/deb-install.log"; then echo "FAIL deb-apparmor-parse" >> "$RUNNER_TEMP/failures"; fi
           sudo aa-status 2>/dev/null | grep -w spaci || echo "spaci profile not loaded"
           ls /usr/share/icons/hicolor/*/apps/ | head -20
-          test -n "$(ls /usr/share/icons/hicolor/*/apps/spaci.png 2>/dev/null)" || { echo "FAIL deb-icon" >> "$RUNNER_TEMP/failures"; echo "no spaci icon installed"; }
+          for sz in 128x128 256x256 512x512; do
+            test -e /usr/share/icons/hicolor/$sz/apps/spaci.png || { echo "FAIL deb-icon-$sz" >> "$RUNNER_TEMP/failures"; echo "no $sz icon"; }
+          done
+          test ! -e /usr/share/icons/hicolor/0x0 || { echo "FAIL deb-icon-0x0" >> "$RUNNER_TEMP/failures"; echo "icon installed as 0x0"; }
+          sudo apparmor_parser -QT /etc/apparmor.d/spaci && echo "profile parses" || echo "FAIL deb-apparmor-parse" >> "$RUNNER_TEMP/failures"
+          cat /opt/Spaci/resources/package-type
           grep -E '^(Name|Exec|Icon)=' /usr/share/applications/spaci.desktop
           if [ -d /etc/apparmor.d ]; then cat /etc/apparmor.d/spaci || echo "FAIL deb-apparmor" >> "$RUNNER_TEMP/failures"; fi
           ls -la /opt/Spaci/chrome-sandbox /opt/Spaci/spaci /opt/Spaci/spaci-bin

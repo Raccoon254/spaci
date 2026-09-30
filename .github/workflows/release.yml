@@ -32,7 +32,10 @@ jobs:
             args: '--win'
           - os: ubuntu-latest
             platform: linux
-            args: '--linux'
+            # Two passes: built together, deb and AppImage share one unpacked
+            # dir, and the deb's resources/package-type could leak into the
+            # AppImage and make it update itself with a .deb.
+            args: '--linux AppImage'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +56,11 @@ jobs:
       # electron-builder treat it as a bad cert path, so they get their own step.
       - name: Build and package (macOS, signed + notarized)
         if: matrix.platform == 'mac'
-        run: npx electron-builder ${{ matrix.args }} --publish never
+        run: |
+          npx electron-builder ${{ matrix.args }} --publish never
+          if [ "${{ matrix.platform }}" = linux ]; then
+            npx electron-builder --linux deb --publish never
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.MAC_CERTS }}
