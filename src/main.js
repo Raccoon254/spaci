@@ -12,6 +12,7 @@ const docker = require('./docker');
 const cleaner = require('./cleaner');
 const aitools = require('./aitools');
 const cleanGuard = require('./clean-guard');
+const telemetry = require('./telemetry');
 const largefiles = require('./largefiles');
 const diskbreakdown = require('./diskbreakdown');
 const { initUpdater } = require('./updater');
@@ -40,6 +41,27 @@ function loadPrefs() {
 function savePrefs(p) {
   try { fs.mkdirSync(path.dirname(PREFS_PATH), { recursive: true }); fs.writeFileSync(PREFS_PATH, JSON.stringify(p, null, 2)); }
   catch (e) { console.error('savePrefs', e); }
+}
+
+// ---------- anonymous usage ping ----------
+// Once a day: a random install ID, the version and the OS. Nothing else. The
+// user can switch it off in Settings (prefs.telemetry === false).
+function sendUsagePing() {
+  // Dev runs are not users; never count them.
+  if (!app.isPackaged) return;
+  telemetry.maybePing({
+    prefs: loadPrefs(),
+    // Merge only telemetry's own keys into the latest prefs, so a setting the
+    // user changes while the request is in flight is never overwritten. This
+    // write throws on failure, which stops the ping: an install ID that was
+    // not saved would otherwise count as a new user every day.
+    savePrefs: (p) => {
+      const next = { ...loadPrefs(), installId: p.installId, lastPingDate: p.lastPingDate };
+      fs.mkdirSync(path.dirname(PREFS_PATH), { recursive: true });
+      fs.writeFileSync(PREFS_PATH, JSON.stringify(next, null, 2));
+    },
+    version: app.getVersion(),
+  }).catch(() => { /* never let analytics touch the app */ });
 }
 
 // ---------- scan cache + background scanning ----------
@@ -294,6 +316,9 @@ function createTray() {
 }
 
 app.whenReady().then(() => {
+  // Off the startup path; the interval catches an app left open past midnight.
+  setTimeout(sendUsagePing, 10000);
+  setInterval(sendUsagePing, 6 * 3600 * 1000);
   if (process.platform === 'darwin' && app.dock) {
     try { app.dock.setIcon(nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'branding', 'icon.png'))); } catch (_) { /* */ }
   }
@@ -556,14 +581,23 @@ ipcMain.handle('project:enrich', async (_e, p, force) => {
 // re-applies the target's own rules (mode, protect, running-tool guard) from
 // here, so safety never depends on the renderer passing the right fields.
 const TARGET_INDEX = cleanGuard.buildTargetIndex(system.TARGETS);
+let lastLargeFiles = new Set();
 
 ipcMain.handle('clean', async (e, jobs, meta) => {
   const ac = new AbortController();
   const onProgress = (p) => e.sender.send('clean:progress', p);
   try {
+    // Only paths Spaci itself produced may be deleted: system targets, project
+    // artifacts from the last scan, and files from the last large-file scan.
+    const projectPaths = new Set();
+    for (const p of cache.projects || []) for (const it of p.items || []) projectPaths.add(it.path);
+    const known = new Set([...TARGET_INDEX.keys(), ...projectPaths, ...lastLargeFiles]);
     const { allowed, refused } = await cleanGuard.enforceTargetRules(jobs, {
       index: TARGET_INDEX,
       toolStatus: () => aitools.aiToolStatus(),
+      known,
+      projectPaths,
+      revalidate: (p) => scanner.revalidateArtifact(p),
     });
     const res = allowed.length
       ? await cleaner.clean(allowed, onProgress, ac.signal)
@@ -586,6 +620,8 @@ ipcMain.handle('scan:largefiles', async (e, root, minBytes) => {
   const onProgress = (p) => e.sender.send('largefiles:progress', p);
   try {
     const res = await largefiles.scanLargeFiles(root || os.homedir(), minBytes, onProgress, aborts.largefiles.signal);
+    // Remember what was found: only these files may be deleted from that screen.
+    lastLargeFiles = new Set((res.files || []).map((f) => f.path));
     return { ok: true, ...res };
   } catch (err) { return { ok: false, error: err.message }; }
 });
