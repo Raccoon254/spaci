@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { buildAiToolTargets, runningAiTools, AI_TOOL_IDS } = require('../src/aitools');
+const { buildAiToolTargets, runningAiTools, aiToolStatus, AI_TOOL_IDS } = require('../src/aitools');
 
 function ctxFor(platform, home, env = {}) {
   const pathApi = platform === 'win32' ? path.win32 : path.posix;
@@ -230,4 +230,177 @@ test('runningAiTools never throws when exec fails or throws', async () => {
 test('runningAiTools only reports known tool ids', async () => {
   const all = await runningAiTools({ platform: 'darwin', exec: (f, a, o, cb) => cb(null, '1\n', '') });
   assert.ok(all.length > 0 && all.every((id) => AI_TOOL_IDS.includes(id)));
+});
+
+// ---- path overrides -------------------------------------------------------
+
+test('CLAUDE_CONFIG_DIR moves Claude targets and keeps the protect list', () => {
+  const env = { CLAUDE_CONFIG_DIR: '/data/claude-cfg' };
+  const ts = buildAiToolTargets(ctxFor('linux', '/home/u', env));
+  const tr = ts.find((t) => t.id === 'claude-transcripts');
+  assert.deepEqual(tr.paths, ['/data/claude-cfg/projects']);
+  for (const k of ['memory', 'workflows', 'MEMORY.md', 'CLAUDE.md', 'settings.json']) assert.ok(tr.protect.includes(k), k);
+  assert.deepEqual(ts.find((t) => t.id === 'claude-file-history').paths, ['/data/claude-cfg/file-history']);
+  assert.ok(ts.find((t) => t.id === 'claude-cache').paths.includes('/data/claude-cfg/shell-snapshots'));
+});
+
+test('relative CLAUDE_CONFIG_DIR is ignored', () => {
+  const ts = buildAiToolTargets(ctxFor('linux', '/home/u', { CLAUDE_CONFIG_DIR: 'rel/dir' }));
+  assert.deepEqual(ts.find((t) => t.id === 'claude-transcripts').paths, ['/home/u/.claude/projects']);
+});
+
+test('CODEX_HOME moves Codex targets', () => {
+  const ts = buildAiToolTargets(ctxFor('darwin', '/Users/u', { CODEX_HOME: '/opt/codex' }));
+  assert.deepEqual(ts.find((t) => t.id === 'codex-sessions').paths, ['/opt/codex/sessions', '/opt/codex/archived_sessions']);
+  assert.ok(ts.find((t) => t.id === 'codex-databases').paths.includes('/opt/codex/logs_2.sqlite-wal'));
+});
+
+test('Zed hang_traces is under the data dir', () => {
+  const lin = buildAiToolTargets(ctxFor('linux', '/home/u', {})).find((t) => t.id === 'zed-logs');
+  assert.ok(lin.paths.includes('/home/u/.local/share/zed/hang_traces'));
+  const linX = buildAiToolTargets(ctxFor('linux', '/home/u', { XDG_DATA_HOME: '/x/data' })).find((t) => t.id === 'zed-logs');
+  assert.ok(linX.paths.includes('/x/data/zed/hang_traces'));
+  const env = { USERPROFILE: 'C:\\Users\\d', APPDATA: 'C:\\Users\\d\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\d\\AppData\\Local' };
+  const win = buildAiToolTargets(ctxFor('win32', 'C:\\Users\\d', env)).find((t) => t.id === 'zed-logs');
+  assert.ok(win.paths.includes('C:\\Users\\d\\AppData\\Local\\Zed\\hang_traces'));
+});
+
+test('XDG_CACHE_HOME is honoured on Linux only', () => {
+  const lin = buildAiToolTargets(ctxFor('linux', '/home/u', { XDG_CACHE_HOME: '/x/cache' })).find((t) => t.id === 'claude-cache');
+  assert.ok(lin.paths.includes('/x/cache/claude-cli-nodejs'));
+  const def = buildAiToolTargets(ctxFor('linux', '/home/u', {})).find((t) => t.id === 'claude-cache');
+  assert.ok(def.paths.includes('/home/u/.cache/claude-cli-nodejs'));
+  const mac = buildAiToolTargets(ctxFor('darwin', '/Users/u', { XDG_CACHE_HOME: '/x/cache' })).find((t) => t.id === 'claude-cache');
+  assert.ok(mac.paths.includes('/Users/u/Library/Caches/claude-cli-nodejs'));
+});
+
+// ---- detection matrix -----------------------------------------------------
+
+// Fake pgrep over a fixed process table: `-x` compares the process name,
+// `-f` runs the pattern as a regex against the full command line.
+function procTable(procs) {
+  return (file, args, opts, cb) => {
+    assert.equal(file, 'pgrep');
+    const [flag, pat] = args;
+    const re = flag === '-f' ? new RegExp(pat) : null;
+    const hit = procs.some((p) => (flag === '-x' ? p.name === pat : re.test(p.cmd)));
+    if (hit) return cb(null, '1\n', '');
+    cb(Object.assign(new Error('none'), { code: 1 }), '', '');
+  };
+}
+const proc = (cmd) => ({ name: cmd.split(' ')[0].split('/').pop(), cmd });
+const runs = async (platform, cmds) => (await aiToolStatus({ platform, exec: procTable(cmds.map(proc)) }));
+
+test('node-hosted CLIs are detected on macOS and Linux', async () => {
+  for (const platform of ['darwin', 'linux']) {
+    let r = await runs(platform, ['/usr/local/bin/node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js --resume']);
+    assert.deepEqual(r, { ok: true, running: ['claude'] });
+    r = await runs(platform, ['node /opt/homebrew/lib/node_modules/@google/gemini-cli/dist/index.js']);
+    assert.deepEqual(r.running, ['gemini']);
+    r = await runs(platform, ['/usr/bin/node /home/u/.nvm/versions/node/v22/bin/gemini']);
+    assert.deepEqual(r.running, ['gemini']);
+  }
+});
+
+test('unrelated node processes are not AI tools', async () => {
+  const r = await runs('linux', ['node /srv/app/server.js', '/usr/bin/node /home/u/proj/node_modules/.bin/vite', 'bash -lc geminiwatch']);
+  assert.deepEqual(r, { ok: true, running: [] });
+});
+
+test('macOS host editors mark continue and copilot as running', async () => {
+  const cases = [
+    '/Applications/Visual Studio Code.app/Contents/MacOS/Electron',
+    '/Applications/Visual Studio Code - Insiders.app/Contents/MacOS/Electron',
+    '/Applications/IntelliJ IDEA.app/Contents/MacOS/idea',
+    '/Applications/IntelliJ IDEA CE.app/Contents/MacOS/idea',
+    '/Applications/PyCharm.app/Contents/MacOS/pycharm',
+    '/Applications/WebStorm.app/Contents/MacOS/webstorm',
+    '/Applications/GoLand.app/Contents/MacOS/goland',
+    '/Applications/Rider.app/Contents/MacOS/rider',
+    '/Applications/CLion.app/Contents/MacOS/clion',
+    '/Applications/PhpStorm.app/Contents/MacOS/phpstorm',
+    '/Applications/RubyMine.app/Contents/MacOS/rubymine',
+    '/Applications/DataGrip.app/Contents/MacOS/datagrip',
+    '/Applications/Android Studio.app/Contents/MacOS/studio',
+    '/Users/u/Applications/PyCharm Professional.app/Contents/MacOS/pycharm',
+  ];
+  for (const c of cases) assert.deepEqual((await runs('darwin', [c])).running, ['continue', 'copilot'], c);
+  for (const c of ['/Applications/Safari.app/Contents/MacOS/Safari', '/Applications/Xcode.app/Contents/MacOS/Xcode', '/Applications/Code Runner.app/Contents/MacOS/x']) {
+    assert.deepEqual((await runs('darwin', [c])).running, [], c);
+  }
+});
+
+test('Linux host editors mark continue and copilot as running', async () => {
+  const cases = [
+    '/usr/share/code/code --type=renderer',
+    '/usr/share/code/code',
+    '/snap/code/150/usr/share/code/code --no-sandbox',
+    '/usr/share/code-insiders/code-insiders',
+    '/opt/idea/jbr/bin/java -Didea.paths.selector=IntelliJIdea2025.2 com.intellij.idea.Main',
+    '/opt/pycharm/bin/pycharm.sh',
+    '/opt/webstorm/bin/webstorm',
+    '/home/u/.local/share/JetBrains/Toolbox/apps/goland/bin/goland.sh',
+    '/opt/android-studio/bin/studio.sh',
+    '/opt/rider/bin/rider.sh',
+  ];
+  for (const c of cases) assert.deepEqual((await runs('linux', [c])).running, ['continue', 'copilot'], c);
+  for (const c of ['/usr/bin/opencode', '/usr/bin/xcode-select', '/usr/lib/code-helper', '/usr/bin/nodejs server.js', '/usr/bin/studio-tools --x', '/usr/bin/vscode-tunnel']) {
+    assert.deepEqual((await runs('linux', [c])).running.filter((i) => i === 'continue' || i === 'copilot'), [], c);
+  }
+});
+
+test('Linux Zed process zed-editor is detected', async () => {
+  assert.deepEqual((await runs('linux', ['/usr/libexec/zed-editor --foreground'])).running, ['zed']);
+});
+
+// Fake tasklist plus powershell.
+function winExec({ images, cmdlines, psError }) {
+  const calls = [];
+  const fn = (file, args, opts, cb) => {
+    calls.push({ file, args, opts });
+    assert.ok(opts.timeout > 0);
+    if (file === 'tasklist') return cb(null, images.map((i) => `"${i}","1","Console","1","10 K"`).join('\r\n'), '');
+    assert.equal(file, 'powershell');
+    assert.ok(args.includes('-NoProfile'));
+    if (psError) return cb(Object.assign(new Error('denied'), { code: 1 }), '', '');
+    cb(null, cmdlines.join('\r\n'), '');
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test('windows: node.exe command lines identify Claude Code and Gemini CLI', async () => {
+  const exec = winExec({
+    images: ['System', 'node.exe'],
+    cmdlines: ['"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\d\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js',
+      'node.exe C:\\Users\\d\\AppData\\Roaming\\npm\\node_modules\\@google\\gemini-cli\\dist\\index.js'],
+  });
+  assert.deepEqual(await aiToolStatus({ platform: 'win32', exec }), { ok: true, running: ['claude', 'gemini'] });
+  const ps = exec.calls.find((c) => c.file === 'powershell');
+  assert.ok(ps.opts.timeout >= 5000);
+});
+
+test('windows: unrelated node.exe is not an AI tool, and no query without node.exe', async () => {
+  let r = await aiToolStatus({ platform: 'win32', exec: winExec({ images: ['node.exe'], cmdlines: ['node.exe C:\\app\\server.js'] }) });
+  assert.deepEqual(r, { ok: true, running: [] });
+  const exec = winExec({ images: ['explorer.exe'], cmdlines: [] });
+  r = await aiToolStatus({ platform: 'win32', exec });
+  assert.deepEqual(r, { ok: true, running: [] });
+  assert.ok(!exec.calls.some((c) => c.file === 'powershell'));
+});
+
+test('windows: failed or empty command line query gives ok false', async () => {
+  let r = await aiToolStatus({ platform: 'win32', exec: winExec({ images: ['node.exe'], cmdlines: [], psError: true }) });
+  assert.equal(r.ok, false);
+  r = await aiToolStatus({ platform: 'win32', exec: winExec({ images: ['node.exe'], cmdlines: [] }) });
+  assert.equal(r.ok, false);
+  const boom = (f, a, o, cb) => { if (f === 'tasklist') return cb(null, '"node.exe","1"\r\n', ''); throw new Error('boom'); };
+  assert.equal((await aiToolStatus({ platform: 'win32', exec: boom })).ok, false);
+});
+
+test('windows: host editor images mark continue and copilot as running', async () => {
+  for (const img of ['Code.exe', 'idea64.exe', 'pycharm64.exe', 'webstorm64.exe', 'goland64.exe', 'rider64.exe', 'clion64.exe', 'phpstorm64.exe', 'rubymine64.exe', 'datagrip64.exe', 'studio64.exe']) {
+    const r = await aiToolStatus({ platform: 'win32', exec: winExec({ images: [img.toLowerCase()], cmdlines: [] }) });
+    assert.deepEqual(r, { ok: true, running: ['continue', 'copilot'] }, img);
+  }
 });

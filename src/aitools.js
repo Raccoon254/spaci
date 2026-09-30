@@ -81,9 +81,15 @@ function buildAiToolTargets(ctx) {
   const app = (name, ...parts) => (isMac ? join('Library', 'Application Support', name, ...parts) : from(appSupport, name, ...parts));
   const xdgData = isWin ? null : (env.XDG_DATA_HOME || join('.local', 'share'));
   const localApp = isWin ? env.LOCALAPPDATA : null;
+  const cacheHome = isMac || isWin ? null : (env.XDG_CACHE_HOME || join('.cache'));
+
+  // A relocated config home is honoured only when it is an absolute path.
+  const absEnv = (v) => (typeof v === 'string' && /^([A-Za-z]:[\\/]|[\\/])/.test(v) ? v : null);
 
   // ---- Claude Code (~/.claude) -------------------------------------------
-  const claude = (...p) => dot('.claude', ...p);
+  // CLAUDE_CONFIG_DIR relocates the whole config home.
+  const claudeHome = absEnv(env.CLAUDE_CONFIG_DIR);
+  const claude = (...p) => (claudeHome ? from(claudeHome, ...p) : dot('.claude', ...p));
   t.push(T('claude-transcripts', 'Claude Code session transcripts',
     [claude('projects')],
     'Claude Code conversation transcripts (projects/*/*.jsonl and their subagent and tool-result folders). ' + TRANSCRIPT_NOTE +
@@ -95,11 +101,13 @@ function buildAiToolTargets(ctx) {
     { reversible: false }));
   t.push(T('claude-cache', 'Claude Code caches and logs',
     [claude('cache'), claude('shell-snapshots'), claude('paste-cache'), claude('telemetry'), claude('debug'), claude('session-env'),
-      isMac ? join('Library', 'Caches', 'claude-cli-nodejs') : isWin ? from(localApp, 'claude-cli-nodejs', 'Cache') : join('.cache', 'claude-cli-nodejs')],
+      isMac ? join('Library', 'Caches', 'claude-cli-nodejs') : isWin ? from(localApp, 'claude-cli-nodejs', 'Cache') : from(cacheHome, 'claude-cli-nodejs')],
     'Shell snapshots, pasted-text cache, telemetry queue, debug logs and CLI caches. Recreated as needed.'));
 
   // ---- Codex (~/.codex) --------------------------------------------------
-  const codex = (...p) => dot('.codex', ...p);
+  // CODEX_HOME relocates the Codex home.
+  const codexHome = absEnv(env.CODEX_HOME);
+  const codex = (...p) => (codexHome ? from(codexHome, ...p) : dot('.codex', ...p));
   t.push(T('codex-sessions', 'Codex session transcripts',
     [codex('sessions'), codex('archived_sessions')],
     'Codex rollout transcripts (sessions/ and archived_sessions/). ' + TRANSCRIPT_NOTE + 'Close Codex first.',
@@ -185,9 +193,11 @@ function buildAiToolTargets(ctx) {
     { reversible: false }));
 
   // ---- Zed ---------------------------------------------------------------
+  // hang_traces lives under the data dir, not the config dir.
+  const zedHang = isMac ? app('Zed', 'hang_traces') : isWin ? from(localApp, 'Zed', 'hang_traces') : from(xdgData, 'zed', 'hang_traces');
   const zedLogs = isMac ? join('Library', 'Logs', 'Zed') : isWin ? from(localApp, 'Zed', 'logs') : from(xdgData, 'zed', 'logs');
   t.push(T('zed-logs', 'Zed logs and hang traces',
-    [zedLogs, app(isMac || isWin ? 'Zed' : 'zed', 'hang_traces')],
+    [zedLogs, zedHang],
     'Zed log files and hang traces. Settings and conversation history are not touched.'));
 
   return t.filter((x) => x.paths.length > 0);
@@ -195,25 +205,53 @@ function buildAiToolTargets(ctx) {
 
 // ---- running tool detection ----------------------------------------------
 
-// pgrep argument lists per tool id. Any match means the tool is running.
-// Claude Code runs as the `claude` CLI and also inside the Claude desktop app.
-const PGREP_CHECKS = {
-  claude: [['-x', 'claude'], ['-f', 'Claude.app/Contents/MacOS']],
+// pgrep argument lists per tool id (macOS and Linux). Any match means the tool
+// is running. Claude Code runs as the `claude` CLI, inside the Claude desktop
+// app, or as `node` when installed from npm; Gemini CLI is usually `node` too,
+// so those are matched on the command line.
+const PGREP_COMMON = {
+  claude: [['-x', 'claude'], ['-f', 'Claude.app/Contents/MacOS'], ['-f', '@anthropic-ai/claude-code']],
   codex: [['-x', 'codex'], ['-f', 'Codex.app/Contents/MacOS']],
   opencode: [['-x', 'opencode']],
   cursor: [['-f', 'Cursor.app/Contents/MacOS'], ['-x', 'cursor']],
   windsurf: [['-f', 'Windsurf.app/Contents/MacOS'], ['-x', 'windsurf']],
-  gemini: [['-x', 'gemini']],
+  gemini: [['-x', 'gemini'], ['-f', '@google/gemini-cli'], ['-f', 'bin/gemini']],
   grok: [['-x', 'grok']],
   t3: [['-f', 'T3 Code.app/Contents/MacOS'], ['-f', 'T3.app/Contents/MacOS']],
-  continue: [],
-  copilot: [],
-  zed: [['-x', 'zed'], ['-f', 'Zed.app/Contents/MacOS']],
+  zed: [['-x', 'zed'], ['-x', 'zed-editor'], ['-f', 'Zed.app/Contents/MacOS']],
 };
-const AI_TOOL_IDS = Object.keys(PGREP_CHECKS);
+
+// Continue and Copilot are editor plugins with no process of their own, so
+// they count as running whenever a host editor (VS Code or a JetBrains IDE) is.
+// These are extended regexes matched against the full command line.
+const JETBRAINS_MAC = '(IntelliJ IDEA|PyCharm|WebStorm|GoLand|Rider|CLion|PhpStorm|RubyMine|DataGrip|Android Studio)[^/]*\\.app/Contents/MacOS';
+// Continue and Copilot are editor extensions, so they count as running while a
+// host editor runs: VS Code, its forks Cursor and Windsurf, or a JetBrains IDE.
+const HOST_EDITORS = {
+  darwin: [
+    ['-f', '(Visual Studio Code|Cursor|Windsurf)[^/]*\\.app/Contents/MacOS'],
+    ['-f', JETBRAINS_MAC],
+  ],
+  // VS Code's binary is .../code (also snap and flatpak paths). JetBrains IDEs
+  // run as java with a paths selector, or start from an idea.sh style launcher.
+  linux: [
+    ['-f', '(^|/)(code(-insiders)?|cursor|windsurf)( |$)'],
+    ['-f', 'com\\.intellij\\.idea\\.Main|-Didea\\.paths\\.selector=|(^|/)(idea|pycharm|webstorm|goland|rider|clion|phpstorm|rubymine|datagrip|studio)(64)?(\\.sh)?( |$)'],
+  ],
+};
+
+function pgrepChecks(platform) {
+  const hosts = platform === 'darwin' ? HOST_EDITORS.darwin : HOST_EDITORS.linux;
+  return { ...PGREP_COMMON, continue: hosts, copilot: hosts };
+}
+const AI_TOOL_IDS = Object.keys(pgrepChecks('linux'));
 
 // Windows process image names per tool id, matched case-insensitively against
 // `tasklist` output.
+const WIN_HOST_EDITORS = [
+  'Code.exe', 'Code - Insiders.exe', 'Cursor.exe', 'Windsurf.exe', 'idea64.exe', 'pycharm64.exe', 'webstorm64.exe', 'goland64.exe', 'rider64.exe',
+  'clion64.exe', 'phpstorm64.exe', 'rubymine64.exe', 'datagrip64.exe', 'studio64.exe',
+];
 const WIN_IMAGES = {
   claude: ['claude.exe', 'Claude.exe'],
   codex: ['codex.exe', 'Codex.exe'],
@@ -223,10 +261,17 @@ const WIN_IMAGES = {
   gemini: ['gemini.exe'],
   grok: ['grok.exe'],
   t3: ['T3 Code.exe', 'T3.exe'],
-  continue: [],
-  copilot: [],
+  continue: WIN_HOST_EDITORS,
+  copilot: WIN_HOST_EDITORS,
   zed: ['zed.exe', 'Zed.exe'],
 };
+
+// npm installed CLIs run as node.exe, so they are told apart by command line.
+const WIN_NODE_CMDLINE = {
+  claude: /@anthropic-ai[\\/]claude-code/i,
+  gemini: /@google[\\/]gemini-cli/i,
+};
+const WIN_NODE_QUERY = "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' } | ForEach-Object { $_.CommandLine }";
 
 // Resolves to 'hit', 'miss', or 'error'. pgrep exits 1 when nothing matches,
 // which is a clean answer; any other failure means we could not tell.
@@ -262,6 +307,23 @@ function tasklist(exec, timeout) {
   });
 }
 
+// Command lines of every node.exe, or null when they could not be read.
+function nodeCommandLines(exec, timeout) {
+  return new Promise((resolve) => {
+    try {
+      exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', WIN_NODE_QUERY],
+        { timeout: Math.max(timeout, 10000), windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+          if (err) return resolve(null);
+          const lines = String(stdout || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+          // node.exe is running, so no command lines at all means access was denied.
+          resolve(lines.length > 0 ? lines : null);
+        });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
 /**
  * Which AI tools are running. Never rejects.
  * Resolves to { ok, running }: `ok` is false when detection itself failed, so
@@ -278,16 +340,25 @@ async function aiToolStatus(options = {}) {
     if (platform === 'win32') {
       const images = await tasklist(exec, timeout);
       if (!images) return { ok: false, running };
+      const hit = new Set();
       for (const id of AI_TOOL_IDS) {
-        if (WIN_IMAGES[id].some((name) => images.has(name.toLowerCase()))) running.push(id);
+        if (WIN_IMAGES[id].some((name) => images.has(name.toLowerCase()))) hit.add(id);
       }
-      return { ok: true, running };
+      let ok = true;
+      if (images.has('node.exe')) {
+        const lines = await nodeCommandLines(exec, timeout);
+        if (!lines) ok = false;
+        else for (const id of Object.keys(WIN_NODE_CMDLINE)) if (lines.some((l) => WIN_NODE_CMDLINE[id].test(l))) hit.add(id);
+      }
+      for (const id of AI_TOOL_IDS) if (hit.has(id)) running.push(id);
+      return { ok, running };
     }
 
     let ok = true;
+    const checks = pgrepChecks(platform);
     for (const id of AI_TOOL_IDS) {
       let hit = false;
-      for (const args of PGREP_CHECKS[id]) {
+      for (const args of checks[id]) {
         const r = await pgrep(exec, args, timeout);
         if (r === 'error') ok = false;
         if (r === 'hit') { hit = true; break; }
