@@ -47,6 +47,9 @@
   function recRisk(r) {
     if (!r) return TIER.safe;
     const act = r.action || {};
+    // Unused images are Review, not Permanent: they download or rebuild again.
+    // History still records them as permanent (a local-only build is gone).
+    if (act.kind === 'unused-images') return TIER.review;
     if (r.reversible === false || r.permanent === true) return TIER.permanent;
     if (r.kind === 'docker' || act.type === 'docker-prune') {
       // Unused tagged images download again but are not rebuilt for you.
@@ -130,7 +133,7 @@
         reversible: risk.key !== 'permanent',
         // Unused images come back only by downloading or rebuilding them.
         after: act.kind === 'unused-images'
-          ? { short: 'Downloads again when needed', title: 'Downloaded or rebuilt when needed', text: 'Docker downloads or rebuilds an image the next time a container or build needs it. Large images can take a while to download again.' }
+          ? { short: 'Downloads again when needed', title: 'Downloaded or rebuilt when needed', text: 'Docker downloads or rebuilds an image the next time a container or build needs it. Large images can take a while to download again, and an image you built yourself and never pushed has to be built again.' }
           : null,
         jobs: [],
         items: [{ icon: 'box', path: act.kind === 'build-cache' ? 'docker builder prune' : act.kind === 'unused-images' ? 'docker image prune -a' : 'docker image prune' }],
