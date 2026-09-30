@@ -1,4 +1,5 @@
 'use strict';
+const fs = require('fs');
 const path = require('path');
 /**
  * The last line of defence before anything is deleted.
@@ -40,9 +41,31 @@ function isInside(parent, child) {
 // governed separately (a custom HF_HOME model store, Claude's CLI cache while
 // Claude runs, an opt-in item). This also keeps the clean honest, because a
 // parent's displayed size already excludes its nested targets.
-function nestedTargetPaths(jobPath, index) {
+function defaultRealpath(p) {
+  return fs.realpathSync.native(p);
+}
+
+function realOr(p, realpath) {
+  try { return realpath(p); } catch { return p; }
+}
+
+// Symlinked homes break string comparison: on Fedora Silverblue /home is a
+// link to /var/home, so HF_HOME=/home/bob/.cache/hf lives inside
+// /var/home/bob/.cache without looking like it. Nested targets are matched by
+// real path too, then expressed in the job's own path so the cleaner, which
+// walks the job path, recognises them.
+function nestedTargetPaths(jobPath, index, realpath = defaultRealpath) {
   const out = [];
-  for (const p of index.keys()) if (isInside(jobPath, p)) out.push(p);
+  let realJob = null;
+  for (const p of index.keys()) {
+    if (isInside(jobPath, p)) { out.push(p); continue; }
+    if (realJob === null) realJob = realOr(jobPath, realpath);
+    const realP = realOr(p, realpath);
+    if (isInside(realJob, realP)) {
+      const api = pathApiFor(jobPath);
+      out.push(api.join(jobPath, pathApiFor(realJob).relative(realJob, realP)));
+    }
+  }
   return out;
 }
 
@@ -123,7 +146,7 @@ async function enforceTargetRules(jobs, options = {}) {
   // Nested targets are excluded from every job, target or not, and a caller's
   // own exclusions are kept.
   for (const job of allowed) {
-    const nested = nestedTargetPaths(job.path, index);
+    const nested = nestedTargetPaths(job.path, index, options.realpath);
     const own = Array.isArray(job.excludePaths) ? job.excludePaths : [];
     const excludePaths = Array.from(new Set([...nested, ...own]));
     if (excludePaths.length) job.excludePaths = excludePaths;

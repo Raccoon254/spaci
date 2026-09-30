@@ -240,3 +240,28 @@ test('project artifacts are revalidated at clean time, and doubt means keep', as
   assert.equal(refused.find((r) => r.path === '/p/tracked/build').reason, 'It now holds files tracked by git.');
   assert.match(refused.find((r) => r.path === '/p/boom/build').reason, /could not confirm/);
 });
+
+test('end to end: a model store reached through a symlinked home survives (Silverblue layout)', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-sym-'));
+  try {
+    // Real home under var/home, and a /home style alias pointing at it.
+    const realHome = path.join(root, 'var', 'home', 'bob');
+    const alias = path.join(root, 'home');
+    fs.mkdirSync(realHome, { recursive: true });
+    fs.symlinkSync(path.join(root, 'var', 'home'), alias);
+    const cache = path.join(realHome, '.cache');
+    const model = path.join(cache, 'hf', 'hub', 'model.bin');
+    const junk = path.join(cache, 'tool', 'blob');
+    for (const p of [model, junk]) { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, 'x'); }
+
+    // HOME is the real path, HF_HOME was written through the alias.
+    const targets = buildSystemTargets({ platform: 'linux', home: realHome, env: { HF_HOME: path.join(alias, 'bob', '.cache', 'hf') } });
+    const { allowed } = await enforceTargetRules([{ path: cache, mode: 'contents' }], { index: buildTargetIndex(targets), toolStatus: notRunning });
+    assert.ok(allowed[0].excludePaths.some((p) => p === path.join(cache, 'hf')), 'the aliased store is excluded in the job\'s own path');
+    await cleaner.clean(allowed, () => {}, new AbortController().signal);
+    assert.ok(fs.existsSync(model), 'the model store must survive');
+    assert.ok(!fs.existsSync(junk));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
