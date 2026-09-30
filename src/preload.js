@@ -40,6 +40,10 @@ contextBridge.exposeInMainWorld('api', {
   dockerStatus: (force) => ipcRenderer.invoke('docker:status', force),
   dockerKinds: () => ipcRenderer.invoke('docker:kinds'),
   dockerPrune: (kind) => ipcRenderer.invoke('docker:prune', kind),
+  dockerVolumes: (force) => ipcRenderer.invoke('docker:volumes', force),
+  dockerRemoveVolume: (name, opts) => ipcRenderer.invoke('docker:remove-volume', name, opts),
+  dockerRestart: () => ipcRenderer.invoke('docker:restart'),
+  onDockerRestartProgress: (cb) => sub('docker:restart-progress', cb),
 
   // cleaning
   clean: (jobs, meta) => ipcRenderer.invoke('clean', jobs, meta),

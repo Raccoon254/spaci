@@ -150,7 +150,22 @@ function dockerEntry({ id, at, finishedAt, spec, freed, restoreHint }) {
   return entry;
 }
 
+/**
+ * One Docker volume removed with `docker volume rm`. Permanent: a volume holds
+ * data nothing can rebuild, so reversible is 'none' and there is no hint.
+ * bytes is the size Docker reported for it in the listing the user confirmed.
+ */
+function dockerVolumeEntry({ id, at, finishedAt, name, project = null, bytes }) {
+  const item = buildItem({ path: `docker volume ${name}`, kind: 'other', outcome: 'removed', bytes, reversible: 'none', project: project || undefined });
+  return {
+    v: HISTORY_VERSION, id: String(id), at, finishedAt: finishedAt || at, status: 'done',
+    scope: 'docker', label: `Docker volume ${name}`,
+    requested: 1, ...tally([item]), items: [item],
+    reversible: 'none',
+  };
+}
+
 module.exports = {
   HISTORY_VERSION, MAX_ENTRIES, MAX_ITEMS, INTERRUPTED_REASON,
-  buildItem, tally, startedEntry, finishedEntry, interruptEntry, markInterrupted, upsertEntry, dockerEntry,
+  buildItem, tally, startedEntry, finishedEntry, interruptEntry, markInterrupted, upsertEntry, dockerEntry, dockerVolumeEntry,
 };

@@ -74,6 +74,7 @@ const historyLog = require('./history-log');
 const restoreHints = require('./restore-hints');
 const cleanPlan = require('./clean-plan');
 const ipcGuards = require('./ipc-guards');
+const dockerVolumes = require('./docker-volumes');
 const trayPolicy = require('./tray-policy');
 const installLocation = require('./install-location');
 
@@ -241,6 +242,7 @@ const WORKER_TIMEOUTS = {
   topChildren: 2 * MIN,
   enrichProject: 2 * MIN,
   dockerSummary: 3 * MIN,
+  dockerVolumes: 3 * MIN,
   docker: 10 * MIN, // prune and Docker Desktop restart can be slow
   revalidateArtifact: MIN,
   aiToolStatus: 15 * 1000,
@@ -1001,13 +1003,86 @@ ipcMain.handle('docker:prune', async (_e, kind) => {
       id: newHistoryId(), at, finishedAt: at, spec, freed: res.freed,
       restoreHint: restoreHints.dockerRestoreHint(kind),
     }));
-    await refreshDocker(cache.projects || [], { force: true });
-    writeCache();
-    updateTrayTitle();
-    if (win && !win.isDestroyed()) win.webContents.send('cache:updated', cache);
+    await dockerChanged();
   }
   return res;
 });
+
+// ---------- docker volumes (review, one at a time) and Desktop restart ----------
+// Rules in docker-volumes.js. The listing is cached for 60 s like docker:status;
+// it is also the allowlist: only a volume it showed may be removed.
+let volumesCache = null; // last volumesView
+const VOLUMES_FRESH_MS = 60000;
+const listVolumes = singleFlight(async (force) => {
+  try {
+    const raw = await work('dockerVolumes', [{ force: Boolean(force) }]);
+    volumesCache = dockerVolumes.volumesView(raw);
+  } catch (e) {
+    volumesCache = { ok: false, state: null, volumes: [], groups: [], error: (e && e.message) || 'Could not list Docker volumes.', at: Date.now() };
+  }
+  return volumesCache;
+});
+/** Docker changed underneath us: the next reads go to the daemon. */
+async function dockerChanged() {
+  volumesCache = null;
+  await refreshDocker(cache.projects || [], { force: true });
+  writeCache();
+  updateTrayTitle();
+  if (win && !win.isDestroyed()) win.webContents.send('cache:updated', cache);
+}
+
+// api.dockerVolumes(force?) -> { ok, state, volumes: [{ name, size, project|null,
+// inUse, containers, createdAt|null, anonymous }], groups: [{ project|null, label,
+// volumes: [names], size, unusedSize, inUse }], at, error? }
+ipcMain.handle('docker:volumes', async (_e, force) => {
+  if (!force && volumesCache && Date.now() - volumesCache.at < VOLUMES_FRESH_MS) return volumesCache;
+  return listVolumes(Boolean(force));
+});
+
+// api.dockerRemoveVolume(name, { confirmed: true }) -> { ok, freed, name, error?, message? }
+// error codes: needs-confirmation, invalid-name, unknown-volume, in-use, failed.
+ipcMain.handle('docker:remove-volume', async (_e, name, opts) => {
+  const refuse = (error, message) => ({ ok: false, freed: 0, name: typeof name === 'string' ? name : null, error, message: message || dockerVolumes.REFUSAL_TEXT[error] || error });
+  // Confirmation is checked before anything else, the listing included.
+  if (!opts || typeof opts !== 'object' || opts.confirmed !== true) return refuse('needs-confirmation');
+  if (!dockerVolumes.isVolumeName(name)) return refuse('invalid-name');
+  const listing = volumesCache && volumesCache.ok ? volumesCache : await listVolumes(false);
+  const decision = dockerVolumes.removalDecision(name, opts, listing);
+  if (!decision.ok) return refuse(decision.error);
+  let res;
+  try { res = await dockerCall('removeVolume', [name, { confirm: name }]); }
+  catch (e) { return refuse('failed', (e && e.message) || 'Docker could not remove the volume.'); }
+  if (!res || !res.ok) {
+    volumesCache = null; // what the user saw is out of date
+    return refuse(res && res.inUse ? 'in-use' : 'failed', (res && res.error) || 'Docker could not remove the volume.');
+  }
+  const at = Date.now();
+  const freed = decision.volume.size;
+  putHistory(historyLog.dockerVolumeEntry({ id: newHistoryId(), at, finishedAt: at, name, project: decision.volume.project, bytes: freed }));
+  await dockerChanged();
+  return { ok: true, freed, name };
+});
+
+// api.dockerRestart() -> { ok, state, error?, message? }. Only when the engine
+// does not answer (state 'engine-down', shown as unresponsive). Progress goes
+// to 'docker:restart-progress' while Docker Desktop quits and starts again.
+const restartDocker = singleFlight(async (sender) => {
+  let st;
+  try { st = await dockerCall('status', [{ force: true }]); }
+  catch (e) { return { ok: false, state: null, error: 'failed', message: (e && e.message) || 'Could not check Docker.' }; }
+  const state = (st && st.state) || null;
+  if (!dockerVolumes.canRestart(state)) {
+    return { ok: false, state, error: 'not-unresponsive', message: 'Docker is not stuck, so Spaci does not restart it (a restart would stop your containers).' };
+  }
+  let res;
+  try { res = await dockerCall('restartDesktop', [{}], { onProgress: sender ? progressTo(sender, 'docker:restart-progress') : undefined }); }
+  catch (e) { return { ok: false, state, error: 'failed', message: (e && e.message) || 'Docker Desktop could not be restarted.' }; }
+  crashLog.info(`docker restart: ok=${Boolean(res && res.ok)} reason=${(res && res.reason) || ''}`);
+  await dockerChanged();
+  if (res && res.ok) return { ok: true, state: res.state || 'running', message: res.message };
+  return { ok: false, state: (res && res.state) || state, error: (res && res.reason) || 'failed', message: (res && res.message) || 'Docker Desktop could not be restarted.' };
+});
+ipcMain.handle('docker:restart', (e) => restartDocker(e && e.sender));
 
 const refreshEnrich = keyedSingleFlight(async (p) => {
   try {

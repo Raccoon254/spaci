@@ -127,6 +127,19 @@ async function dockerSummary(mod, stubs, options = {}) {
   return { summary, attached };
 }
 
+/**
+ * Every Docker volume plus the per-project grouping, in one worker round trip.
+ * The status travels with it so main can tell "no volumes" from "no engine".
+ */
+async function dockerVolumes(mod, options = {}) {
+  const docker = mod('docker');
+  const status = await docker.status({ force: Boolean(options && options.force) });
+  if (!status || !status.running || status.remote) return { status, volumes: [], groups: [] };
+  const volumes = await docker.listVolumes({ status });
+  const groups = docker.groupVolumesByProject(volumes).map((g) => ({ key: g.key, project: g.project, volumes: g.volumes.map((v) => v.name) }));
+  return { status, volumes, groups };
+}
+
 function buildOps(mod) {
   return {
     ping: async () => ({ pid: process.pid, at: Date.now() }),
@@ -149,6 +162,7 @@ function buildOps(mod) {
       return res;
     },
     dockerSummary: (ctx, stubs, options) => dockerSummary(mod, stubs, options),
+    dockerVolumes: (ctx, options) => dockerVolumes(mod, options),
     enrichProject: (ctx, dir) => mod('scanner').enrichProject(dir, ctx.signal),
     revalidateArtifact: (ctx, absPath) => mod('scanner').revalidateArtifact(absPath),
 
@@ -251,4 +265,4 @@ function startWorker({ modules, extraOps, log = console } = {}) {
   return dispatcher;
 }
 
-module.exports = { createDispatcher, startWorker, attachLanguages, dockerSummary, serializeError, DOCKER_ALLOWLIST, LANG_BUDGET_MS };
+module.exports = { createDispatcher, startWorker, attachLanguages, dockerSummary, dockerVolumes, serializeError, DOCKER_ALLOWLIST, LANG_BUDGET_MS };

@@ -1037,3 +1037,64 @@ test('macOS: a packaged first launch outside Applications offers the move once a
     } finally { m2.cleanup(); }
   });
 });
+
+test('docker volumes IPC: cached listing, confirmation and allowlist gates, one removal with a v2 history entry; restart only when unresponsive', async () => {
+  const workerCalls = [];
+  let state = 'running';
+  let listed = [
+    { name: 'shop_db', sizeBytes: 5000, project: 'shop', inUse: true, containers: ['shop-db-1'], createdAt: null, anonymous: false },
+    { name: 'shop_uploads', sizeBytes: 3000, project: 'shop', inUse: false, containers: [], createdAt: '2026-01-01T00:00:00Z', anonymous: false },
+  ];
+  const docker = {
+    status: async (o) => { workerCalls.push(['status', o]); return { state, running: state === 'running', remote: false }; },
+    listVolumes: async () => { workerCalls.push(['listVolumes']); return listed; },
+    groupVolumesByProject: require('../src/docker').groupVolumesByProject,
+    removeVolume: async (name, o) => { workerCalls.push(['removeVolume', name, o]); return { ok: true, name, removed: true }; },
+    restartDesktop: async (o) => { workerCalls.push(['restartDesktop']); if (o && o.onProgress) o.onProgress({ phase: 'quitting' }); return { ok: true, state: 'running', message: 'Docker Desktop restarted and the engine is answering.' }; },
+  };
+  const m = loadMain(undefined, { docker });
+  try {
+    m.ready.resolve();
+    await flush();
+    const v = await m.handlers['docker:volumes']({});
+    assert.equal(v.ok, true);
+    assert.deepEqual(v.volumes.map((x) => [x.name, x.size, x.inUse]), [['shop_db', 5000, true], ['shop_uploads', 3000, false]]);
+    assert.deepEqual(v.groups, [{ project: 'shop', label: 'shop', volumes: ['shop_db', 'shop_uploads'], size: 8000, unusedSize: 3000, inUse: 1 }]);
+    const lists = () => workerCalls.filter(([op]) => op === 'listVolumes').length;
+    await m.handlers['docker:volumes']({});
+    assert.equal(lists(), 1, 'cached for 60 s');
+    await m.handlers['docker:volumes']({}, true);
+    assert.equal(lists(), 2, 'force refreshes');
+
+    const rm = (name, opts) => m.handlers['docker:remove-volume']({}, name, opts);
+    assert.deepEqual(await rm('shop_uploads'), { ok: false, freed: 0, name: 'shop_uploads', error: 'needs-confirmation', message: 'Removing a volume needs your confirmation first.' });
+    assert.equal((await rm('shop_uploads', { confirmed: 1 })).error, 'needs-confirmation');
+    assert.equal((await rm('--all', { confirmed: true })).error, 'invalid-name');
+    assert.equal((await rm('someone_else', { confirmed: true })).error, 'unknown-volume');
+    assert.equal((await rm('shop_db', { confirmed: true })).error, 'in-use');
+    assert.equal(workerCalls.filter(([op]) => op === 'removeVolume').length, 0, 'no refusal reached docker');
+
+    const ok = await rm('shop_uploads', { confirmed: true });
+    assert.deepEqual(ok, { ok: true, freed: 3000, name: 'shop_uploads' });
+    assert.deepEqual(workerCalls.find(([op]) => op === 'removeVolume'), ['removeVolume', 'shop_uploads', { confirm: 'shop_uploads' }]);
+    const [entry] = readHistoryFile(m);
+    assert.deepEqual([entry.v, entry.scope, entry.reversible, entry.freed, entry.items[0].path], [2, 'docker', 'none', 3000, 'docker volume shop_uploads']);
+    assert.ok(m.sent.some(([ch]) => ch === 'cache:updated'));
+    // The listing was dropped: the next read goes back to Docker.
+    listed = listed.filter((x) => x.name !== 'shop_uploads');
+    assert.deepEqual((await m.handlers['docker:volumes']({})).volumes.map((x) => x.name), ['shop_db']);
+
+    // Restart: refused while Docker runs, allowed when its engine does not answer.
+    const sender = { send: (ch, p) => m.sent.push([ch, p]), isDestroyed: () => false };
+    const refused = await m.handlers['docker:restart']({ sender });
+    assert.deepEqual([refused.ok, refused.state, refused.error], [false, 'running', 'not-unresponsive']);
+    assert.equal(workerCalls.filter(([op]) => op === 'restartDesktop').length, 0);
+    state = 'engine-down';
+    const restarted = await m.handlers['docker:restart']({ sender });
+    assert.deepEqual([restarted.ok, restarted.state], [true, 'running']);
+    assert.ok(m.sent.some(([ch, p]) => ch === 'docker:restart-progress' && p.phase === 'quitting'));
+    const pre = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
+    for (const ch of ['docker:volumes', 'docker:remove-volume', 'docker:restart', 'docker:restart-progress', 'app:log-path']) assert.ok(pre.includes(`'${ch}'`), ch);
+    m.appEvents.emit('before-quit');
+  } finally { m.cleanup(); }
+});
