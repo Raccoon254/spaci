@@ -56,11 +56,7 @@ jobs:
       # electron-builder treat it as a bad cert path, so they get their own step.
       - name: Build and package (macOS, signed + notarized)
         if: matrix.platform == 'mac'
-        run: |
-          npx electron-builder ${{ matrix.args }} --publish never
-          if [ "${{ matrix.platform }}" = linux ]; then
-            npx electron-builder --linux deb --publish never
-          fi
+        run: npx electron-builder ${{ matrix.args }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.MAC_CERTS }}
@@ -71,7 +67,11 @@ jobs:
 
       - name: Build and package (Windows / Linux)
         if: matrix.platform != 'mac'
-        run: npx electron-builder ${{ matrix.args }} --publish never
+        run: |
+          npx electron-builder ${{ matrix.args }} --publish never
+          if [ "${{ matrix.platform }}" = linux ]; then
+            npx electron-builder --linux deb --publish never
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -83,7 +83,7 @@ jobs:
           node -e '
           const fs = require("fs"), crypto = require("crypto"), path = require("path");
           const deb = fs.readdirSync("release").find((f) => f.endsWith(".deb"));
-          if (!deb) { console.log("no deb built"); process.exit(0); }
+          if (!deb) { console.error("no .deb was built"); process.exit(1); }
           const buf = fs.readFileSync(path.join("release", deb));
           const sha512 = crypto.createHash("sha512").update(buf).digest("base64");
           const version = require("./package.json").version;
