@@ -354,6 +354,14 @@
       ])
     );
 
+    // Everything below is sample content, not the user's data.
+    root.appendChild(
+      el('div', { class: 'sp-badge-accent', style: 'display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;font-size:13px;font-weight:600;margin-bottom:22px' }, [
+        ic('info', 17),
+        el('span', { text: 'Preview: not your data. This tool is coming soon, and the figures below are samples.' })
+      ])
+    );
+
     // tool preview content
     (PREVIEWS[tool.key]() || []).forEach((node) => root.appendChild(node));
 

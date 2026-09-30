@@ -11,7 +11,7 @@
    stuck banner. The scan never re-mounts the screen (no SP.beginScan); instead a
    module-level latestRender points at the live mount's render(), so a scan that
    resolves after a re-mount always repaints the attached host and can never get
-   stuck. Deleting is permanent, so each delete is gated behind a confirm modal
+   stuck. Files are moved to the Trash, and each move is gated behind a confirm modal
    and uses danger styling. */
 (function () {
   const SP = window.SP;
@@ -191,7 +191,7 @@
             el('div', { style: 'font-size:31px;font-weight:700;letter-spacing:-1.1px', text: 'Large Files' }),
             el('div', {
               style: 'color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px',
-              text: 'Big files hogging space. Deleting here is permanent and not reversible, review carefully.'
+              text: 'Big files hogging space. Deleting here moves them to your Trash. Space comes back when you empty it.'
             })
           ]),
           el('div', { style: 'display:flex;gap:10px;align-items:center;flex:none' }, [
@@ -233,7 +233,7 @@
     function warnBanner() {
       return el('div', {
         style: 'display:flex;align-items:center;gap:10px;padding:13px 16px;border-radius:12px;background:var(--danger-soft);color:var(--danger-fg);font-size:13px;font-weight:600;margin-bottom:16px'
-      }, [ic('warning', 17), 'Files removed here are permanently deleted and cannot be restored.']);
+      }, [ic('warning', 17), 'Files removed here go to your Trash. Restore them from Finder or the Recycle Bin until you empty it.']);
     }
 
     // Centered running block, built from the SHARED scan card (spiral ring +
@@ -380,9 +380,9 @@
       ]);
     }
 
-    // ---------- floating action bar (permanent delete) ----------
-    // Only the currently-listed files count toward the selection. Deleting is
-    // permanent, so this uses the red danger button and a confirm modal.
+    // ---------- floating action bar (move to Trash) ----------
+    // Only the currently-listed files count toward the selection. Files go to
+    // the system Trash, always behind a confirm modal.
     function selectedFiles() {
       const sel = selSet();
       return currentFiles().filter((f) => sel.has(f.path));
@@ -395,7 +395,7 @@
       SP.setActionBar({
         count: n + ' file' + (n > 1 ? 's' : ''),
         size: fmt(bytes),
-        action: 'Delete ' + fmt(bytes),
+        action: 'Trash ' + fmt(bytes),
         danger: true,
         onClear: () => { selSet().clear(); paint(); },
         onClean: () => doDelete(),
@@ -406,22 +406,24 @@
       if (S.largeDeleting) return;
       const chosen = selectedFiles();
       if (!chosen.length) return;
-      // Permanent, irreversible deletion: always gate behind a confirm modal.
-      const ok = await SP.confirm({
-        title: 'Delete ' + chosen.length + ' file' + (chosen.length === 1 ? '' : 's') + '?',
-        body: 'These files will be permanently deleted and cannot be restored.',
-        confirmLabel: 'Delete',
-        danger: true,
-        icon: 'trash'
+      // Large files go to the system Trash. Always confirm, listing names and
+      // sizes, regardless of the confirmBeforeClean preference.
+      const base = (pth) => String(pth || '').split(/[\\/]/).pop() || pth;
+      const cf = await SP.confirmClean({
+        force: true,
+        count: chosen.length,
+        bytes: chosen.reduce((a, f) => a + (f.size || 0), 0),
+        trash: chosen.map((f) => ({ name: f.name || base(f.path), size: f.size }))
       });
-      if (!ok) return;
+      if (!cf.go) return;
       S.largeDeleting = true;
+      SP.setCleaning(true);
       try {
         const jobs = chosen.map((f) => ({ path: f.path, size: f.size }));
         const res = await api.clean(jobs, {
           scope: 'largefiles',
           label: chosen.length + ' large file' + (chosen.length === 1 ? '' : 's'),
-          reversible: false
+          confirmed: true
         });
         const sum = SP.reportClean(res, {
           fallbackFreed: chosen.reduce((a, f) => a + (f.size || 0), 0),

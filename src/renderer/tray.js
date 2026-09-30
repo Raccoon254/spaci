@@ -72,8 +72,7 @@ function render() {
       el('div', { style: 'flex:1;min-width:0' }, [
         el('div', { style: 'font-size:15px;font-weight:700;letter-spacing:-.3px' }, [el('span', { text: 'Spaci' }), el('span', { style: 'color:var(--accent-fg)', text: '.' })]),
         el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:1px', text: 'Macintosh HD · ' + fmt(d.free) + ' free' })
-      ]),
-      el('div', { style: 'display:flex;align-items:center;gap:5px;padding:4px 9px;border-radius:7px;background:var(--success-soft);color:var(--success-fg);font-size:10.5px;font-weight:700' }, [el('span', { style: 'width:6px;height:6px;border-radius:50%;background:var(--success-fg)' }), 'Guard on'])
+      ])
     ]),
 
     // reclaimable hero
