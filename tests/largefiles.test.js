@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { trashFiles } = require('../src/largefiles');
+const { trashFiles, scanLargeFiles } = require('../src/largefiles');
 
 function fixture() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-large-'));
@@ -74,4 +74,22 @@ test('missing files, folders, symlinks and a missing trashItem are refused, not 
     assert.equal(none.results[0].ok, false);
     assert.equal(fs.existsSync(target), true);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the large-file scan never lists auto-clean\'s staging folder', async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-lf-staging-')));
+  const big = Buffer.alloc(2048, 1);
+  const staged = path.join(root, 'Spaci', '.cache', 'auto-clean-staging', 'ac-run-000001', 'items', '1', 'node_modules', 'blob.bin');
+  fs.mkdirSync(path.dirname(staged), { recursive: true });
+  fs.writeFileSync(staged, big);
+  const mine = path.join(root, 'Movies', 'film.mov');
+  fs.mkdirSync(path.dirname(mine), { recursive: true });
+  fs.writeFileSync(mine, big);
+  // A folder that is only named like it, outside a .cache folder, is still scanned.
+  const lookalike = path.join(root, 'auto-clean-staging', 'notes.bin');
+  fs.mkdirSync(path.dirname(lookalike), { recursive: true });
+  fs.writeFileSync(lookalike, big);
+  const { files } = await scanLargeFiles(root, 1024);
+  assert.deepEqual(files.map((f) => f.path).sort(), [lookalike, mine].sort());
+  fs.rmSync(root, { recursive: true, force: true });
 });
