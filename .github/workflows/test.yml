@@ -36,9 +36,8 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        # Keep this aligned with release.yml: npm ci can fail because the
-        # lockfile omits other-platform optional electron-builder packages.
-        run: npm install --no-audit --no-fund
+        # Aligned with release.yml: the committed lockfile, exactly.
+        run: npm ci --no-audit --no-fund
 
       - name: Syntax check
         # bash on every runner (Git Bash on Windows) so the loop below is

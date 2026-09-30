@@ -40,6 +40,11 @@ function cleanVersion(v) {
   return typeof v === 'string' && v.length <= 64 && parseVersion(v) ? v : null;
 }
 
+/** '2.3.0-rc.1' -> '2.3.0'; a final version is returned as is. */
+function baseVersion(v) {
+  return typeof v === 'string' ? v.replace(/-.*$/, '') : v;
+}
+
 /** Append an id to a persisted list, unique, keeping the newest `cap`. */
 function capList(list, id, cap = PREF_LIST_CAP) {
   const prev = Array.isArray(list) ? list.filter((x) => typeof x === 'string' && x !== id) : [];
@@ -95,9 +100,11 @@ function rawMediaUrl(src, version) {
  * desktop never parses Markdown, so `notes` is not used; the summary and the
  * added/improved/fixed lists become blocks.
  */
-function whatsNewFromChangelog(entry) {
+function whatsNewFromChangelog(entry, asVersion = null) {
   if (!entry || typeof entry !== 'object' || !cleanVersion(entry.version)) return null;
-  const version = entry.version;
+  // A release candidate shows its final version's entry, under its own version
+  // (so whatsnew:seen matches) and with media from its own tag, which exists.
+  const version = cleanVersion(asVersion) || entry.version;
   const body = [];
   if (typeof entry.summary === 'string' && entry.summary) body.push({ t: 'p', c: [text(entry.summary)] });
   for (const [title, key] of [['New', 'added'], ['Improved', 'improved'], ['Fixed', 'fixed']]) {
@@ -246,8 +253,12 @@ function createNoticesService({
       } catch (_) { /* offline: fall back to the bundled entry */ }
       let entries = [];
       try { entries = readChangelog() || []; } catch (_) { entries = []; }
-      const entry = Array.isArray(entries) ? entries.find((e) => e && e.version === version) : null;
-      return whatsNewFromChangelog(entry);
+      const list = Array.isArray(entries) ? entries : [];
+      const entry = list.find((e) => e && e.version === version)
+        // 2.3.0-rc.1 has no entry of its own: the changelog describes 2.3.0.
+        || list.find((e) => e && e.version === baseVersion(version))
+        || null;
+      return whatsNewFromChangelog(entry, version);
     })();
     try { return await notesFlight; } finally { notesFlight = null; }
   }
@@ -313,6 +324,6 @@ function createNoticesService({
 
 module.exports = {
   BASE_URL, PREF_LIST_CAP, MAX_NOTIFY_PER_RUN,
-  cleanId, cleanVersion, capList, getJson, fetchNotices, fetchReleaseNotes, rawMediaUrl,
+  cleanId, cleanVersion, baseVersion, capList, getJson, fetchNotices, fetchReleaseNotes, rawMediaUrl,
   whatsNewFromChangelog, shouldShowWhatsNew, startupPrefsPatch, createNoticesService,
 };

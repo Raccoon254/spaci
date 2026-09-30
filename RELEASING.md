@@ -9,7 +9,7 @@ https://spaci.kentom.co.ke so the changelog and auto-update feed update live.
 
 In the GitHub repo settings (Settings, Secrets and variables, Actions) add:
 
-- `RELEASE_PUBLISH_SECRET` — must match the value set on the spaci-web Vercel
+- `RELEASE_PUBLISH_SECRET`: must match the value set on the spaci-web Vercel
   project. CI uses it to POST the release to `/api/releases`.
 
 `GITHUB_TOKEN` is provided automatically and is used to upload the installers.
@@ -52,6 +52,46 @@ In the GitHub repo settings (Settings, Secrets and variables, Actions) add:
 
 That is it. Installed copies of Spaci pick up the update on their next check
 (within six hours, or immediately via Check for updates on the About screen).
+
+## Release candidates
+
+Test a release on real machines before users get it:
+
+1. Write the changelog entry for the final version (`"version": "2.3.0"`), as
+   above.
+2. Run:
+
+   ```bash
+   npm run release -- --rc      # or: node scripts/release.mjs --rc
+   ```
+
+   This picks the next candidate number from the existing tags
+   (`v2.3.0-rc.1`, then `rc.2`, ...), sets `package.json` (and the lockfile's
+   copy) to that version, commits `Release v2.3.0-rc.N`, tags and pushes. The
+   changelog entry stays `2.3.0`. `node scripts/release.mjs --check --rc`
+   shows which version it would tag without changing anything.
+3. `release.yml` builds and uploads it like any release, but because the tag
+   has a suffix it is a GitHub **prerelease**, and the `sync-feed` job does not
+   run: the website, its changelog and the auto-update feed never see it, so no
+   installed copy updates to a candidate.
+4. Download the installers from the prerelease and test. To launch one without
+   counting it as a user, start it with `SPACI_TELEMETRY=0` in the environment.
+   An RC build's What's new falls back to the final version's changelog entry.
+5. Fix, then cut `rc.2` the same way. When a candidate is good, run
+   `npm run release` (no flag) to tag the final `v2.3.0` from the same entry.
+
+A top entry versioned `X.Y.Z-rc.N` is also accepted and released as is, but
+`--rc` is preferred: it keeps the changelog describing the real release.
+`release.mjs` refuses a candidate of a version that is already released.
+
+## Dependencies in CI
+
+Every workflow installs with `npm ci`, so CI builds exactly the committed
+`package-lock.json`. The lockfile carries the other platforms' optional
+packages (for example `dmg-license`, macOS only); `npm ci --os=linux --cpu=x64`
+and `--os=win32` with npm 10.8.2 (the npm of Node 20) install from it without
+errors. After changing dependencies, commit the updated lockfile; `npm ci`
+fails when `package.json` and the lockfile disagree.
 
 ## Where the changelog goes
 

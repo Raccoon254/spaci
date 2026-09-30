@@ -286,3 +286,19 @@ test('capList and cleanId', () => {
   assert.equal(notices.cleanId('rel-2.3.0'), 'rel-2.3.0');
   assert.equal(notices.cleanId('a/b'), null);
 });
+
+test('a release candidate falls back to its final version\'s changelog entry, under its own version and tag', async () => {
+  const resolved = [];
+  const h = harness({ fetchImpl: fakeFetch(() => { throw new Error('offline'); }), version: '2.3.0-rc.1', prefs: { onboarded: true, lastSeenVersion: '2.2.1' }, changelog: CHANGELOG });
+  const orig = notices.whatsNewFromChangelog(CHANGELOG[0], '2.3.0-rc.1');
+  for (const m of orig.media) resolved.push(m.url);
+  assert.equal(resolved.length, 1);
+  assert.ok(resolved.every((u) => u.includes('/v2.3.0-rc.1/')), 'media from the RC tag, which exists');
+  const w = await h.svc.whatsNew();
+  assert.equal(w.version, '2.3.0-rc.1', 'the running version, so whatsnew:seen matches it');
+  assert.equal(w.highlight, 'Offline highlight');
+  assert.equal(h.svc.whatsNewSeen(w.version), true);
+  assert.equal(await h.svc.whatsNew(), null, 'shown once');
+  assert.equal(notices.baseVersion('2.3.0-rc.12'), '2.3.0');
+  assert.equal(notices.baseVersion('2.3.0'), '2.3.0');
+});
