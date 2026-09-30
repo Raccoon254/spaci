@@ -87,9 +87,10 @@ function rulesFingerprint(s) {
   return JSON.stringify([x.staleDays, x.minCacheBytes, x.maxRunBytes, x.maxItems, [...x.excludes].sort()]);
 }
 
+/** Approved rules, given for a preview the user saw (approvalCheck: never an empty one). */
 function isApproved(s) {
   const x = sanitizeSettings(s);
-  return Boolean(x.approved && x.approved.rules === rulesFingerprint(x));
+  return Boolean(x.approved && x.approved.previewId && x.approved.rules === rulesFingerprint(x));
 }
 
 // ---- gate -------------------------------------------------------------------
@@ -148,7 +149,7 @@ const TOOL_FAMILIES = Object.freeze({
 
 const TARGET_FAMILY = Object.freeze({
   npm: 'node', yarn: 'node', pnpm: 'node', bun: 'node', deno: 'node',
-  gradle: 'jvm', 'gradle-wrapper': 'jvm', maven: 'jvm',
+  gradle: 'jvm', 'gradle-wrapper': 'jvm',
   cargo: 'rust', pip: 'python', go: 'go',
   cocoapods: 'apple', 'xcode-derived': 'apple',
   pub: 'dart', 'dart-server': 'dart', nuget: 'dotnet',
@@ -159,13 +160,36 @@ const DEV_PROCESS_NAMES = new Set([
   'node', 'next', 'vite', 'webpack', 'tsc', 'turbo', 'nuxt', 'esbuild',
   'python', 'python3', 'pytest', 'mypy', 'ruby', 'bundle', 'php', 'composer', 'docker', 'docker-compose',
   ...Object.values(TOOL_FAMILIES).flat(),
+  // Editors' extension hosts run language servers and watchers on the project.
+  'Code Helper (Plugin)', 'Code - Insiders Helper (Plugin)', 'Cursor Helper (Plugin)', 'Windsurf Helper (Plugin)', 'tsserver',
 ]);
 
 // AI coding CLIs run builds inside projects. While one runs, no project is
 // touched: its child processes come and go faster than a snapshot can see.
 const AI_CODING_TOOLS = new Set(['claude', 'codex', 'opencode', 'gemini', 'grok']);
 
-const CLOUD_SEGMENTS = ['/Library/Mobile Documents/', '/Library/CloudStorage/', '/Dropbox/', '/OneDrive/', '/Google Drive/', '/iCloud Drive/', '\\OneDrive\\', '\\Dropbox\\'];
+const CLOUD_SEGMENTS = ['/Library/Mobile Documents/', '/Library/CloudStorage/', '/iCloud Drive/'];
+
+// Folder names sync clients create. Any ancestor named like this is cloud.
+// Skipping by mistake is harmless; moving a synced folder is not (the client
+// would delete it from every other device too).
+const CLOUD_NAMES = [
+  /^Dropbox( \(.+\))?$/i, // Dropbox, Dropbox (Personal), Dropbox (Team)
+  /^OneDrive( - .+)?$/i, // OneDrive, OneDrive - Contoso
+  /^Google Drive$/i, /^GoogleDrive-/i, /^My Drive$/i, /^Shared drives$/i,
+  /^iCloud Drive/i, /^com~apple~CloudDocs$/i, /^Mobile Documents$/,
+];
+// Box's folder name is too common to match anywhere: only right under a home.
+const BOX_RE = /^(?:[a-z]:)?\/(?:users|home)\/[^/]+\/box( sync)?(\/|$)/i;
+// Windows sets these to the OneDrive roots, whatever the folder is called.
+const ONEDRIVE_ENV = ['OneDrive', 'OneDriveCommercial', 'OneDriveConsumer'];
+// Set on folders a macOS File Provider (iCloud Desktop & Documents, Dropbox,
+// Google Drive, OneDrive, Box) syncs.
+const FILE_PROVIDER_XATTR = 'com.apple.file-provider-domain-id';
+
+function envCloudRoots(env = process.env) {
+  return ONEDRIVE_ENV.map((k) => env && env[k]).filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim());
+}
 
 function isInsideOrSame(parent, child) {
   if (!parent || !child) return false;
@@ -174,15 +198,86 @@ function isInsideOrSame(parent, child) {
   return rel === '' || (!rel.startsWith('..') && !api.isAbsolute(rel));
 }
 
-function cloudOrExternal(p) {
+/** Pure: a reason when the path is in a cloud-synced folder or on an external volume. */
+function cloudOrExternal(p, { cloudRoots = envCloudRoots() } = {}) {
   const s = String(p);
-  if (CLOUD_SEGMENTS.some((seg) => s.includes(seg))) return 'It is in a cloud-synced folder.';
+  const fwd = s.replace(/\\/g, '/');
+  const segs = fwd.split('/').filter(Boolean);
+  if (CLOUD_SEGMENTS.some((seg) => fwd.includes(seg)) || segs.some((seg) => CLOUD_NAMES.some((re) => re.test(seg)))
+    || BOX_RE.test(fwd) || cloudRoots.some((r) => isInsideOrSame(r, s) || isInsideOrSame(r.toLowerCase(), s.toLowerCase()))) {
+    return 'It is in a cloud-synced folder.';
+  }
   if (s.startsWith('/Volumes/') || s.startsWith('/media/') || s.startsWith('/mnt/') || s.startsWith('/run/media/')) return 'It is on an external or network volume.';
   return null;
 }
 
 /**
- * A process snapshot: { ok, list: [{ pid, names: [..], cwd: string|null }] }.
+ * The fs half of the cloud check: the path's real location (a symlink into
+ * iCloud Drive or ~/Library/CloudStorage) and, on macOS, the File Provider
+ * xattr on the path or any ancestor (iCloud Desktop & Documents keeps
+ * ~/Documents in place but marks it). Never rejects. `cache` is shared across
+ * calls so a run asks about each folder once. `attr` is for tests only: macOS
+ * does not let a user process set the File Provider attribute.
+ * @returns {Promise<string|null>}
+ */
+async function cloudReason(p, { fs = nodeFs, exec = execFile, platform = process.platform, cloudRoots = envCloudRoots(), cache = new Map(), timeout = 3000, attr = FILE_PROVIDER_XATTR } = {}) {
+  const pure = cloudOrExternal(p, { cloudRoots });
+  if (pure) return pure;
+  const fsp = fs.promises;
+  // The nearest existing ancestor's real path, plus whatever did not exist yet.
+  let real = null;
+  let cur = String(p);
+  let rest = '';
+  for (let i = 0; i < 64 && cur; i++) {
+    try { real = nodePath.join(await fsp.realpath(cur), rest); break; } catch { /* go up */ }
+    const up = nodePath.dirname(cur);
+    if (up === cur) break;
+    rest = nodePath.join(nodePath.basename(cur), rest);
+    cur = up;
+  }
+  if (real && real !== p) {
+    const r = cloudOrExternal(real, { cloudRoots });
+    if (r) return r;
+  }
+  if (platform !== 'darwin') return null;
+  const dirs = [];
+  for (const start of new Set([String(p), real].filter(Boolean))) {
+    let d = start;
+    for (let i = 0; i < 64; i++) {
+      dirs.push(d);
+      const up = nodePath.dirname(d);
+      if (up === d) break;
+      d = up;
+    }
+  }
+  for (const d of new Set(dirs)) {
+    if (d === '/') continue;
+    if (!cache.has(d)) {
+      cache.set(d, new Promise((resolve) => {
+        try {
+          exec('xattr', ['-p', attr, d], { timeout, windowsHide: true }, (err) => resolve(!err));
+        } catch { resolve(false); }
+      }));
+    }
+    if (await cache.get(d)) return 'It is in a cloud-synced folder.';
+  }
+  return null;
+}
+
+/** cloudReason for many paths: Map of path -> reason, for the ones that have one. */
+async function cloudReasons(paths, opts = {}) {
+  const cache = opts.cache || new Map();
+  const out = new Map();
+  for (const p of new Set(paths)) {
+    if (typeof p !== 'string' || !p) continue;
+    const r = await cloudReason(p, { ...opts, cache });
+    if (r) out.set(p, r);
+  }
+  return out;
+}
+
+/**
+ * A process snapshot: { ok, list: [{ pid, names: [..], cwd: string|null, args?: string }] }.
  * ok is false when the snapshot itself failed.
  */
 function familyRunning(procs, family) {
@@ -190,10 +285,29 @@ function familyRunning(procs, family) {
   return procs.list.some((p) => p.names.some((n) => names.has(n)));
 }
 
+const PATH_CHAR = /[A-Za-z0-9._~\/\\-]/;
+
+/** True when the command line names the project folder or a path inside it. */
+function argsMention(args, projectPath) {
+  if (typeof args !== 'string' || !args || !projectPath) return false;
+  const norm = (x) => x.replace(/\\/g, '/').toLowerCase();
+  const a = norm(args);
+  const p = norm(projectPath).replace(/\/+$/, '');
+  if (!p) return false;
+  for (let i = a.indexOf(p); i !== -1; i = a.indexOf(p, i + 1)) {
+    const before = i === 0 ? '' : a[i - 1];
+    const after = a[i + p.length];
+    if (before && PATH_CHAR.test(before)) continue;
+    if (after === undefined || after === '/' || !PATH_CHAR.test(after)) return true;
+  }
+  return false;
+}
+
 /** { blocked: reason|null } for one project, from the snapshot. */
 function projectBusy(procs, projectPath) {
   for (const p of procs.list) {
     if (!p.names.some((n) => DEV_PROCESS_NAMES.has(n))) continue;
+    if (argsMention(p.args, projectPath)) return `${p.names[0]} is working on files in this project.`;
     if (p.cwd == null) return 'A developer tool is running and Spaci could not tell where.';
     if (isInsideOrSame(projectPath, p.cwd)) return `${p.names[0]} is running in this project.`;
   }
@@ -213,8 +327,13 @@ function projectBusy(procs, projectPath) {
  * @param {Map<string,{nearFiles:string[], keep:boolean}>} o.itemEvidence     per item path
  * @param {{ok:boolean, list:object[]}} o.procs
  * @param {{ok:boolean, running:string[]}} o.aiTools
+ * @param {{ok:boolean, running:number}} [o.docker]  running containers (fails closed when absent)
+ * @param {(p:string) => string|null} [o.cloudOf]     the fs cloud check (cloudReasons), per path
+ * @param {(p:string) => boolean|null} [o.sameDisk]   false when a path is not on the staging volume
+ * @param {string[]} [o.cloudRoots]                   OneDrive roots from the environment
  */
-function selectCandidates({ projects = [], system = [], settings, now, evidence = new Map(), itemEvidence = new Map(), procs = { ok: false, list: [] }, aiTools = { ok: false, running: [] } }) {
+function selectCandidates({ projects = [], system = [], settings, now, evidence = new Map(), itemEvidence = new Map(), procs = { ok: false, list: [] }, aiTools = { ok: false, running: [] },
+  docker = { ok: false, running: 0 }, cloudOf = null, sameDisk = null, cloudRoots = envCloudRoots() }) {
   const s = sanitizeSettings(settings);
   const staleMs = s.staleDays * DAY;
   const out = [];
@@ -222,6 +341,9 @@ function selectCandidates({ projects = [], system = [], settings, now, evidence 
   const skip = (path, reason, extra = {}) => skipped.push({ path, reason, ...extra });
   const excluded = (p) => s.excludes.some((x) => isInsideOrSame(x, p));
   const aiRunning = (aiTools.running || []).filter((t) => AI_CODING_TOOLS.has(t));
+  const whereOf = (p) => cloudOrExternal(p, { cloudRoots }) || (typeof cloudOf === 'function' ? cloudOf(p) : null);
+  const OFF_DISK = 'It is on another disk than Spaci\'s staging folder, so it cannot be set aside for undo.';
+  const offDisk = (p) => typeof sameDisk === 'function' && sameDisk(p) === false;
 
   for (const proj of Array.isArray(projects) ? projects : []) {
     if (!proj || typeof proj.path !== 'string') continue;
@@ -229,7 +351,7 @@ function selectCandidates({ projects = [], system = [], settings, now, evidence 
     if (!a.length) continue;
     const skipAll = (reason) => a.forEach((it) => skip(it.path, reason, { project: proj.path }));
     if (excluded(proj.path)) { skipAll('You excluded this folder.'); continue; }
-    const where = cloudOrExternal(proj.path);
+    const where = whereOf(proj.path);
     if (where) { skipAll(where); continue; }
     const ev = evidence.get(proj.path);
     if (!ev) { skipAll('Spaci could not check when this project was last used.'); continue; }
@@ -243,6 +365,11 @@ function selectCandidates({ projects = [], system = [], settings, now, evidence 
     if (aiRunning.length) { skipAll('An AI coding tool is running.'); continue; }
     const busy = projectBusy(procs, proj.path);
     if (busy) { skipAll(busy); continue; }
+    if (ev.compose) {
+      // A compose project's containers may bind-mount its node_modules or build output.
+      if (!docker || !docker.ok) { skipAll('It has a Docker Compose file and Spaci could not check whether containers are running.'); continue; }
+      if (docker.running > 0) { skipAll('It has a Docker Compose file and Docker containers are running.'); continue; }
+    }
     const idleDays = Math.floor((now - ev.lastActivity) / DAY);
     for (const it of a) {
       const name = it.name || tiers.baseName(it.path);
@@ -258,6 +385,7 @@ function selectCandidates({ projects = [], system = [], settings, now, evidence 
       }
       const bytes = Number(it.size) || 0;
       if (bytes <= 0) continue;
+      if (offDisk(it.path)) { skip(it.path, OFF_DISK, { project: proj.path, offDisk: true }); continue; }
       out.push({
         path: it.path, kind: 'artifact', name, project: proj.path, bytes,
         rule: `${name} in a project unused for ${idleDays} days`,
@@ -276,8 +404,9 @@ function selectCandidates({ projects = [], system = [], settings, now, evidence 
     if (bytes < s.minCacheBytes) { paths.forEach((p) => skip(p, 'Smaller than your auto-clean minimum.', { target: t.id, quiet: true })); continue; }
     if (t.meta && t.meta.partial) { skipT('Its size was not fully measured.'); continue; }
     if (paths.some(excluded)) { skipT('You excluded this folder.'); continue; }
-    const where = paths.map(cloudOrExternal).find(Boolean);
+    const where = paths.map(whereOf).find(Boolean);
     if (where) { skipT(where); continue; }
+    if (paths.some(offDisk)) { paths.forEach((p) => skip(p, OFF_DISK, { target: t.id, offDisk: true })); continue; }
     if (!procs.ok) { skipT('Spaci could not check which tools are running.'); continue; }
     const fam = TARGET_FAMILY[t.id];
     if (!fam) { skipT('Auto-clean leaves this cache to you.'); continue; }
@@ -323,25 +452,82 @@ const IGNORED_FOR_ACTIVITY = new Set([
   ...Object.keys(tiers.ARTIFACT_GROUPS), 'venv', '.venv', '.git', '.svn', '.hg', '.idea', '.vscode', '.DS_Store',
 ]);
 
+const COMPOSE_RE = /^(docker-)?compose[^/\\]*\.ya?ml$/i;
+
+/**
+ * mtimes that say git was used here: HEAD, index, the reflog, refs, and every
+ * linked worktree's HEAD and index. A linked worktree (.git is a file) also
+ * counts its main repository's, and the main repository counts its worktrees',
+ * so committing in one keeps the other.
+ */
+async function gitActivityTimes(dir, fsp, refBudget = 2000) {
+  const times = [];
+  const see = async (p) => { try { times.push((await fsp.stat(p)).mtimeMs); } catch { /* absent */ } };
+  const dotGit = nodePath.join(dir, '.git');
+  const gitDirs = [];
+  let st = null;
+  try { st = await fsp.lstat(dotGit); } catch { return times; }
+  if (st.isDirectory()) gitDirs.push(dotGit);
+  else if (st.isFile()) {
+    try {
+      const m = /^gitdir:\s*(.+?)\s*$/m.exec(await fsp.readFile(dotGit, 'utf8'));
+      if (m) {
+        const own = nodePath.resolve(dir, m[1]);
+        gitDirs.push(own);
+        try {
+          const common = (await fsp.readFile(nodePath.join(own, 'commondir'), 'utf8')).trim();
+          if (common) gitDirs.push(nodePath.resolve(own, common));
+        } catch { /* not a linked worktree */ }
+      }
+    } catch { /* unreadable .git file */ }
+  }
+  for (const g of new Set(gitDirs)) {
+    for (const f of ['HEAD', 'index', 'FETCH_HEAD', 'ORIG_HEAD', nodePath.join('logs', 'HEAD')]) await see(nodePath.join(g, f));
+    // refs: every folder and loose ref, bounded.
+    let left = refBudget;
+    const stack = [nodePath.join(g, 'refs')];
+    while (stack.length && left > 0) {
+      const d = stack.pop();
+      await see(d);
+      let ents;
+      try { ents = await fsp.readdir(d, { withFileTypes: true }); } catch { continue; }
+      for (const e of ents) {
+        if (--left <= 0) break;
+        const full = nodePath.join(d, e.name);
+        if (e.isDirectory()) stack.push(full);
+        else await see(full);
+      }
+    }
+    await see(nodePath.join(g, 'packed-refs'));
+    let wts = [];
+    try { wts = await fsp.readdir(nodePath.join(g, 'worktrees')); } catch { /* none */ }
+    for (const w of wts.slice(0, 200)) {
+      for (const f of ['HEAD', 'index', nodePath.join('logs', 'HEAD')]) await see(nodePath.join(g, 'worktrees', w, f));
+    }
+  }
+  return times;
+}
+
 /**
  * When was a project last used? The newest mtime of any file or folder in it,
- * leaving out build output, plus git's HEAD and index. Stops as soon as it
- * finds something newer than `staleMs`. If the walk runs past its budget
- * without deciding, lastActivity is null (inconclusive: skip the project).
- * @returns {Promise<{lastActivity:number|null, keep:boolean}>}
+ * leaving out build output, plus git activity (gitActivityTimes). Stops as
+ * soon as it finds something newer than `staleMs`. If the walk runs past its
+ * budget without deciding, lastActivity is null (inconclusive: skip the
+ * project). `compose` is true when a Docker Compose file sits at its root.
+ * @returns {Promise<{lastActivity:number|null, keep:boolean, compose:boolean}>}
  */
 async function projectEvidence(dir, { fs = nodeFs, now = Date.now(), staleMs, budget = 40000, maxDepth = 14 } = {}) {
   const fsp = fs.promises;
   const exists = (p) => fsp.lstat(p).then(() => true, () => false);
-  if (await exists(nodePath.join(dir, KEEP_MARKER))) return { lastActivity: null, keep: true };
+  if (await exists(nodePath.join(dir, KEEP_MARKER))) return { lastActivity: null, keep: true, compose: false };
+  const top = await fsp.readdir(dir).catch(() => []);
+  const compose = top.some((n) => COMPOSE_RE.test(n));
   let newest = 0;
   const cutoff = now - staleMs;
   const see = (ms) => { if (typeof ms === 'number' && ms > newest) newest = ms; };
-  try { see((await fsp.stat(dir)).mtimeMs); } catch { return { lastActivity: null, keep: false }; }
-  for (const f of ['HEAD', 'index', 'FETCH_HEAD', 'ORIG_HEAD']) {
-    try { see((await fsp.stat(nodePath.join(dir, '.git', f))).mtimeMs); } catch { /* not a repo, or a worktree */ }
-  }
-  if (newest > cutoff) return { lastActivity: newest, keep: false };
+  try { see((await fsp.stat(dir)).mtimeMs); } catch { return { lastActivity: null, keep: false, compose }; }
+  for (const t of await gitActivityTimes(dir, fsp)) see(t);
+  if (newest > cutoff) return { lastActivity: newest, keep: false, compose };
   let seen = 0;
   const stack = [{ d: dir, depth: 0 }];
   while (stack.length) {
@@ -349,15 +535,15 @@ async function projectEvidence(dir, { fs = nodeFs, now = Date.now(), staleMs, bu
     let ents;
     try { ents = await fsp.readdir(d, { withFileTypes: true }); } catch { continue; }
     for (const e of ents) {
-      if (++seen > budget) return { lastActivity: null, keep: false };
+      if (++seen > budget) return { lastActivity: null, keep: false, compose };
       if (IGNORED_FOR_ACTIVITY.has(e.name) || e.isSymbolicLink()) continue;
       const full = nodePath.join(d, e.name);
       try { see((await fsp.lstat(full)).mtimeMs); } catch { continue; }
-      if (newest > cutoff) return { lastActivity: newest, keep: false };
+      if (newest > cutoff) return { lastActivity: newest, keep: false, compose };
       if (e.isDirectory() && depth < maxDepth) stack.push({ d: full, depth: depth + 1 });
     }
   }
-  return { lastActivity: newest || null, keep: false };
+  return { lastActivity: newest || null, keep: false, compose };
 }
 
 /** The files beside an artifact (for lockfile rules) and its keep markers. */
@@ -371,31 +557,73 @@ async function itemEvidence(itemPath, { fs = nodeFs } = {}) {
 
 // ---- process snapshot -------------------------------------------------------
 
-function namesOf(args) {
-  const tok = String(args || '').trim().split(/\s+/).filter(Boolean);
+// Runtimes that run a script: the script's name counts too (node npm-cli.js
+// is npm). Editor helpers are Electron running as node (tsserver, eslint).
+const SCRIPT_HOSTS = /^(node|bun|deno|python3?|.* Helper \(Plugin\))$/i;
+const cleanName = (t) => nodePath.basename(String(t).replace(/\\/g, '/')).replace(/\.(c|m)?js$/i, '').replace(/\.exe$/i, '');
+
+/**
+ * Names for a process from its executable (`ps -o comm=`, which keeps spaces)
+ * and its command line (`ps -o args=`) for the script a runtime runs.
+ */
+function namesFrom(comm, args) {
   const names = [];
-  const clean = (t) => nodePath.basename(t).replace(/\.(c|m)?js$/i, '').replace(/\.exe$/i, '');
-  if (tok[0]) names.push(clean(tok[0]));
-  // node /path/to/npm-cli.js install -> also "npm"
-  if (tok[1] && !tok[1].startsWith('-') && /^(node|bun|deno|python3?)$/i.test(names[0] || '')) {
-    const s = clean(tok[1]).replace(/-cli$/, '');
-    if (s) names.push(s);
+  const exe = String(comm || '').trim();
+  if (exe) names.push(cleanName(exe));
+  const a = String(args || '').trim();
+  if (names[0] && SCRIPT_HOSTS.test(names[0]) && a) {
+    // What follows the executable: strip it by its full path when args starts
+    // with it, else by argv[0]'s first word.
+    let rest = a.startsWith(exe) ? a.slice(exe.length) : a.replace(/^\S+/, '');
+    rest = rest.trim();
+    // A script path may hold spaces: take it up to its extension when it has one.
+    const first = rest.split(/\s+/)[0];
+    const withExt = /^(.+?\.(?:[cm]?js|[cm]?ts|py))(?=\s|$)/.exec(rest);
+    const tok = first && !first.startsWith('-') && withExt ? withExt[1] : first;
+    if (tok && !tok.startsWith('-')) {
+      const sName = cleanName(tok).replace(/-cli$/, '');
+      if (sName) names.push(sName);
+    }
   }
   return names.filter(Boolean);
 }
 
 /**
- * Parse `ps -axo pid=,uid=,args=` output. With `uid`, only that user's
- * processes are kept: another user's process cannot be asked for its cwd, and
- * cannot be running a build in this user's projects without sudo.
+ * Names from a command line alone (Windows image names, old callers). A macOS
+ * app executable keeps its spaces ("Code Helper (Plugin)").
  */
-function parsePs(stdout, uid = null) {
+function namesOf(args) {
+  const a = String(args || '').trim();
+  const app = /^(\/.*?\.app\/Contents\/(?:MacOS|Frameworks)\/.*?)(?=\s+[-/]|$)/.exec(a);
+  if (app) return namesFrom(app[1], a);
+  const exe = a.split(/\s+/)[0] || '';
+  return namesFrom(exe, a);
+}
+
+/**
+ * Parse `ps -axo pid=,uid=,comm=` (and, when given, `ps -axo pid=,args=` for
+ * the command lines). With `uid`, only that user's processes are kept: another
+ * user's process cannot be asked for its cwd, and cannot be running a build in
+ * this user's projects without sudo. Without `argsOut` the third column is
+ * taken as a command line (older callers).
+ */
+function parsePs(stdout, uid = null, argsOut = null) {
+  const argsBy = new Map();
+  if (argsOut != null) {
+    for (const line of String(argsOut).split('\n')) {
+      const m = line.match(/^\s*(\d+)\s(.*)$/);
+      if (m) argsBy.set(Number(m[1]), m[2].trim());
+    }
+  }
   const list = [];
   for (const line of String(stdout || '').split('\n')) {
     const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
     if (!m) continue;
     if (uid != null && Number(m[2]) !== uid) continue;
-    list.push({ pid: Number(m[1]), names: namesOf(m[3]), cwd: null });
+    const pid = Number(m[1]);
+    if (argsOut == null) { list.push({ pid, names: namesOf(m[3]), cwd: null, args: m[3].trim() }); continue; }
+    const args = argsBy.has(pid) ? argsBy.get(pid) : null;
+    list.push({ pid, names: namesFrom(m[3].trim(), args), cwd: null, args });
   }
   return list;
 }
@@ -420,8 +648,8 @@ function run(exec, cmd, args, timeout) {
 }
 
 /**
- * Which developer tools run, and where. Never rejects.
- * @returns {Promise<{ok:boolean, list:{pid:number,names:string[],cwd:string|null}[]}>}
+ * Which developer tools run, where, and with what command line. Never rejects.
+ * @returns {Promise<{ok:boolean, list:{pid:number,names:string[],cwd:string|null,args:string|null}[]}>}
  */
 async function snapshotProcesses({ platform = process.platform, exec = execFile, fs = nodeFs, timeout = 8000, selfPid = process.pid,
   uid = typeof process.getuid === 'function' ? process.getuid() : null } = {}) {
@@ -437,9 +665,12 @@ async function snapshotProcesses({ platform = process.platform, exec = execFile,
       // Windows gives no cwd without admin: a dev process makes projects inconclusive.
       return { ok: true, list: list.filter((p) => p.names.some((n) => DEV_PROCESS_NAMES.has(n))) };
     }
-    const r = await run(exec, 'ps', ['-axo', 'pid=,uid=,args='], timeout);
-    if (r.err) return { ok: false, list: [] };
-    const dev = parsePs(r.stdout, uid).filter((p) => p.pid !== selfPid && p.names.some((n) => DEV_PROCESS_NAMES.has(n)));
+    const [r, ra] = await Promise.all([
+      run(exec, 'ps', ['-axo', 'pid=,uid=,comm='], timeout),
+      run(exec, 'ps', ['-axo', 'pid=,args='], timeout),
+    ]);
+    if (r.err || ra.err) return { ok: false, list: [] };
+    const dev = parsePs(r.stdout, uid, ra.stdout).filter((p) => p.pid !== selfPid && p.names.some((n) => DEV_PROCESS_NAMES.has(n)));
     if (!dev.length) return { ok: true, list: [] };
     if (platform === 'linux') {
       await Promise.all(dev.map(async (p) => { p.cwd = await fs.promises.readlink(`/proc/${p.pid}/cwd`).catch(() => null); }));
@@ -559,6 +790,44 @@ function createStaging({ root, fs = nodeFs, now = () => Date.now(), ttlMs = STAG
     entry.state = 'moved';
     try { save(m); } catch (e) { log.warn && log.warn('[auto-clean] journal write after move failed', e && e.message); }
     return { ok: true, entry };
+  }
+
+  /**
+   * Put back entries this run just moved (a cache whose later child failed),
+   * newest first, journaled like an undo. Never throws.
+   * @returns {{restored:object[], failed:object[]}}
+   */
+  function unstage(m, entries) {
+    const res = { restored: [], failed: [] };
+    for (const e of [...entries].reverse()) {
+      if (e.state !== 'moved') continue;
+      if (exists(e.src)) { e.reason = 'Something new took its place, so it stayed staged.'; res.failed.push(e); continue; }
+      e.state = 'restoring';
+      try { save(m); } catch { /* recover() settles it by looking at src and dst */ }
+      try {
+        fs.renameSync(e.dst, e.src);
+        e.state = 'restored';
+        e.rolledBack = true;
+        res.restored.push(e);
+      } catch (err) {
+        e.state = 'moved';
+        e.code = err.code;
+        res.failed.push(e);
+      }
+      try { save(m); } catch (err) { log.warn && log.warn('[auto-clean] journal write after roll back failed', err && err.message); }
+    }
+    if (res.failed.length) {
+      // What stays is only part of the measured size, and which part is unknown:
+      // count none of it rather than all of it.
+      for (const e of res.failed) e.bytes = 0;
+      try { save(m); } catch { /* sizes are informational */ }
+    }
+    return res;
+  }
+
+  /** Is p on the staging folder's volume? null when either cannot be checked. */
+  function sameDisk(p) {
+    try { return fs.lstatSync(p).dev === rootDev(); } catch { return null; }
   }
 
   function pickInfo(info) {
@@ -688,7 +957,7 @@ function createStaging({ root, fs = nodeFs, now = () => Date.now(), ttlMs = STAG
   /** True when p is the staging area or inside it (scans must skip it). */
   function contains(p) { return isInsideOrSame(root, p); }
 
-  return { root, beginRun, stage, recover, restore, purge, status, list, contains, readManifest };
+  return { root, beginRun, stage, unstage, sameDisk, recover, restore, purge, status, list, contains, readManifest };
 }
 
 // ---- the run ----------------------------------------------------------------
@@ -701,36 +970,93 @@ function fmtBytes(n) {
 }
 
 /**
+ * Does `dir` hold something that must survive: a protected basename at any
+ * depth, or an excluded path? Then it is left in place whole. A walk that runs
+ * past its budget answers yes (fail closed).
+ */
+async function holdsProtected(dir, { protect, excludes, fs = nodeFs, budget = 50000 }) {
+  if (excludes.some((x) => isInsideOrSame(dir, x))) return true;
+  if (!protect.size) return false;
+  if (protect.has(nodePath.basename(dir).toLowerCase())) return true;
+  const fsp = fs.promises;
+  let seen = 0;
+  const stack = [dir];
+  while (stack.length) {
+    const d = stack.pop();
+    let ents;
+    try { ents = await fsp.readdir(d, { withFileTypes: true }); } catch (e) {
+      if (d === dir && e && e.code === 'ENOTDIR') return false;
+      continue;
+    }
+    for (const e of ents) {
+      if (++seen > budget) return true;
+      if (protect.has(e.name.toLowerCase())) return true;
+      if (e.isDirectory() && !e.isSymbolicLink()) stack.push(nodePath.join(d, e.name));
+    }
+  }
+  return false;
+}
+
+/** The preview a user may approve: a dry run that found something, for the current rules. */
+function approvalCheck(settings, entry, previewId) {
+  const s = sanitizeSettings(settings);
+  if (!s.pendingPreview || s.pendingPreview !== previewId) return { ok: false, error: 'This preview is out of date. A new one runs with your current rules.' };
+  const a = entry && entry.autoClean;
+  if (!a || !a.dryRun || a.rules !== rulesFingerprint(s)) return { ok: false, clearPending: true, error: 'Your rules changed since this preview. A new one runs with your current rules.' };
+  if (!(Number(a.previewCount) > 0)) return { ok: false, clearPending: true, error: 'This preview found nothing to move, so there is nothing to approve yet. A new preview runs later.' };
+  return { ok: true };
+}
+
+/**
  * One scheduled run. Every dependency is injected (see main.js for the real
  * ones). Returns a scheduler status: 'ok' | 'partial' | 'skipped' | 'failed'.
  *
  * deps: getSettings, saveSettings, getScan, gatherEvidence, snapshot,
- *   aiToolStatus, guard(jobs) -> {allowed, refused}, staging, historyLog,
+ *   aiToolStatus, dockerStatus() -> {ok, running}, cloudCheck(paths) -> Map,
+ *   guard(jobs) -> {allowed, refused}, staging, historyLog,
  *   putHistory(entry), notify(title, body), stillOk() -> reason|null,
- *   listChildren(dir), restoreHint(candidate), now, newId, onStaged(paths)
+ *   listChildren(dir), restoreHint(candidate), now, newId, onStaged(paths), fs
  */
 async function runAutoClean(deps) {
   const {
     getSettings, saveSettings, getScan, gatherEvidence, snapshot, aiToolStatus, guard,
     staging, historyLog, putHistory, notify = () => {}, stillOk = () => null,
     listChildren, restoreHint = () => null, now = () => Date.now(), newId, onStaged = () => {},
+    dockerStatus = async () => ({ ok: false, running: 0 }),
+    cloudCheck = (paths) => cloudReasons(paths),
+    fs = nodeFs,
   } = deps;
   const settings = sanitizeSettings(getSettings());
   if (!settings.enabled) return { status: 'skipped', reason: 'disabled' };
   const scan = getScan() || {};
   const t0 = now();
-  const [ev, procs, ai] = await Promise.all([
+  const scanPaths = [
+    ...(scan.projects || []).map((p) => p && p.path),
+    ...(scan.system || []).flatMap((t) => (t && Array.isArray(t.existingPaths) ? t.existingPaths : [])),
+  ].filter((p) => typeof p === 'string');
+  const [ev, procs, ai, docker, cloud] = await Promise.all([
     gatherEvidence(scan.projects || [], settings),
     snapshot(),
     aiToolStatus().catch(() => ({ ok: false, running: [] })),
+    Promise.resolve().then(dockerStatus).catch(() => ({ ok: false, running: 0 })),
+    // A failed cloud check leaves every path unknown, which fails closed below.
+    Promise.resolve().then(() => cloudCheck(scanPaths)).catch(() => null),
   ]);
+  const cloudOf = cloud instanceof Map ? (p) => cloud.get(p) || null : () => 'Spaci could not check whether it is in a cloud-synced folder.';
+  const sameDisk = typeof staging.sameDisk === 'function' ? (p) => staging.sameDisk(p) : null;
   const sel = selectCandidates({
     projects: scan.projects || [], system: scan.system || [], settings, now: t0,
-    evidence: ev.evidence, itemEvidence: ev.itemEvidence, procs, aiTools: ai,
+    evidence: ev.evidence, itemEvidence: ev.itemEvidence, procs, aiTools: ai, docker, cloudOf, sameDisk,
   });
 
   // ---- dry run: report, touch nothing, wait for approval ----
   if (!isApproved(settings)) {
+    // An empty preview is not offered for approval: approving "nothing" would
+    // let the first real run move whatever matches later, unseen.
+    if (!sel.count) {
+      saveSettings({ ...settings, pendingPreview: null });
+      return { status: 'ok', dryRun: true, historyId: null, count: 0, bytes: 0 };
+    }
     const id = newId();
     const preview = sel.candidates.map((c) => ({ path: c.path, bytes: c.bytes, kind: c.kind, rule: c.rule, group: c.group, ...(c.project ? { project: c.project } : {}) }));
     const entry = historyLog.finishedEntry({
@@ -740,9 +1066,7 @@ async function runAutoClean(deps) {
     });
     putHistory(entry);
     saveSettings({ ...settings, pendingPreview: id });
-    notify('Auto-clean preview', sel.count
-      ? `It would move ${fmtBytes(sel.bytes)} from ${sel.count} ${sel.count === 1 ? 'item' : 'items'}. Nothing was removed. Approve it in History.`
-      : 'Nothing matches your auto-clean rules right now. Nothing was removed. Approve the rules in History.');
+    notify('Auto-clean preview', `It would move ${fmtBytes(sel.bytes)} from ${sel.count} ${sel.count === 1 ? 'item' : 'items'}. Nothing was removed. Approve it in History.`);
     return { status: 'ok', dryRun: true, historyId: id, count: sel.count, bytes: sel.bytes };
   }
   if (!sel.candidates.length) return { status: 'ok', count: 0, bytes: 0 };
@@ -776,53 +1100,102 @@ async function runAutoClean(deps) {
   }
 
   const items = [...refusedItems];
+  const leave = (c, reason) => items.push({ ...describe(c), outcome: 'refused', bytes: 0, reason });
+  const userExcludes = settings.excludes;
   let stopped = null;
-  let stagedBytes = 0;
-  let stagedCount = 0;
-  const stagedPaths = [];
+  const movedBy = new Map(); // candidate path -> entries still staged
   for (const c of sel.candidates) {
     const job = allowedBy.get(c.path);
     if (!job) continue;
     if (stopped) { items.push({ ...describe(c), outcome: 'failed', bytes: 0, reason: 'Not moved: ' + stopped }); continue; }
     const why = stillOk();
     if (why) { stopped = why; items.push({ ...describe(c), outcome: 'failed', bytes: 0, reason: 'Not moved: ' + why }); continue; }
+    // The snapshot above may be minutes old by now: ask again right before this move.
+    let fresh;
+    try { fresh = await snapshot(); } catch { fresh = { ok: false, list: [] }; }
+    if (!fresh || !fresh.ok) { leave(c, 'Spaci could not check which tools are running.'); continue; }
+    if (c.kind === 'artifact') {
+      const busy = projectBusy(fresh, c.project);
+      if (busy) { leave(c, busy); continue; }
+    } else {
+      const fam = TARGET_FAMILY[c.target];
+      if (!fam || familyRunning(fresh, fam)) { leave(c, `A ${fam === 'node' ? 'package manager' : (fam || 'developer') + ' tool'} started running.`); continue; }
+    }
+    const protect = new Set([...(job.protect || [])].map((x) => String(x).toLowerCase()));
+    const excludes = [...(job.excludePaths || []), ...userExcludes];
     let ok = true;
     let reason = null;
     let code = null;
+    let offDisk = false;
+    const moved = [];
+    let leftInside = 0;
     if (job.mode === 'contents') {
-      const keep = new Set([...(job.protect || [])].map((x) => String(x).toLowerCase()));
-      const excl = new Set(job.excludePaths || []);
       let names = [];
       try { names = await listChildren(c.path); } catch (e) { ok = false; reason = 'Spaci could not read it.'; code = e.code; }
-      // The target's size rides on its first moved child, so undo and purge count it once.
-      let carried = false;
       for (const n of names) {
         const child = nodePath.join(c.path, n);
-        if (keep.has(n.toLowerCase()) || excl.has(child) || n === '.DS_Store') continue;
-        const r = staging.stage(m, child, { ...c, bytes: carried ? 0 : c.bytes });
-        if (r.ok) carried = true;
-        else if (r.code !== 'ENOENT') { ok = false; reason = r.reason; code = r.code; break; }
+        if (protect.has(n.toLowerCase()) || excludes.includes(child) || n === '.DS_Store') continue;
+        // A protected name or an excluded path anywhere inside: leave the child whole.
+        if (await holdsProtected(child, { protect, excludes, fs })) { leftInside++; continue; }
+        // The target's size rides on its first moved child, so undo and purge count it once.
+        const r = staging.stage(m, child, { ...c, bytes: moved.length ? 0 : c.bytes });
+        if (r.ok) moved.push(r.entry);
+        else if (r.code === 'ENOENT') continue;
+        else if (r.code === 'EXDEV') { leftInside++; continue; } // a mount inside: leave it
+        else { ok = false; reason = r.reason; code = r.code; break; }
       }
+    } else if (await holdsProtected(c.path, { protect, excludes, fs })) {
+      leave(c, 'It holds something protected or excluded, so it was left in place.');
+      continue;
     } else {
       const r = staging.stage(m, c.path, c);
-      if (!r.ok) { ok = false; reason = r.reason; code = r.code; }
+      if (r.ok) moved.push(r.entry);
+      else if (r.code === 'EXDEV') offDisk = true;
+      else { ok = false; reason = r.reason; code = r.code; }
     }
-    if (ok) {
-      stagedBytes += c.bytes;
-      stagedCount++;
-      stagedPaths.push(c.path);
-      // 'trashed': still on disk until the staging folder is purged, so it is
-      // not counted as freed yet (history-log tallies it apart).
-      items.push({ ...describe(c), outcome: 'trashed', bytes: c.bytes });
-    } else {
+    if (offDisk) { leave(c, 'It is on another disk than Spaci\'s staging folder, so it cannot be set aside for undo.'); continue; }
+    if (!ok && moved.length) {
+      // Half a cache is worse than none: put the moved children back.
+      const back = staging.unstage(m, moved);
+      if (back.failed.length) {
+        // Could not put everything back: what stays staged is listed and can be undone.
+        movedBy.set(c.path, back.failed);
+        items.push({ ...describe(c), outcome: 'trashed', bytes: 0, partial: true, reason: `Partly moved: ${reason || 'a part could not be moved'} Undo puts back what moved.`, code: code || undefined });
+        stopped = 'an earlier item failed, so the run stopped.';
+        continue;
+      }
+    }
+    if (!ok) {
       items.push({ ...describe(c), outcome: 'failed', bytes: 0, reason: reason || 'Could not be moved.', code: code || undefined });
       stopped = 'an earlier item failed, so the run stopped.';
+      continue;
     }
+    if (!moved.length) { leave(c, leftInside ? 'Everything in it is protected, excluded or on another disk.' : 'It was already empty.'); continue; }
+    movedBy.set(c.path, moved);
+    // 'trashed': still on disk until the staging folder is purged, so it is
+    // not counted as freed yet (history-log tallies it apart).
+    items.push({ ...describe(c), outcome: 'trashed', bytes: c.bytes, ...(leftInside ? { partial: true, reason: `${leftInside} protected or excluded ${leftInside === 1 ? 'entry was' : 'entries were'} left in place.` } : {}) });
   }
+  // What the manifest says is staged, not what the loop hoped: that is what
+  // Undo can put back and what the purge will delete.
+  const man = staging.readManifest(runId);
+  const heldPaths = [];
+  let stagedBytes = 0;
+  if (man) {
+    const held = man.entries.filter((e) => e.state === 'moved');
+    for (const [p, entries] of movedBy) {
+      const mine = held.filter((e) => entries.some((x) => x.n === e.n));
+      if (mine.length) { heldPaths.push(p); stagedBytes += mine.reduce((sum, e) => sum + (e.bytes || 0), 0); }
+    }
+  } else {
+    for (const [p, entries] of movedBy) { heldPaths.push(p); stagedBytes += entries.reduce((sum, e) => sum + (e.bytes || 0), 0); }
+  }
+  const stagedCount = heldPaths.length;
   putHistory(historyLog.finishedEntry({ ...started, finishedAt: now(), status: 'done', items, extra: { autoClean: { ...acMeta, stagedBytes, stagedCount } } }));
-  onStaged(stagedPaths);
+  onStaged(heldPaths);
+  const partlyNote = items.some((it) => it.partial && it.bytes === 0 && it.outcome === 'trashed') ? ' Part of one item could not be moved back; it is listed in History.' : '';
   if (stagedCount) {
-    notify('Auto-clean', `Moved ${fmtBytes(stagedBytes)} from ${stagedCount} ${stagedCount === 1 ? 'item' : 'items'} aside. The space is freed in 24 hours. Undo it from History until then.`);
+    notify('Auto-clean', `Moved ${stagedBytes ? fmtBytes(stagedBytes) + ' from ' : ''}${stagedCount} ${stagedCount === 1 ? 'item' : 'items'} aside. The space is freed in 24 hours. Undo it from History until then.${stopped ? ' It stopped early: ' + stopped : ''}${partlyNote}`);
   } else if (stopped) {
     notify('Auto-clean', 'Auto-clean stopped before moving anything: ' + stopped);
   }
@@ -831,7 +1204,8 @@ async function runAutoClean(deps) {
 
 module.exports = {
   DEFAULT_SETTINGS, STAGING_TTL_MS, KEEP_MARKER, AUTO_ARTIFACTS, TOOL_FAMILIES, TARGET_FAMILY, DEV_PROCESS_NAMES,
-  sanitizeSettings, rulesFingerprint, isApproved, autoCleanGate, selectCandidates,
-  projectEvidence, itemEvidence, snapshotProcesses, parsePs, parseLsofCwd, namesOf,
+  sanitizeSettings, rulesFingerprint, isApproved, approvalCheck, autoCleanGate, selectCandidates,
+  projectEvidence, itemEvidence, gitActivityTimes, snapshotProcesses, parsePs, parseLsofCwd, namesOf, namesFrom,
+  projectBusy, familyRunning, argsMention, cloudOrExternal, cloudReason, cloudReasons, envCloudRoots, holdsProtected,
   createStaging, writeJsonDurable, runAutoClean, fmtBytes, isInsideOrSame,
 };

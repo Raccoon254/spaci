@@ -37,6 +37,7 @@ const LOADERS = {
  */
 const DOCKER_ALLOWLIST = Object.freeze({
   status: 0,
+  runningContainers: 0,
   inventory: 0,
   prune: 1,
   desktopDisk: -1,

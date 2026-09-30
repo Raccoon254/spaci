@@ -107,7 +107,6 @@ const A_TARGETS = Object.freeze({
   pip: { group: 'Package caches', hint: 'Re-downloads on the next install' },
   cargo: { group: 'Package caches', hint: 'Re-downloads on the next build' },
   go: { group: 'Package caches', hint: 'Re-downloads on the next build' },
-  maven: { group: 'Package caches', hint: 'Re-downloads on the next build' },
   nuget: { group: 'Package caches', hint: 'Re-downloads on the next restore' },
   cocoapods: { group: 'Package caches', hint: 'Re-downloads on the next pod install' },
   pub: { group: 'Package caches', hint: 'Re-downloads on the next pub get' },
@@ -125,6 +124,8 @@ const B_REASONS = Object.freeze({
   'xcode-devicesupport': 'Simulator and device data. Re-copied when a device on that version connects.',
   'simulator-caches': 'Simulator data. Rebuilt when a simulator boots, which takes a while.',
   huggingface: 'Downloaded AI models. Re-downloading can take hours.',
+  // `mvn install` puts your own builds here, and they exist nowhere else.
+  maven: 'Maven repository. Also holds artifacts you installed locally with mvn install, which nothing re-downloads.',
   thumbnails: 'App cache. Regenerated on demand.',
   'local-temp': 'Temporary files. Some may be in use by running apps.',
   'windows-temp': 'Temporary files. Some may be in use by running apps.',

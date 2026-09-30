@@ -189,7 +189,7 @@
     });
     if (plan.groups.length > 6) lines.push('and ' + (plan.groups.length - 6) + ' more kinds, ' + fmt(plan.groups.slice(6).reduce((a, g) => a + g.bytes, 0)) + '.');
     lines.push('');
-    lines.push('Everything rebuilds on the next install or build. App caches, AI tool history, the Trash and anything unverified are not included.');
+    lines.push('Everything rebuilds on the next install or build. App caches, the Maven repository, AI tool history, the Trash and anything unverified are not included.');
     return lines.join('\n');
   }
   SP.cleanAllDev = async function cleanAllDev() {

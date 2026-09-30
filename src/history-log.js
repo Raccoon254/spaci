@@ -37,6 +37,8 @@ function buildItem(src = {}) {
   if (src.project) item.project = String(src.project);
   if (src.reason) item.reason = String(src.reason);
   if (src.code) item.code = String(src.code);
+  // Only part of it moved (an auto-clean roll back that could not finish).
+  if (src.partial === true) item.partial = true;
   // Refused items were never touched, so there is nothing to restore. A failed
   // item may be partly gone, and the same command rebuilds it.
   if (src.restoreHint && item.outcome !== 'refused') item.restoreHint = String(src.restoreHint);

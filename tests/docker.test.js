@@ -1082,3 +1082,21 @@ test('restartDesktop on Linux restarts Docker Desktop via systemd and leaves a p
   assert.match(engine.message, /sudo systemctl restart docker/);
   assert.deepEqual(cmds, [['systemctl', '--user', 'cat', 'docker-desktop.service']], 'only the read-only probe ran');
 });
+
+test('runningContainers: counts local containers, 0 when Docker is missing or stopped, not ok when it cannot answer', async () => {
+  const local = { 'version --format': { stdout: VERSION_OK }, 'context inspect': { stdout: 'unix:///var/run/docker.sock\n' } };
+  const two = await docker.runningContainers({ force: true, backendRunning: () => true, exec: fakeExec({ ...local, 'ps -q': { stdout: 'abc\ndef\n' } }) });
+  assert.deepEqual(two, { ok: true, running: 2 });
+  docker.resetCache();
+  const none = await docker.runningContainers({ force: true, backendRunning: () => true, exec: fakeExec({ ...local, 'ps -q': { stdout: '' } }) });
+  assert.deepEqual(none, { ok: true, running: 0 });
+  docker.resetCache();
+  const missing = await docker.runningContainers({ force: true, backendRunning: () => false, exec: fakeExec({ 'version --format': { error: Object.assign(new Error('nope'), { code: 'ENOENT' }) } }) });
+  assert.deepEqual(missing, { ok: true, running: 0 });
+  docker.resetCache();
+  const wedged = await docker.runningContainers({ force: true, backendRunning: () => true, exec: fakeExec(NO_ANSWER) });
+  assert.equal(wedged.ok, false, 'an engine that does not answer may be running containers');
+  docker.resetCache();
+  const psFails = await docker.runningContainers({ force: true, backendRunning: () => true, exec: fakeExec({ ...local, 'ps -q': { error: new Error('x') } }) });
+  assert.equal(psFails.ok, false);
+});

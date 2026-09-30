@@ -11,6 +11,15 @@ const path = require('path');
 /** Directory basenames we never descend into. */
 const SKIP = new Set(['.Trash', '$Recycle.Bin', '.git']);
 
+/**
+ * Auto-clean's staging folder (userData/.cache/auto-clean-staging, see
+ * auto-clean.js): what it holds is already on its way out and is undone from
+ * History, so offering its files for the Trash would only confuse.
+ */
+function isStagingDir(dir, name) {
+  return name === 'auto-clean-staging' && path.basename(dir) === '.cache';
+}
+
 /** Cap on the running buffer before we trim back to keep memory bounded. */
 const SOFT_CAP = 800;
 const TRIM_TO = 400;
@@ -64,7 +73,7 @@ async function scanLargeFiles(root, minBytes, onProgress, signal) {
       const full = path.join(dir, name);
 
       if (entry.isDirectory()) {
-        if (SKIP.has(name)) continue;
+        if (SKIP.has(name) || isStagingDir(dir, name)) continue;
         stack.push(full);
         continue;
       }
@@ -104,4 +113,4 @@ async function scanLargeFiles(root, minBytes, onProgress, signal) {
 
 const { trashFiles } = require('./trash-files');
 
-module.exports = { scanLargeFiles, trashFiles };
+module.exports = { scanLargeFiles, trashFiles, isStagingDir };

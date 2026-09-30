@@ -520,7 +520,12 @@
 
   function itemNote(it, e) {
     if (e && isAuto(e)) {
-      if (it.outcome === 'trashed') { const a = acOf(e); return { text: a && a.purgedAt ? 'Removed after 24 hours.' : 'Set aside by auto-clean. Undo puts it back.', raw: '' }; }
+      if (it.outcome === 'trashed') {
+        const a = acOf(e);
+        // A partly moved item (auto-clean.js runAutoClean) says what happened.
+        const part = it.partial && it.reason ? ' ' + it.reason : '';
+        return { text: (a && a.purgedAt ? 'Removed after 24 hours.' : 'Set aside by auto-clean. Undo puts it back.') + part, raw: '' };
+      }
       if (it.outcome === 'refused' && it.reason === 'Put back by Undo.') return { text: 'Put back where it was by Undo.', raw: '' };
     }
     if (it.outcome === 'failed') {
@@ -633,12 +638,13 @@
     const box = (kids) => el('div', { 'data-autoclean-card': '', style: 'padding:18px 20px;border-radius:16px;background:var(--accent-soft);border:1px solid var(--border);margin-bottom:20px' }, kids);
     if (a.dryRun) {
       loadApproveState(e);
-      const pending = approveState.id === e.id && approveState.pending === e.id;
+      // An empty preview is never approvable (main refuses it too).
+      const pending = approveState.id === e.id && approveState.pending === e.id && num(a.previewCount) > 0;
       const kids = [
         el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: 'Preview only. Nothing was moved.' }),
         el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: num(a.previewCount)
           ? 'With your current rules, auto-clean would set aside ' + fmt(num(a.previewBytes)) + ' from ' + num(a.previewCount) + (num(a.previewCount) === 1 ? ' item' : ' items') + '. Approve to let it run when your computer is idle on AC power. Every run can be undone for 24 hours.'
-          : 'Nothing matches your rules right now. Approve the rules to let later runs clean what matches then.' }),
+          : 'Nothing matched your rules, so there is nothing to approve. A new preview runs later.' }),
       ];
       if (a.approvedAt) kids.push(el('div', { style: 'color:var(--success-fg);font-size:13px;font-weight:600;margin-top:10px', text: 'Approved ' + whenExact(a.approvedAt) + '.' }));
       else if (pending) {
@@ -646,7 +652,7 @@
           el('button', { 'data-approve': '', style: btnStyle(true), hov: 'background:var(--accent-hover)', onclick: () => approve(e) }, [ic('check', 15), 'Approve auto-clean']),
           el('button', { style: btnStyle(false), hov: 'background:var(--panel-3)', onclick: () => turnOff(e) }, ['Turn off auto-clean']),
         ]));
-      } else if (approveState.id === e.id && !approveState.loading) {
+      } else if (approveState.id === e.id && !approveState.loading && num(a.previewCount) > 0) {
         kids.push(el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:10px', text: 'This preview is out of date. A newer one runs with your current rules.' }));
       }
       const list = el('div', { style: 'display:flex;flex-direction:column;gap:7px;margin-top:16px' });

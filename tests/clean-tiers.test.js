@@ -155,3 +155,25 @@ test('planTierA of an empty scan is empty', () => {
   assert.equal(TIERS.A, 'A');
   assert.deepEqual(Object.keys(tiers.BADGES), ['A', 'B', 'C']);
 });
+
+test('the Maven repository is B: never in Clean all, never auto-cleaned', () => {
+  // `mvn install` puts local builds in ~/.m2/repository that nothing re-downloads.
+  const maven = { id: 'maven', name: 'Maven repository', safe: true, reversible: true, size: 5e9, existingPaths: ['/h/.m2/repository'] };
+  const r = tierOfTarget(maven);
+  assert.equal(r.tier, 'B');
+  assert.match(r.reason, /mvn install/);
+  assert.equal(tiers.A_TARGETS.maven, undefined);
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const t = buildSystemTargets({ platform, home: platform === 'win32' ? 'C:\\Users\\a' : '/home/a', env: {} }).find((x) => x.id === 'maven');
+    if (t) assert.equal(tierOfTarget(t).tier, 'B', platform);
+  }
+  const plan = planTierA({ sysTargets: [maven, { id: 'npm', name: 'npm cache', safe: true, reversible: true, size: 10, existingPaths: ['/h/.npm/_cacache'] }] });
+  assert.deepEqual(plan.jobs.map((j) => j.path), ['/h/.npm/_cacache']);
+  const ac = require('../src/auto-clean');
+  const sel = ac.selectCandidates({ system: [maven], settings: { enabled: true }, now: Date.now(), procs: { ok: true, list: [] }, aiTools: { ok: true, running: [] } });
+  assert.deepEqual(sel.candidates, []);
+  assert.equal(ac.TARGET_FAMILY.maven, undefined);
+  // The Clean all confirmation says so.
+  const dash = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'renderer', 'screens', 'dashboard.js'), 'utf8');
+  assert.match(dash, /the Maven repository, AI tool history/);
+});

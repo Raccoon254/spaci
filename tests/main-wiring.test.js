@@ -1215,7 +1215,15 @@ test('clean tiers and auto-clean IPC: bridged, tiers trust main, approve and und
     const acFile = path.join(m.userData, 'auto-clean.json');
     fs.writeFileSync(acFile, JSON.stringify({ settings: { ...st.settings, pendingPreview: 'prev-1' } }));
     const histFile = path.join(m.userData, 'history.json');
-    fs.writeFileSync(histFile, JSON.stringify([hl.finishedEntry({ id: 'prev-1', at: 1, finishedAt: 1, scope: 'auto-clean', label: 'Auto-clean preview', items: [], extra: { autoClean: { dryRun: true, rules } } })]));
+    // An empty preview is never approvable, and stops being pending.
+    fs.writeFileSync(histFile, JSON.stringify([hl.finishedEntry({ id: 'prev-1', at: 1, finishedAt: 1, scope: 'auto-clean', label: 'Auto-clean preview', items: [], extra: { autoClean: { dryRun: true, rules, previewCount: 0, previewBytes: 0 } } })]));
+    const empty = await m.handlers['autoclean:approve']({}, 'prev-1');
+    assert.equal(empty.ok, false);
+    assert.match(empty.error, /nothing to approve/);
+    assert.equal((await m.handlers['autoclean:get']()).approved, false);
+    assert.equal((await m.handlers['autoclean:get']()).pendingPreview, null);
+    fs.writeFileSync(acFile, JSON.stringify({ settings: { ...st.settings, pendingPreview: 'prev-1' } }));
+    fs.writeFileSync(histFile, JSON.stringify([hl.finishedEntry({ id: 'prev-1', at: 1, finishedAt: 1, scope: 'auto-clean', label: 'Auto-clean preview', items: [], extra: { autoClean: { dryRun: true, rules, previewCount: 2, previewBytes: 10 } } })]));
     assert.equal((await m.handlers['autoclean:approve']({}, 'other')).ok, false);
     const ok = await m.handlers['autoclean:approve']({}, 'prev-1');
     assert.equal(ok.ok, true);
