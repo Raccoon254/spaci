@@ -1,0 +1,4 @@
+du: cannot read directory '/var/lib/polkit-1': Permission denied
+du: cannot read directory '/var/lib/docker': Permission denied
+du: cannot access '/var/lib/private/systemd': Permission denied
+du: WARNING: Circular directory structure.

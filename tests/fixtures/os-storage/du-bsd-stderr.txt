@@ -1,0 +1,12 @@
+du: /Users/user/Library/Application Support/MobileSync: Operation not permitted
+du: /Users/user/Library/Application Support/Google/Chrome: Operation not permitted
+du: /Users/user/Library/Application Support/CallHistoryTransactions: Operation not permitted
+du: /Users/user/Library/Application Support/CloudDocs: Operation not permitted
+du: /Users/user/Library/Application Support/com.apple.sharedfilelist: Operation not permitted
+du: /Users/user/Library/Application Support/Knowledge: Operation not permitted
+du: /Users/user/Library/Application Support/FileProvider: Operation not permitted
+du: /Users/user/Library/Application Support/AddressBook: Operation not permitted
+du: /Users/user/Library/Application Support/FaceTime: Operation not permitted
+du: /Users/user/Library/Application Support/Microsoft Edge: Operation not permitted
+du: /Users/user/Library/Application Support/DifferentialPrivacy: Operation not permitted
+du: /Users/user/Library/Application Support/com.apple.avfoundation/Frecents: Operation not permitted

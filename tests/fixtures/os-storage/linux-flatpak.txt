@@ -1,0 +1,3 @@
+org.gnome.Platform	1.1 GB
+org.mozilla.firefox	254.3 MB
+org.freedesktop.Platform.GL.default	140.2 MB

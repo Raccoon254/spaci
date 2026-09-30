@@ -1,0 +1,2 @@
+/dev/nvme0n1p2 / btrfs rw,relatime,ssd,space_cache=v2,subvolid=256,subvol=/@ 0 0
+/dev/nvme0n1p2 /home btrfs rw,relatime,ssd,space_cache=v2,subvolid=257,subvol=/@home 0 0
