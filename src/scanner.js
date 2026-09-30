@@ -95,7 +95,8 @@ const EXCLUDED_DIRS = new Set([
   'Library', 'Applications', 'System', '.Trash',
 ]);
 
-const SKIP_DELETE = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.localized']);
+// Re-exported for existing callers; the table lives in constants.js.
+const { SKIP_DELETE } = require('./constants');
 
 function matchingMarkers(entries, markers) {
   const hits = [];

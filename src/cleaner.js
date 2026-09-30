@@ -11,7 +11,9 @@
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
-const { SKIP_DELETE } = require('./scanner');
+// From constants.js, not scanner.js: the cleaner runs in the main process and
+// must not load the scan modules.
+const { SKIP_DELETE } = require('./constants');
 
 const RETRY_CODES = new Set(['EACCES', 'EPERM']);
 

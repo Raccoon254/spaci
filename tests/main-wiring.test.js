@@ -138,8 +138,6 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
     [path.join(SRC, 'scanner.js')]: {
       scanProjects: poison('scanner.scanProjects'), attachDockerUsage: poison('scanner.attachDockerUsage'),
       enrichProject: poison('scanner.enrichProject'), revalidateArtifact: poison('scanner.revalidateArtifact'),
-      // The real cleaner reads this from the scanner module.
-      SKIP_DELETE: require('../src/scanner').SKIP_DELETE,
     },
     [path.join(SRC, 'system.js')]: { scanSystem: poison('system.scanSystem'), TARGETS: [], ...system },
     [path.join(SRC, 'docker.js')]: {
@@ -152,6 +150,9 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
     ...(updater ? { [path.join(SRC, 'updater.js')]: updater } : {}),
   };
   const required = [];
+  // Every src module any src module asked for while main.js loaded, direct or
+  // transitive (a stubbed module still counts: something asked for it).
+  const requiredAnywhere = new Set();
 
   const origLoad = Module._load;
   Module._load = function (request, parent, isMain) {
@@ -160,6 +161,7 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
       let resolved = null;
       try { resolved = Module._resolveFilename(request, parent, isMain); } catch (_) { /* not a file */ }
       if (parent.filename === path.join(SRC, 'main.js')) required.push(resolved || request);
+      if (resolved) requiredAnywhere.add(resolved);
       if (resolved && stubs[resolved]) return stubs[resolved];
     }
     return origLoad.apply(this, arguments);
@@ -178,7 +180,7 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
     delete require.cache[updaterPath];
     fs.rmSync(userData, { recursive: true, force: true });
   };
-  return { handlers, appEvents, ready, sent, jobs, userData, electron, cleanup, counts, windows, forks, calls, required, appPath };
+  return { handlers, appEvents, ready, sent, jobs, userData, electron, cleanup, counts, windows, forks, calls, required, requiredAnywhere, appPath };
 }
 
 test('startup survives a truncated cache.json and serves an empty, well-formed cache', async () => {
@@ -407,12 +409,49 @@ test('a fresh install records its version at launch and never shows What\'s new'
 // ---------- scan worker ----------
 
 const SCAN_MODULES = ['scanner.js', 'languages.js', 'diskbreakdown.js', 'largefiles.js', 'aitools.js'].map((f) => path.join(SRC, f));
+// Modules whose only job is walking disks or spawning git: nothing the main
+// process loads may reach them, directly or through another module. (aitools.js
+// is reachable through system.js for its target tables, and docker.js is loaded
+// for PRUNE_KINDS; both are covered by the poisoned-call checks instead.)
+const WALK_MODULES = ['scanner.js', 'languages.js', 'diskbreakdown.js', 'largefiles.js', 'scan-worker-ops.js'].map((f) => path.join(SRC, f));
+
+/** Static require graph of src: every './x' require reachable from `entry`. */
+function reachable(entry) {
+  const seen = new Set();
+  const stack = [entry];
+  while (stack.length) {
+    const f = stack.pop();
+    if (seen.has(f)) continue;
+    seen.add(f);
+    const text = fs.readFileSync(f, 'utf8');
+    for (const m of text.matchAll(/require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g)) {
+      let dep = path.resolve(path.dirname(f), m[1]);
+      if (!dep.endsWith('.js')) dep += '.js';
+      if (fs.existsSync(dep)) stack.push(dep);
+    }
+  }
+  return seen;
+}
+
+test('worker isolation, transitively: no module main.js can reach requires a disk-walking scan module', () => {
+  const graph = reachable(path.join(SRC, 'main.js'));
+  for (const f of WALK_MODULES) {
+    assert.ok(!graph.has(f), `main.js reaches ${path.basename(f)} through its requires`);
+  }
+  // The cleaner in particular: it gets SKIP_DELETE from constants.js.
+  assert.ok(graph.has(path.join(SRC, 'cleaner.js')));
+  assert.ok(graph.has(path.join(SRC, 'constants.js')));
+  // And the worker still reaches every scan module.
+  const worker = reachable(path.join(SRC, 'scan-worker.js'));
+  for (const f of SCAN_MODULES) assert.ok(worker.has(f), `the worker reaches ${path.basename(f)}`);
+});
 
 test('scan work runs in the worker: one utilityProcess from the app path, main never touches the scan modules', async () => {
   const m = loadMain();
   try {
     assert.equal(m.forks.length, 0, 'no worker before the first scan');
     for (const f of SCAN_MODULES) assert.ok(!m.required.includes(f), `main.js does not require ${path.basename(f)}`);
+    for (const f of WALK_MODULES) assert.ok(!m.requiredAnywhere.has(f), `nothing main.js loads requires ${path.basename(f)}`);
     const sender = { send: (ch, p) => m.sent.push([ch, p]), isDestroyed: () => false };
     const scan = m.handlers['scan:projects']({ sender }, '/home/u');
     await flush();
