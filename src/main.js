@@ -665,6 +665,9 @@ app.whenReady().then(() => {
  * relaunches the moved copy, so nothing else may start.
  */
 function maybeMoveToApplications() {
+  // Automated runs (CI end-to-end, smoke tests) launch unpacked builds outside
+  // Applications; the modal would block them before any window exists.
+  if (/^(1|true|yes|on)$/i.test(String(process.env.SPACI_NO_MOVE_PROMPT || ''))) return false;
   let inApplications = true;
   try { inApplications = typeof app.isInApplicationsFolder === 'function' ? app.isInApplicationsFolder() : true; } catch (_) { inApplications = true; }
   const outcome = installLocation.offerMove({

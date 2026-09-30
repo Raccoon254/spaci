@@ -26,7 +26,7 @@ const check = (name, pass, detail = '') => {
 
 const app = spawn(BIN, [`--user-data-dir=${DATA}`, `--remote-debugging-port=${PORT}`], {
   stdio: ['ignore', 'pipe', 'pipe'],
-  env: { ...process.env, SPACI_TELEMETRY: '0' },
+  env: { ...process.env, SPACI_TELEMETRY: '0', SPACI_NO_MOVE_PROMPT: '1' },
 });
 let log = '';
 app.stdout.on('data', (d) => { log += d; });
@@ -144,8 +144,10 @@ try {
     const state = st?.state || st?.status?.state;
     check('docker is detected and running', state === 'running', JSON.stringify(state));
     const recs = await evalIn(`return await window.api.recommendations({ projects: [], sysTargets: [] })`);
+    // Removing every unused image is a deliberate action on System > Docker,
+    // not a recommendation; if a card ever offers it, it must not be Safe.
     const rec = (recs || []).find((r) => r.id === 'docker:unused-images');
-    check('unused images are recommended as Review, not Safe', !!rec && rec.safe === false && rec.savings > 0, JSON.stringify(rec && { title: rec.title, safe: rec.safe }));
+    check('unused images are never recommended as Safe', !rec || rec.safe === false, JSON.stringify(rec && { title: rec.title, safe: rec.safe }));
     const refused = await evalIn(`return await window.api.dockerPrune('unused-images')`);
     check('unused-images prune needs a confirm', refused?.ok === false && refused.error === 'needs-confirmation' && dockerImageCount() === before);
     const res = await evalIn(`return await window.api.dockerPrune('unused-images', { confirmed: true })`);
