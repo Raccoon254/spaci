@@ -621,3 +621,14 @@ test('disk copy is worded per platform', () => {
   const ok = docker.reclaimSuggestions({ ok: true, platform: 'win32', categories: docker.parseSummary(DF_SUMMARY), desktopDisk: DISK });
   assert.ok(ok.every((s) => s.note === docker.diskNote('win32')));
 });
+
+test('on Linux the backend probe matches the executable path, since procps truncates names to 15 chars', async () => {
+  let seen;
+  await docker.backendRunning({ processExec: (c, a, o, cb) => { seen = [c, a]; cb(null, '1\n', ''); } }, 'linux');
+  assert.equal(seen[0], 'pgrep');
+  assert.equal(seen[1][0], '-f');
+  const re = new RegExp(seen[1][1]);
+  assert.ok(re.test('/opt/docker-desktop/bin/com.docker.backend'));
+  assert.ok(re.test('/opt/docker-desktop/bin/com.docker.backend run'));
+  assert.ok(!re.test('tail -f /home/b/.docker/desktop/log/host/com.docker.backend.log'));
+});

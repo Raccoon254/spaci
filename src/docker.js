@@ -213,9 +213,15 @@ function backendRunning(options = {}, platform = process.platform) {
   }
   return new Promise((resolve) => {
     const exec = options.processExec || execFile;
+    // macOS pgrep -x matches the full process name. Linux procps truncates
+    // the name it matches to 15 characters ("com.docker.back"), so -x can never
+    // match there; match the executable path in the command line instead,
+    // anchored so a `tail -f .../com.docker.backend.log` does not count.
     const [cmd, args] = platform === 'win32'
       ? ['tasklist', ['/FI', 'IMAGENAME eq com.docker.backend.exe', '/NH']]
-      : ['pgrep', ['-x', 'com.docker.backend']];
+      : platform === 'linux'
+        ? ['pgrep', ['-f', '(^|/)com\\.docker\\.backend( |$)']]
+        : ['pgrep', ['-x', 'com.docker.backend']];
     try {
       exec(cmd, args, { timeout: 3000 }, (err, stdout) => {
         if (platform === 'win32') return resolve(/com\.docker\.backend/i.test(String(stdout || '')));
