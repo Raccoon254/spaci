@@ -74,7 +74,7 @@ async function makeWritable(p, stat) {
 }
 
 function fail(ctx, p, err) {
-  ctx.failures.push({ path: p, error: (err && err.message) || String(err) });
+  ctx.failures.push({ path: p, error: (err && err.message) || String(err), code: (err && err.code) || undefined });
 }
 
 /**
@@ -159,6 +159,14 @@ function failureMessage(failures) {
   return `${first.error}${more}`;
 }
 
+/** A failure report for onProgress: message, the first known error code, every failed path. */
+function failureReport(p, freed, failures) {
+  const report = { path: p, freed, error: failureMessage(failures), failedPaths: failures.map((f) => f.path) };
+  const coded = failures.find((f) => f.code);
+  if (coded) report.code = coded.code;
+  return report;
+}
+
 /**
  * Delete one path (file or dir). Returns bytes freed.
  * `options.protect` is a list of basenames that must never be deleted.
@@ -174,10 +182,7 @@ async function deletePath(target, onProgress, signal, options = {}) {
   const result = await removeEntry(target, ctx, parentStat);
 
   if (result === 'failed' || ctx.failures.length) {
-    onProgress?.({
-      path: target, freed: ctx.freed, error: failureMessage(ctx.failures),
-      failedPaths: ctx.failures.map((f) => f.path),
-    });
+    onProgress?.(failureReport(target, ctx.freed, ctx.failures));
   } else if (result === 'gone') {
     onProgress?.({ path: target, freed: ctx.freed });
   }
@@ -201,7 +206,7 @@ async function emptyContents(dir, onProgress, signal, options = {}) {
   let entries;
   try { entries = await fsp.readdir(dir); }
   catch (e) {
-    onProgress?.({ path: dir, freed: 0, error: e.message });
+    onProgress?.({ path: dir, freed: 0, error: e.message, ...(e.code ? { code: e.code } : {}) });
     return 0;
   }
   const parentStat = await fsp.lstat(dir).catch(() => dirStat);
@@ -213,10 +218,7 @@ async function emptyContents(dir, onProgress, signal, options = {}) {
     const result = await removeEntry(child, ctx, parentStat);
     freed += ctx.freed;
     if (result === 'failed' || ctx.failures.length) {
-      onProgress?.({
-        path: child, freed: ctx.freed, error: failureMessage(ctx.failures),
-        failedPaths: ctx.failures.map((f) => f.path),
-      });
+      onProgress?.(failureReport(child, ctx.freed, ctx.failures));
     } else if (result === 'gone') {
       onProgress?.({ path: child, freed: ctx.freed });
     }
@@ -229,25 +231,48 @@ async function emptyContents(dir, onProgress, signal, options = {}) {
  * job = { path, mode?, protect?, excludePaths? }  mode 'contents' empties dir,
  * otherwise removes path. `protect` is an array of basenames that survive at any
  * depth; `excludePaths` is an array of absolute paths that survive.
+ *
+ * `results` has one entry per job that ran, in order: { path, freed, ok,
+ * missing, error?, code? }. ok is true only when nothing under the job failed,
+ * so the caller can count what was really removed. A job whose path was already
+ * gone is ok:false, missing:true, code 'ENOENT': nothing was removed by Spaci.
  */
 async function clean(jobs, onProgress, signal) {
   let totalFreed = 0;
   let done = 0;
   const errors = [];
+  const results = [];
   for (const job of jobs) {
     if (signal?.aborted) break;
     const before = totalFreed;
-    const report = (p) => { if (p.error) errors.push(p); onProgress?.({ ...p, done, total: jobs.length }); };
+    const jobErrors = [];
+    const report = (p) => { if (p.error) { errors.push(p); jobErrors.push(p); } onProgress?.({ ...p, done, total: jobs.length }); };
     const options = { protect: job.protect, excludePaths: job.excludePaths };
+    let missing = false;
+    try { await fsp.lstat(job.path); }
+    catch (e) {
+      // Already gone, or unreadable (deletePath and emptyContents would then
+      // return 0 without a word, which must not read as success).
+      if (e.code === 'ENOENT') missing = true;
+      else report({ path: job.path, freed: 0, error: e.message, ...(e.code ? { code: e.code } : {}) });
+    }
     if (job.mode === 'contents') {
       totalFreed += await emptyContents(job.path, report, signal, options);
     } else {
       totalFreed += await deletePath(job.path, report, signal, options);
     }
     done++;
+    const result = { path: job.path, freed: totalFreed - before, ok: !missing && jobErrors.length === 0, missing };
+    if (missing) { result.error = 'Already gone'; result.code = 'ENOENT'; }
+    else if (jobErrors.length) {
+      result.error = jobErrors[0].error;
+      const coded = jobErrors.find((p) => p.code);
+      if (coded) result.code = coded.code;
+    }
+    results.push(result);
     onProgress?.({ phase: 'item-done', path: job.path, freed: totalFreed - before, totalFreed, done, total: jobs.length });
   }
-  return { totalFreed, errors };
+  return { totalFreed, errors, results };
 }
 
 module.exports = { clean, deletePath, emptyContents };

@@ -42,6 +42,9 @@ function makeTarget(id, name, category, icon, paths, description, options = {}) 
   // Used when a generic cache folder holds a nested folder that is expensive
   // to rebuild or is offered separately with its own safety rating.
   if (Array.isArray(options.protect) && options.protect.length > 0) target.protect = uniq(options.protect);
+  // What the History screen tells the user about getting this back, when the
+  // generic "regenerates when the owning app runs" would overstate it.
+  if (options.restoreHint) target.restoreHint = options.restoreHint;
   return target;
 }
 
@@ -78,6 +81,9 @@ function xdgCache(ctx, ...parts) {
 // and several cannot be fetched again (sideloaded LM Studio models). So the
 // generic wipe is opt-in and always spares these, whatever else is selected.
 const CLI_CACHE_PROTECT = ['huggingface', 'lm-studio', 'whisper', 'torch', 'ms-playwright', 'ollama', 'llama.cpp', 'gpt4all'];
+// Emptying the Trash is permanent: it is never preselected and always confirmed.
+const TRASH_DESCRIPTION = 'Files you moved to the Trash. Emptying it deletes them permanently.';
+
 const CLI_CACHE_DESCRIPTION = 'Caches command-line tools keep in ~/.cache, after known developer caches are counted separately. Some tools store downloads here that take time to fetch again, so review before cleaning. Model stores are always kept.';
 
 function platformContext(options = {}) {
@@ -165,19 +171,19 @@ function buildSystemTargets(options = {}) {
     const lib = (...p) => join('Library', ...p);
     targets.push(
       makeTarget('xcode-derived', 'Xcode DerivedData', 'Xcode', 'apple', [lib('Developer', 'Xcode', 'DerivedData')], 'Xcode build intermediates. Safe to wipe, it rebuilds.', { storyCategory: 'xcode' }),
-      makeTarget('xcode-archives', 'Xcode Archives', 'Xcode', 'box', [lib('Developer', 'Xcode', 'Archives')], 'App archives for distribution. Delete only if already uploaded.', { safe: false, storyCategory: 'xcode' }),
+      makeTarget('xcode-archives', 'Xcode Archives', 'Xcode', 'box', [lib('Developer', 'Xcode', 'Archives')], 'App archives for distribution. Delete only if already uploaded.', { safe: false, reversible: false, storyCategory: 'xcode' }),
       makeTarget('xcode-devicesupport', 'iOS DeviceSupport', 'Xcode', 'apple', [lib('Developer', 'Xcode', 'iOS DeviceSupport')], 'Cached symbols per iOS version. Regenerates when you attach a device.', { storyCategory: 'xcode' }),
       makeTarget('simulator-caches', 'Simulator caches', 'Xcode', 'apple', [lib('Developer', 'CoreSimulator', 'Caches')], 'Core Simulator caches.', { storyCategory: 'xcode' }),
       makeTarget('user-caches', 'Other app caches', 'System', 'broom-2', [lib('Caches')], 'Generic per-app caches after known developer and browser caches are counted separately.', { storyCategory: 'caches' }),
       makeTarget('cli-cache', 'Command-line tool caches', 'System', 'database', [join('.cache')], CLI_CACHE_DESCRIPTION, { storyCategory: 'caches', safe: false, protect: CLI_CACHE_PROTECT }),
-      makeTarget('user-logs', 'User logs', 'System', 'log', [lib('Logs')], 'Application log files.', { storyCategory: 'caches' }),
-      makeTarget('trash', 'Trash', 'System', 'trash', [join('.Trash')], 'Files in the Trash.', { storyCategory: 'system' }),
-      makeTarget('saved-state', 'Saved app state', 'System', 'grid', [lib('Saved Application State')], 'Window restore state. Apps just open fresh.', { storyCategory: 'system' }),
+      makeTarget('user-logs', 'User logs', 'System', 'log', [lib('Logs')], 'Log files apps write for troubleshooting. Apps start new logs, but removed entries cannot be recovered.', { storyCategory: 'caches', reversible: false, restoreHint: 'Apps start new logs as they run. The removed entries are gone.' }),
+      makeTarget('trash', 'Trash', 'System', 'trash', [join('.Trash')], TRASH_DESCRIPTION, { safe: false, reversible: false, storyCategory: 'system' }),
+      makeTarget('saved-state', 'Saved app state', 'System', 'grid', [lib('Saved Application State')], 'Saved window positions and open documents apps restore on relaunch. Apps open fresh afterwards, without their previous windows.', { storyCategory: 'system', reversible: false, restoreHint: 'Apps save new window state the next time they run. Previous windows are not restored.' }),
     );
   } else if (platform === 'linux') {
     targets.push(
       makeTarget('user-cache', 'Other user cache', 'System', 'database', [xdgCache(ctx)], CLI_CACHE_DESCRIPTION.replace('~/.cache', 'your cache folder'), { storyCategory: 'caches', safe: false, protect: CLI_CACHE_PROTECT }),
-      makeTarget('trash', 'Trash', 'System', 'trash', [join('.local', 'share', 'Trash', 'files'), join('.local', 'share', 'Trash', 'info')], 'Files in the Trash.', { storyCategory: 'system' }),
+      makeTarget('trash', 'Trash', 'System', 'trash', [join('.local', 'share', 'Trash', 'files'), join('.local', 'share', 'Trash', 'info')], TRASH_DESCRIPTION, { safe: false, reversible: false, storyCategory: 'system' }),
       makeTarget('thumbnails', 'Thumbnails', 'System', 'image', [xdgCache(ctx, 'thumbnails')], 'Cached image thumbnails. Regenerated on demand.', { storyCategory: 'caches' }),
     );
   } else if (platform === 'win32') {

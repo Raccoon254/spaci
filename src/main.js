@@ -5,6 +5,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const { execFile } = require('child_process');
+const crypto = require('crypto');
 
 const scanner = require('./scanner');
 const system = require('./system');
@@ -21,6 +22,10 @@ const { createScanCoordinator, singleFlight, keyedSingleFlight } = require('./sc
 const { createScheduler, backgroundGate, clampIntervalHours, HOUR } = require('./scheduler');
 const { createScanService } = require('./background');
 const { startupRole, focusPlan } = require('./instance');
+const historyLog = require('./history-log');
+const restoreHints = require('./restore-hints');
+const cleanPlan = require('./clean-plan');
+const ipcGuards = require('./ipc-guards');
 
 const isDev = process.argv.includes('--dev');
 
@@ -89,16 +94,51 @@ const cacheStore = createCacheStore({ file: CACHE_PATH });
 if (cacheStore.loadStatus === 'corrupt') console.warn('[cache] cache.json was unreadable; it will be rebuilt by the next scan');
 const cache = cacheStore.get();
 function writeCache() { return cacheStore.write(); }
+// A cache written by an older version carries that version's safety flags (the
+// Trash was once safe:true, so it would be preselected until the next scan).
+// The current catalog always wins for safe, reversible and the wording.
+function applyCurrentTargetFlags(list) {
+  const byId = new Map(system.TARGETS.map((t) => [t.id, t]));
+  for (const t of Array.isArray(list) ? list : []) {
+    const cur = t && byId.get(t.id);
+    if (!cur) continue;
+    t.safe = cur.safe;
+    t.reversible = cur.reversible;
+    t.description = cur.description;
+    if (cur.restoreHint) t.restoreHint = cur.restoreHint; else delete t.restoreHint;
+  }
+}
+applyCurrentTargetFlags(cache.system);
 const scanCoordinator = createScanCoordinator();
 let scanService = null; // created below, once refreshDocker/refreshBreakdown exist
 let bgScheduler = null; // started in app.whenReady (powerMonitor needs a ready app)
 
 // ---------- cleanup history (logs of cleaned projects/caches) ----------
+// Entry shapes live in history-log.js. A clean writes a 'started' entry before
+// deleting and replaces it by id when done; entries left 'started' by a crash
+// become 'interrupted' on the next launch.
 const HISTORY_PATH = path.join(app.getPath('userData'), 'history.json');
-function readHistory() { try { return JSON.parse(fs.readFileSync(HISTORY_PATH, 'utf8')); } catch { return []; } }
-function appendHistory(entry) {
-  try { const h = readHistory(); h.unshift(entry); writeFileAtomic(HISTORY_PATH, JSON.stringify(h.slice(0, 200))); }
-  catch (e) { console.error('appendHistory', e && e.message); }
+function readHistory() {
+  try { const h = JSON.parse(fs.readFileSync(HISTORY_PATH, 'utf8')); return Array.isArray(h) ? h : []; }
+  catch { return []; }
+}
+function putHistory(entry) {
+  try { writeFileAtomic(HISTORY_PATH, JSON.stringify(historyLog.upsertEntry(readHistory(), entry))); }
+  catch (e) { console.error('putHistory', e && e.message); }
+}
+function recoverInterruptedHistory() {
+  try {
+    const { history, changed } = historyLog.markInterrupted(readHistory());
+    if (changed) writeFileAtomic(HISTORY_PATH, JSON.stringify(history));
+  } catch (e) { console.error('recoverInterruptedHistory', e && e.message); }
+}
+function newHistoryId() {
+  return typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+}
+
+/** Settings > Desktop notifications. Every Notification main shows goes through this. */
+function notificationsAllowed() {
+  return loadPrefs().notify !== false && Notification.isSupported();
 }
 
 // ---------- disk usage breakdown (by category) ----------
@@ -339,7 +379,7 @@ function buildTrayMenu() {
 function announceUpdate(version) {
   updateReadyVersion = version;
   try {
-    if (Notification.isSupported()) {
+    if (notificationsAllowed()) {
       const n = new Notification({
         title: `Spaci ${version} is ready`,
         body: 'Restart Spaci to finish updating, or it will update the next time you quit.',
@@ -374,6 +414,8 @@ function createTray() {
 
 app.whenReady().then(() => {
   if (!isPrimary) return; // quitting: no window, tray, timers or updater
+  // Before any clean can run: a 'started' entry left by a crash is not "done".
+  recoverInterruptedHistory();
   // Off the startup path; the interval catches an app left open past midnight.
   setTimeout(sendUsagePing, 10000);
   setInterval(sendUsagePing, 6 * 3600 * 1000);
@@ -452,16 +494,6 @@ function getIcon(name) {
   try { svg = fs.readFileSync(path.join(__dirname, 'renderer', 'icons', key + '.svg'), 'utf8'); }
   catch { svg = null; }
   iconCache.set(key, svg);
-  return svg;
-}
-
-const logoCache = new Map();
-async function getLogo(name) {
-  if (logoCache.has(name)) return logoCache.get(name);
-  const file = path.join(__dirname, '..', 'assets', 'logos', `${name}.svg`);
-  let svg = '';
-  try { svg = await fsp.readFile(file, 'utf8'); } catch { svg = ''; }
-  logoCache.set(name, svg);
   return svg;
 }
 
@@ -568,23 +600,20 @@ ipcMain.handle('disk:breakdown', async () => {
 ipcMain.handle('icon:get', (_e, name) => getIcon(name));
 
 // Biggest immediate children of a category's directories (Storage drill-down).
-ipcMain.handle('fs:top-children', (_e, dirs) => diskbreakdown.topChildren(Array.isArray(dirs) ? dirs : [], 25));
-ipcMain.handle('logo:get', (_e, name) => getLogo(name));
+// Children of the breakdown's own category folders become openable (open:path),
+// since Spaci listed them itself; children of any other folder do not.
+let lastTopChildren = new Set();
+ipcMain.handle('fs:top-children', async (_e, dirs) => {
+  const list = Array.isArray(dirs) ? dirs : [];
+  const items = await diskbreakdown.topChildren(list, 25);
+  const categoryDirs = ipcGuards.knownPathSet(((cache.diskBreakdown && cache.diskBreakdown.categories) || []).flatMap((c) => (c && c.dirs) || []));
+  const parents = ipcGuards.knownPathSet(list.filter((d) => categoryDirs.has(d)));
+  lastTopChildren = new Set((items || []).filter((it) => it && parents.has(path.dirname(it.path))).map((it) => it.path));
+  return items;
+});
 ipcMain.handle('cache:get', () => cache);
 // Explicit request: bypasses the battery/load gate, joins a run in flight.
 ipcMain.handle('scan:now', () => { if (bgScheduler) bgScheduler.runNow(); return true; });
-ipcMain.handle('project:icon', async (_e, p) => {
-  try {
-    if (!p) return null;
-    const st = await fsp.stat(p);
-    if (!st.isFile() || st.size > 3 * 1024 * 1024) return null;
-    const buf = await fsp.readFile(p);
-    const ext = path.extname(p).toLowerCase();
-    const mime = ext === '.svg' ? 'image/svg+xml' : ext === '.ico' ? 'image/x-icon'
-      : (ext === '.jpg' || ext === '.jpeg') ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : 'image/png';
-    return `data:${mime};base64,${buf.toString('base64')}`;
-  } catch { return null; }
-});
 
 ipcMain.handle('dialog:pick-folder', async () => {
   const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
@@ -634,10 +663,11 @@ ipcMain.handle('docker:prune', async (_e, kind) => {
   if (!spec) return { ok: false, error: 'Unknown Docker cleanup: ' + kind, freed: 0 };
   const res = await docker.prune(kind);
   if (res.ok) {
-    appendHistory({
-      at: Date.now(), scope: 'docker', label: spec.name, count: 1,
-      freed: res.freed, reversible: spec.safe, items: [],
-    });
+    const at = Date.now();
+    putHistory(historyLog.dockerEntry({
+      id: newHistoryId(), at, finishedAt: at, spec, freed: res.freed,
+      restoreHint: restoreHints.dockerRestoreHint(kind),
+    }));
     await refreshDocker(cache.projects || [], { force: true });
     writeCache();
     updateTrayTitle();
@@ -670,43 +700,180 @@ ipcMain.handle('project:enrich', async (_e, p, force) => {
 const TARGET_INDEX = cleanGuard.buildTargetIndex(system.TARGETS);
 let lastLargeFiles = new Set();
 
+/** Names in a folder, for restore hints. Missing or unreadable reads as empty. */
+async function listNames(dir, memo) {
+  if (!memo.has(dir)) memo.set(dir, fsp.readdir(dir).catch(() => []));
+  return memo.get(dir);
+}
+
+/** History item fields that are known before anything is deleted. */
+async function describeJob(jobPath, plan, memo) {
+  const d = { path: jobPath, kind: plan.kind, reversible: plan.reversible };
+  if (plan.project) d.project = plan.project;
+  if (plan.kind === 'artifact') {
+    const near = await listNames(path.dirname(jobPath), memo);
+    const root = plan.project ? await listNames(plan.project, memo) : [];
+    d.restoreHint = restoreHints.artifactRestoreHint(jobPath, near, root);
+  } else if (plan.kind === 'cache' || plan.kind === 'trash') {
+    const hint = restoreHints.systemRestoreHint(plan.target);
+    if (hint) d.restoreHint = hint;
+  } else if (plan.kind === 'file') {
+    d.restoreHint = restoreHints.TRASH_HINT;
+  }
+  return d;
+}
+
+// api.clean(jobs, meta), meta = { scope, label, confirmed }. Returns
+// { ok, totalFreed, errors: [{ path, error, code? }], refused: [{ path, reason,
+// target? }], trashed: [paths], historyId }. meta.reversible is ignored.
 ipcMain.handle('clean', async (e, jobs, meta) => {
   const ac = new AbortController();
-  const onProgress = (p) => e.sender.send('clean:progress', p);
+  const send = progressTo(e.sender, 'clean:progress');
+  const m = meta && typeof meta === 'object' ? meta : {};
+  const scope = typeof m.scope === 'string' && m.scope ? m.scope : 'projects';
+  const label = typeof m.label === 'string' ? m.label : '';
+  // One job per path: a duplicate would be cleaned twice and counted twice.
+  const seen = new Set();
+  const list = (Array.isArray(jobs) ? jobs : []).filter((j) => {
+    if (!j || typeof j.path !== 'string' || !j.path) return false;
+    const k = cleanGuard.keyOf(j.path);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  let historyId = null;
+  let started = null;
   try {
     // Only paths Spaci itself produced may be deleted: system targets, project
     // artifacts from the last scan, and files from the last large-file scan.
     const projectPaths = new Set();
     for (const p of cache.projects || []) for (const it of p.items || []) projectPaths.add(it.path);
     const known = new Set([...TARGET_INDEX.keys(), ...projectPaths, ...lastLargeFiles]);
-    const { allowed, refused } = await cleanGuard.enforceTargetRules(jobs, {
+    const planCtx = cleanPlan.buildPlanContext({ targetIndex: TARGET_INDEX, projects: cache.projects || [], largeFiles: lastLargeFiles });
+
+    // Irreversible, unsafe or large-file jobs need the user's explicit yes.
+    const gate = cleanPlan.gateJobs(list, planCtx, m.confirmed === true);
+    const guarded = await cleanGuard.enforceTargetRules(gate.pass, {
       index: TARGET_INDEX,
       toolStatus: () => aitools.aiToolStatus(),
       known,
       projectPaths,
       revalidate: (p) => scanner.revalidateArtifact(p),
     });
-    const res = allowed.length
-      ? await cleaner.clean(allowed, onProgress, ac.signal)
-      : { totalFreed: 0, errors: [] };
-    if (allowed.length) {
-      appendHistory({ at: Date.now(), scope: (meta && meta.scope) || 'projects', label: (meta && meta.label) || '', count: allowed.length, freed: res.totalFreed, reversible: !(meta && meta.reversible === false), items: allowed.slice(0, 80).map((j) => j.path) });
+    const refused = [...gate.refused, ...guarded.refused];
+    const allowed = guarded.allowed;
+    if (!allowed.length) return { ok: true, totalFreed: 0, errors: [], refused, trashed: [], historyId: null };
+
+    // Large files go to the system Trash; everything else is deleted.
+    const plans = new Map(allowed.map((j) => [j, cleanPlan.classifyJob(j.path, planCtx)]));
+    const toTrash = allowed.filter((j) => plans.get(j).kind === 'file');
+    const toDelete = allowed.filter((j) => plans.get(j).kind !== 'file');
+
+    const memo = new Map();
+    const described = new Map();
+    for (const j of allowed) described.set(j.path, await describeJob(j.path, plans.get(j), memo));
+    const refusedItems = refused.map((r) => {
+      const c = cleanPlan.classifyJob(r.path, planCtx);
+      return { path: r.path, kind: c.kind, reversible: c.reversible, project: c.project, reason: r.reason, bytes: 0 };
+    });
+
+    // Logged before anything is touched, so a crash mid-clean leaves a trace.
+    historyId = newHistoryId();
+    started = { id: historyId, at: Date.now(), scope, label, requested: list.length };
+    putHistory(historyLog.startedEntry({ ...started, refused: refusedItems, pending: [...toDelete, ...toTrash].map((j) => described.get(j.path)) }));
+
+    const total = allowed.length;
+    const del = toDelete.length
+      ? await cleaner.clean(toDelete, (p) => send({ ...p, total }), ac.signal)
+      : { totalFreed: 0, errors: [], results: [] };
+    let running = del.totalFreed;
+    let done = toDelete.length;
+    const tr = toTrash.length
+      ? await largefiles.trashFiles(toTrash.map((j) => j.path), {
+        trashItem: (p) => shell.trashItem(p),
+        signal: ac.signal,
+        onProgress: (p) => {
+          send({ ...p, done, total });
+          if (!p.error) running += p.freed || 0;
+          done++;
+          send({ phase: 'item-done', path: p.path, freed: p.freed || 0, totalFreed: running, done, total });
+        },
+      })
+      : { totalFreed: 0, errors: [], results: [] };
+
+    const items = [...refusedItems.map((r) => ({ ...r, outcome: 'refused' }))];
+    const ran = new Set();
+    for (const r of del.results || []) {
+      ran.add(r.path);
+      items.push({ ...described.get(r.path), outcome: r.ok ? 'removed' : 'failed', bytes: r.freed, reason: r.ok ? undefined : r.error, code: r.code });
     }
-    return { ok: true, ...res, refused };
-  } catch (err) { return { ok: false, error: err.message }; }
+    for (const r of tr.results || []) {
+      ran.add(r.path);
+      items.push({ ...described.get(r.path), outcome: r.ok ? 'trashed' : 'failed', bytes: r.freed, reason: r.ok ? undefined : r.error, code: r.code });
+    }
+    // Anything that never ran (the clean was stopped) is a failure, not a success.
+    for (const j of allowed) {
+      if (!ran.has(j.path)) items.push({ ...described.get(j.path), outcome: 'failed', bytes: 0, reason: 'Not cleaned: the clean was stopped first.' });
+    }
+    putHistory(historyLog.finishedEntry({ ...started, finishedAt: Date.now(), status: 'done', items }));
+
+    const errors = [...del.errors, ...tr.errors].map((er) => ({ ...er }));
+    const trashed = (tr.results || []).filter((r) => r.ok).map((r) => r.path);
+    return { ok: true, totalFreed: del.totalFreed + tr.totalFreed, errors, refused, trashed, historyId };
+  } catch (err) {
+    // The clean broke part way: record it as interrupted, never as done.
+    if (started) {
+      try {
+        const cur = readHistory().find((h) => h && h.id === historyId);
+        if (cur && cur.status === 'started') putHistory(historyLog.interruptEntry(cur, Date.now()));
+      } catch (_) { /* the next launch marks it interrupted */ }
+    }
+    return { ok: false, error: err.message, historyId };
+  }
 });
 
 ipcMain.handle('recommendations', (_e, { projects, sysTargets }) => buildRecommendations(projects || [], sysTargets || [], loadPrefs(), cache.docker));
 
-ipcMain.handle('open:reveal', (_e, p) => { shell.showItemInFolder(p); });
-ipcMain.handle('open:path', (_e, p) => shell.openPath(p));
-ipcMain.handle('open:external', (_e, url) => shell.openExternal(url));
+/**
+ * Paths the renderer may open or reveal: only what Spaci itself found or was
+ * configured with. Anything else could launch an arbitrary file.
+ */
+function openablePaths() {
+  const out = [];
+  for (const p of cache.projects || []) {
+    if (p && p.path) out.push(p.path);
+    for (const it of (p && p.items) || []) if (it && it.path) out.push(it.path);
+  }
+  out.push(...TARGET_INDEX.keys(), ...lastLargeFiles, ...lastTopChildren);
+  for (const t of cache.system || []) out.push(...((t && t.existingPaths) || []));
+  const roots = loadPrefs().scanRoots;
+  if (Array.isArray(roots)) out.push(...roots);
+  return ipcGuards.knownPathSet(out);
+}
+
+ipcMain.handle('open:reveal', (_e, p) => {
+  if (!openablePaths().has(p)) return 'Not allowed';
+  shell.showItemInFolder(p);
+  return '';
+});
+ipcMain.handle('open:path', (_e, p) => {
+  if (!openablePaths().has(p)) return 'Not allowed';
+  return shell.openPath(p);
+});
+// Only web and mail links leave the app; javascript:, file: and the rest do not.
+ipcMain.handle('open:external', async (_e, url) => {
+  if (!ipcGuards.isSafeExternalUrl(url)) return false;
+  try { await shell.openExternal(url.trim()); return true; } catch { return false; }
+});
 
 ipcMain.handle('scan:largefiles', async (e, root, minBytes) => {
+  const prefs = loadPrefs();
+  const where = ipcGuards.resolveLargeFilesRoot(root, { home: os.homedir(), scanRoots: prefs.scanRoots });
+  if (!where.ok) return { ok: false, error: where.error };
   aborts.largefiles?.abort(); aborts.largefiles = new AbortController();
-  const onProgress = (p) => e.sender.send('largefiles:progress', p);
+  const onProgress = progressTo(e.sender, 'largefiles:progress');
   try {
-    const res = await largefiles.scanLargeFiles(root || os.homedir(), minBytes, onProgress, aborts.largefiles.signal);
+    const res = await largefiles.scanLargeFiles(where.root, ipcGuards.clampMinBytes(minBytes), onProgress, aborts.largefiles.signal);
     // Remember what was found: only these files may be deleted from that screen.
     lastLargeFiles = new Set((res.files || []).map((f) => f.path));
     return { ok: true, ...res };

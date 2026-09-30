@@ -186,4 +186,4 @@ async function enforceTargetRules(jobs, options = {}) {
   return { allowed, refused };
 }
 
-module.exports = { AI_TOOL_NAMES, buildTargetIndex, enforceTargetRules, nestedTargetPaths };
+module.exports = { AI_TOOL_NAMES, buildTargetIndex, enforceTargetRules, nestedTargetPaths, keyOf };

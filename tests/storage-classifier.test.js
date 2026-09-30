@@ -171,3 +171,33 @@ test('Windows %TEMP% is not counted twice when it is the local Temp folder', () 
   const elsewhere = buildSystemTargets({ platform: 'win32', home: base.USERPROFILE, env: { ...base, TEMP: 'D:\\Temp' } });
   assert.ok(elsewhere.some((t) => t.id === 'windows-temp'));
 });
+
+test('the Trash is never preselected and is marked irreversible on macOS and Linux', () => {
+  for (const platform of ['darwin', 'linux']) {
+    const trash = buildSystemTargets({ platform, home: '/home/demo', env: {} }).find((t) => t.id === 'trash');
+    assert.ok(trash, platform);
+    assert.equal(trash.safe, false, platform);
+    assert.equal(trash.reversible, false, platform);
+    assert.match(trash.description, /permanently/);
+  }
+});
+
+test('Xcode archives are irreversible and unsafe', () => {
+  const t = buildSystemTargets({ platform: 'darwin', home: '/Users/demo', env: {} }).find((x) => x.id === 'xcode-archives');
+  assert.equal(t.safe, false);
+  assert.equal(t.reversible, false);
+});
+
+test('no target description claims nothing is lost for logs or saved state', () => {
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const env = platform === 'win32' ? { LOCALAPPDATA: 'C:\\Users\\D\\AppData\\Local', USERPROFILE: 'C:\\Users\\D' } : {};
+    for (const t of buildSystemTargets({ platform, home: platform === 'win32' ? 'C:\\Users\\D' : '/home/d', env })) {
+      assert.doesNotMatch(t.description, /nothing is lost|just open fresh|one click/i, t.id);
+      assert.doesNotMatch(t.description, /\u2014/, t.id);
+    }
+  }
+  const mac = buildSystemTargets({ platform: 'darwin', home: '/Users/d', env: {} });
+  assert.match(mac.find((t) => t.id === 'user-logs').description, /cannot be recovered/);
+  assert.match(mac.find((t) => t.id === 'saved-state').restoreHint, /not restored/);
+  for (const id of ['user-logs', 'saved-state']) assert.equal(mac.find((t) => t.id === id).reversible, false, id + ' cannot be restored');
+});

@@ -1,7 +1,8 @@
 'use strict';
 /**
- * Cross-platform system cleaner: a catalog of safe, reclaimable cache locations.
- * Every target here is regenerable; nothing user-created is listed.
+ * Cross-platform system cleaner: a catalog of reclaimable locations. Most are
+ * regenerable caches; the few that are not (the Trash, Xcode archives, AI
+ * session history) are marked reversible:false and are never preselected.
  * Sizes are measured live (du on macOS/Linux, a bounded Node walk on Windows).
  * Cleaning empties contents (keeps the dir).
  */
@@ -14,7 +15,8 @@ const { buildSystemTargets } = require('./storage-classifier');
 /**
  * Each target: { id, name, description, category, icon, safe, reversible, mode,
  *   paths:[absolute paths] }. mode is 'contents' for all (empty the dir, keep it).
- * reversible is true for every target since all listed caches regenerate.
+ * reversible is false where a clean cannot be undone or rebuilt; the clean
+ * handler then refuses the job unless the user confirmed it.
  */
 const TARGETS = buildSystemTargets();
 
