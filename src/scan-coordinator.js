@@ -85,6 +85,18 @@ function createScanCoordinator({ log = console } = {}) {
 
     abortAll(reason = 'quit') { for (const t of lanes.values()) t.abort(reason); },
 
+    /**
+     * Give up on every scan from `source` (a watchdog timeout): abort it and
+     * free its lane now, so it can never commit even if it settles later.
+     */
+    expire(source, reason = 'timeout') {
+      for (const [k, t] of [...lanes]) {
+        if (t.source !== source) continue;
+        t.abort(reason);
+        lanes.delete(k);
+      }
+    },
+
     close() { closed = true; this.abortAll('quit'); },
   };
 }

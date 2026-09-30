@@ -264,3 +264,112 @@ test('a throwing gate or state reader is logged and retried, not fatal', async (
   await r.clock.advance(DEFAULTS.deferMs);
   assert.equal(r.runs.length, 1);
 });
+
+// ---------- regressions from review (scratchpad sched.js) ----------
+
+/**
+ * Mirrors main.js: getState takes the later of the scheduler's own record and
+ * the manual per-kind scan times, ignoring timestamps from the future.
+ */
+function reviewRig({ st = {}, kinds = {}, task, options }) {
+  const clock = fakeClock();
+  const cache = { schedule: { ...st }, kindScannedAt: { ...kinds } };
+  let runs = 0;
+  let arms = 0;
+  const setTimer = (fn, ms) => {
+    if (++arms > 5000) throw new Error(`tight loop: ${arms} timers armed`);
+    return clock.setTimer(fn, ms);
+  };
+  const seen = (v) => (typeof v === 'number' && v > 0 && v <= clock.now() ? v : 0);
+  const onTimeout = [];
+  const s = createScheduler({
+    task: async () => { runs++; return task(clock, cache); },
+    getConfig: () => ({ intervalMs: 6 * HOUR }),
+    getState: () => {
+      const k = cache.kindScannedAt;
+      return { ...cache.schedule, lastCompletedAt: Math.max(cache.schedule.lastCompletedAt || 0, Math.min(seen(k.projects), seen(k.system))) };
+    },
+    saveState: (x) => { cache.schedule = x; },
+    onTimeout: () => onTimeout.push(clock.now()),
+    log: quietLog(),
+    now: clock.now,
+    setTimer,
+    clearTimer: clock.clearTimer,
+    options,
+  });
+  return { s, clock, runs: () => runs, arms: () => arms, onTimeout };
+}
+
+const FUTURE = Date.UTC(2100, 0, 1);
+const okTask = (c, cache) => { cache.kindScannedAt = { projects: c.now(), system: c.now() }; return { status: 'ok' }; };
+
+test('future kind timestamps (NTP correction) do not cause a run loop', async () => {
+  const r = reviewRig({ kinds: { projects: FUTURE, system: FUTURE }, task: () => ({ status: 'partial' }) });
+  r.s.start();
+  await r.clock.advance(25 * HOUR);
+  assert.ok(r.runs() >= 4 && r.runs() <= 6, `runs=${r.runs()}`);
+});
+
+test('a completed run that does not advance state waits a full interval', async () => {
+  // State never moves: saveState is dropped.
+  const clock = fakeClock();
+  let runs = 0;
+  const s = createScheduler({
+    task: async () => { runs++; return { status: 'ok' }; },
+    getConfig: () => ({ intervalMs: 6 * HOUR }),
+    getState: () => ({ lastCompletedAt: FUTURE }),
+    saveState: () => {},
+    log: quietLog(), now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  s.start();
+  await clock.advance(25 * HOUR);
+  assert.ok(runs >= 4 && runs <= 5, `runs=${runs}`);
+});
+
+test('future lastAttemptAt with failures: bounded retries', async () => {
+  const r = reviewRig({ st: { lastAttemptAt: FUTURE, failures: 5 }, task: () => ({ status: 'failed' }) });
+  r.s.start();
+  await r.clock.advance(25 * HOUR);
+  assert.ok(r.runs() > 0 && r.runs() <= 10, `runs=${r.runs()}`);
+});
+
+test('always failing: bounded by backoff', async () => {
+  const r = reviewRig({ task: () => ({ status: 'failed' }) });
+  r.s.start();
+  await r.clock.advance(25 * HOUR);
+  assert.ok(r.runs() <= 9, `runs=${r.runs()}`);
+});
+
+test('a "closed" result does not loop', async () => {
+  const r = reviewRig({ task: () => ({ status: 'closed' }) });
+  r.s.start();
+  await r.clock.advance(25 * HOUR);
+  assert.ok(r.runs() <= 6, `runs=${r.runs()}`);
+});
+
+test('sleep for three days with normal runs: one catch-up, then the normal cadence', async () => {
+  const r = reviewRig({ task: okTask });
+  r.s.start();
+  await r.clock.advance(HOUR);
+  r.clock.sleep(3 * 24 * HOUR);
+  r.s.wake();
+  await r.clock.advance(24 * HOUR);
+  // 1 at startup, 1 catch-up after wake, then every 6 hours: 3 more in 24 hours.
+  assert.equal(r.runs(), 5);
+});
+
+test('a hung task is released by the watchdog, reported, and the scheduler carries on', async () => {
+  let n = 0;
+  const r = reviewRig({
+    task: (c, cache) => { n++; return n === 1 ? new Promise(() => {}) : okTask(c, cache); },
+    options: { runTimeoutMs: HOUR },
+  });
+  r.s.start();
+  await r.clock.advance(HOUR - 1000);
+  assert.ok(r.s.running, 'still running before the watchdog');
+  await r.clock.advance(31 * 1000);
+  assert.equal(r.s.running, null, 'released');
+  assert.equal(r.onTimeout.length, 1, 'owner told to abort it');
+  await r.clock.advance(24 * HOUR);
+  assert.ok(r.runs() >= 4, `runs=${r.runs()}`);
+});

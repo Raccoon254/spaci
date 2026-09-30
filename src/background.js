@@ -131,8 +131,12 @@ function createScanService(d) {
    * 'ok' | 'partial' (some phase failed) | 'failed' (every phase failed) |
    * 'busy' (a manual scan holds the lanes) | 'preempted' | 'closed'.
    */
+  let bgGen = 0;
   async function backgroundRun() {
     if (coordinator.closed) return { status: 'closed' };
+    const gen = ++bgGen;
+    // False once the app quits or the watchdog gave up on this run.
+    const live = () => gen === bgGen && !coordinator.closed;
     const startedAt = now();
     const errors = [];
     const phases = {};
@@ -162,7 +166,8 @@ function createScanService(d) {
           coordinator.end(tp);
         }
       }
-      if (preempted || coordinator.closed) return { status: coordinator.closed ? 'closed' : 'preempted', errors, phases };
+      if (!live()) return { status: coordinator.closed ? 'closed' : 'expired', errors, phases };
+      if (preempted) return { status: 'preempted', errors, phases };
 
       // ---- system ----
       const ts = coordinator.begin('system', 'background');
@@ -182,7 +187,7 @@ function createScanService(d) {
           coordinator.end(ts);
         }
       }
-      if (coordinator.closed) return { status: 'closed', errors, phases };
+      if (!live()) return { status: coordinator.closed ? 'closed' : 'expired', errors, phases };
       if (!tp && !ts) return { status: 'busy', errors, phases };
 
       // ---- enrich the largest projects so their detail pages open instantly ----
@@ -192,18 +197,18 @@ function createScanService(d) {
         const top = [...store.get().projects].sort((a, b) => (b.cleanableSize || 0) - (a.cleanableSize || 0)).slice(0, enrichTop);
         let done = 0;
         for (const pr of top) {
-          if (coordinator.closed) { ac.abort(); break; }
+          if (!live()) { ac.abort(); break; }
           try {
             const r = await enrichProject(pr.path, ac.signal);
-            if (coordinator.closed) break;
+            if (!live()) break;
             store.get().enrich[pr.path] = { totalSize: r.totalSize, git: r.git, at: now() };
             done++;
           } catch (e) { log.warn && log.warn('[bg] enrich failed for', pr.path, msg(e)); }
         }
-        if (done) store.write();
+        if (done && live()) store.write();
         phases.enrich = { durationMs: now() - e0, count: done };
       }
-      if (coordinator.closed) return { status: 'closed', errors, phases };
+      if (!live()) return { status: coordinator.closed ? 'closed' : 'expired', errors, phases };
 
       // ---- disk breakdown ----
       if (refreshBreakdown) {
@@ -221,7 +226,7 @@ function createScanService(d) {
       errors.push({ phase: 'background', message: msg(e) });
       log.error('[bg] background scan failed:', e);
     } finally {
-      if (!coordinator.closed) {
+      if (live()) {
         const c = store.get();
         c.schedule = { ...(c.schedule || {}), lastRun: { startedAt, durationMs: now() - startedAt, errors, phases } };
         store.write();
@@ -237,6 +242,12 @@ function createScanService(d) {
     manualSystem,
     backgroundRun,
     cancel: (kind) => coordinator.cancel(kind),
+    /** Watchdog gave up: abort the background run and make sure it never writes. */
+    expireBackground() {
+      bgGen++;
+      coordinator.expire('background', 'timeout');
+      try { emit('bg:scan', { active: false }); } catch (_) { /* window gone */ }
+    },
     close() { coordinator.close(); store.close(); },
   };
 }

@@ -249,3 +249,27 @@ test('writes land in start order even when scans finish out of order', async () 
   await Promise.all([a, b, c]);
   assert.deepEqual(h.store.writes.map((w) => w.projects[0].path), ['/c']);
 });
+
+test('watchdog expiry: a hung background scan that settles later never writes, and the lane is free', async () => {
+  const h = harness();
+  const run = h.svc.backgroundRun();
+  await flush();
+  const writesBefore = h.store.writes.length;
+  h.svc.expireBackground();
+  assert.equal(h.jobs.projects[0].signal.aborted, true);
+  assert.equal(h.coordinator.busy('projects'), false, 'lane released');
+  assert.deepEqual(h.emitted.filter(([ch]) => ch === 'bg:scan').map(([, p]) => p.active), [true, false]);
+  // A new background run can start while the old one is still hung.
+  const run2 = h.svc.backgroundRun();
+  await flush();
+  assert.equal(h.jobs.projects.length, 2);
+  // The hung scan finally returns: nothing from it is written.
+  h.jobs.projects[0].finish({ projects: [project('/home/stale')] });
+  assert.equal((await run).status, 'expired');
+  assert.equal(h.store.writes.length, writesBefore);
+  h.jobs.projects[1].finish({ projects: [project('/home/fresh')] });
+  await flush();
+  h.jobs.system[0].finish([]);
+  assert.equal((await run2).status, 'ok');
+  assert.deepEqual(h.store.get().projects.map((x) => x.path), ['/home/fresh']);
+});

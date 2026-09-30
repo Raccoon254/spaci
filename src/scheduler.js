@@ -25,6 +25,7 @@ const DEFAULTS = {
   deferMs: 10 * MIN,
   retryBaseMs: 15 * MIN,
   futureSlackMs: 5 * MIN,
+  runTimeoutMs: 0, // 0 = no watchdog; owners set one
 };
 
 /** Clamp a user-supplied interval (hours) to something sane. */
@@ -84,7 +85,7 @@ const DEFERRED = new Set(['busy', 'preempted', 'skipped', 'deferred']);
  */
 function createScheduler({
   name = 'scheduler', task, getConfig, gate = () => ({ run: true, reason: 'due' }),
-  getState, saveState = () => {}, log = console,
+  getState, saveState = () => {}, log = console, onTimeout = () => {},
   now = () => Date.now(), setTimer = setTimeout, clearTimer = clearTimeout, options = {},
 }) {
   const opt = { ...DEFAULTS, ...options };
@@ -93,6 +94,9 @@ function createScheduler({
   let started = false;
   let stopped = false;
   let lastDecision = null;
+  // In-memory floor for the next run after a completed one. It holds even if
+  // the persisted state fails to move (a future timestamp, a failed save).
+  let lastFinished = 0;
 
   function arm(delay) {
     if (stopped) return;
@@ -104,7 +108,10 @@ function createScheduler({
   function nextDue() {
     const cfg = getConfig();
     const st = getState() || {};
-    return computeNextRun({ now: now(), intervalMs: cfg.intervalMs, ...st, retryBaseMs: opt.retryBaseMs, futureSlackMs: opt.futureSlackMs });
+    const t = now();
+    const due = computeNextRun({ now: t, intervalMs: cfg.intervalMs, ...st, retryBaseMs: opt.retryBaseMs, futureSlackMs: opt.futureSlackMs });
+    // Ignored if the clock has since gone backwards past it.
+    return lastFinished && lastFinished <= t ? Math.max(due, lastFinished + cfg.intervalMs) : due;
   }
 
   function tick() {
@@ -130,17 +137,34 @@ function createScheduler({
     const startedAt = now();
     running = (async () => {
       let result;
+      // Watchdog: a task that never settles is recorded as a failure and
+      // releases the scheduler. onTimeout lets the owner abort it so its late
+      // result is never applied.
+      let wd = null;
       try {
-        result = (await task()) || { status: 'ok' };
+        const work = Promise.resolve().then(task);
+        const racers = [work];
+        if (opt.runTimeoutMs > 0) {
+          racers.push(new Promise((res) => { wd = setTimer(() => res({ status: 'failed', reason: 'timeout', timedOut: true }), opt.runTimeoutMs); }));
+        }
+        work.catch(() => {}); // a rejection after a timeout is not unhandled
+        result = (await Promise.race(racers)) || { status: 'ok' };
       } catch (e) {
         log.error(`[${name}] run failed:`, e);
         result = { status: 'failed', error: e };
+      } finally {
+        if (wd) clearTimer(wd);
+      }
+      if (result.timedOut) {
+        log.error(`[${name}] run timed out after ${opt.runTimeoutMs} ms`);
+        try { onTimeout(); } catch (e) { log.error(`[${name}] onTimeout failed:`, e); }
       }
       const status = result.status;
       try {
         const st = { ...(getState() || {}) };
         const finished = now();
         if (COMPLETED.has(status)) {
+          lastFinished = finished;
           saveState({ ...st, lastCompletedAt: finished, lastAttemptAt: finished, failures: 0 });
         } else if (!DEFERRED.has(status) && status !== 'closed') {
           saveState({ ...st, lastAttemptAt: finished, failures: (st.failures || 0) + 1 });
@@ -155,8 +179,14 @@ function createScheduler({
     p.then((res) => {
       if (running === p) running = null;
       if (stopped) return;
-      if (DEFERRED.has(res.status)) arm(opt.deferMs);
-      else tick();
+      if (res.status === 'closed') { stopped = true; return; } // the owner is shutting down
+      if (DEFERRED.has(res.status)) { arm(opt.deferMs); return; }
+      // Always through a timer: if the run did not move getState() forward
+      // (say a timestamp is in the future), an immediate tick() would loop.
+      let due;
+      try { due = nextDue(); } catch (_) { due = now() + opt.deferMs; }
+      const delay = due - now();
+      arm(Math.max(delay, opt.rescheduleDelayMs));
     });
     return p;
   }
