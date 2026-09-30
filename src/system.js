@@ -48,7 +48,9 @@ async function walkSize(root, deadline = Date.now() + 30000) {
       } else if (entry.isFile()) {
         try {
           const stat = await fs.promises.stat(full);
-          total += stat.size;
+          // Allocated bytes, the same measure du and the cleaner use, so the
+          // size shown matches what a clean actually frees.
+          total += typeof stat.blocks === 'number' ? stat.blocks * 512 : stat.size;
         } catch {
           // ignore unreadable entries
         }

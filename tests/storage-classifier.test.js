@@ -130,7 +130,10 @@ test('Hugging Face models are opt-in and protected from the generic cache wipe',
     assert.equal(hf.safe, false, `${platform} huggingface must not be preselected`);
     const generic = targets.find((t) => t.paths.includes(`${home}/.cache`));
     assert.ok(generic, `${platform} has a generic ~/.cache target`);
-    assert.deepEqual(generic.protect, ['huggingface']);
+    assert.equal(generic.safe, false, `${platform} generic ~/.cache must be opt-in`);
+    for (const name of ['huggingface', 'lm-studio', 'whisper', 'ollama']) {
+      assert.ok(generic.protect.includes(name), `${platform} generic ~/.cache must protect ${name}`);
+    }
   }
   assert.ok(buildSystemTargets({ platform: 'darwin', home: '/u', env: { HF_HOME: '/data/hf' } })
     .find((t) => t.id === 'huggingface').paths.includes('/data/hf'));
@@ -148,4 +151,23 @@ test('targets without protect do not carry an empty protect field', () => {
   for (const t of targets) {
     if ('protect' in t) assert.ok(Array.isArray(t.protect) && t.protect.length > 0, t.id);
   }
+});
+
+test('Linux cache targets follow XDG_CACHE_HOME, and ignore a relative value', () => {
+  const find = (env) => buildSystemTargets({ platform: 'linux', home: '/home/x', env });
+  const moved = find({ XDG_CACHE_HOME: '/fast/cache' });
+  assert.ok(moved.find((t) => t.id === 'pip').paths.includes('/fast/cache/pip'));
+  assert.ok(moved.find((t) => t.id === 'user-cache').paths.includes('/fast/cache'));
+  const relative = find({ XDG_CACHE_HOME: 'relative/cache' });
+  assert.ok(relative.find((t) => t.id === 'pip').paths.includes('/home/x/.cache/pip'));
+  const cats = buildStoryCategories({ platform: 'linux', home: '/home/x', env: { XDG_CACHE_HOME: '/fast/cache' } });
+  assert.ok(cats.find((c) => c.key === 'caches').dirs.includes('/fast/cache'));
+});
+
+test('Windows %TEMP% is not counted twice when it is the local Temp folder', () => {
+  const base = { USERPROFILE: 'C:\\Users\\D', LOCALAPPDATA: 'C:\\Users\\D\\AppData\\Local' };
+  const same = buildSystemTargets({ platform: 'win32', home: base.USERPROFILE, env: { ...base, TEMP: 'c:\\users\\d\\appdata\\local\\temp' } });
+  assert.ok(!same.some((t) => t.id === 'windows-temp'));
+  const elsewhere = buildSystemTargets({ platform: 'win32', home: base.USERPROFILE, env: { ...base, TEMP: 'D:\\Temp' } });
+  assert.ok(elsewhere.some((t) => t.id === 'windows-temp'));
 });

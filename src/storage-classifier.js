@@ -65,6 +65,20 @@ function huggingFaceHome(ctx, fallback) {
 
 const HF_DESCRIPTION = 'Downloaded AI models and datasets. Safe to remove, but re-downloading large models can take a long time.';
 
+// Linux cache root: XDG_CACHE_HOME when it is an absolute path (relative
+// values are invalid per the XDG spec and ignored), else ~/.cache.
+function xdgCache(ctx, ...parts) {
+  const env = ctx.env.XDG_CACHE_HOME;
+  const base = env && ctx.pathApi.isAbsolute(env) ? env : ctx.join('.cache');
+  return ctx.pathApi.join(base, ...parts);
+}
+
+// ~/.cache is not only cache: model stores and tool installs live there too,
+// and several cannot be fetched again (sideloaded LM Studio models). So the
+// generic wipe is opt-in and always spares these, whatever else is selected.
+const CLI_CACHE_PROTECT = ['huggingface', 'lm-studio', 'whisper', 'torch', 'ms-playwright', 'ollama', 'llama.cpp', 'gpt4all'];
+const CLI_CACHE_DESCRIPTION = 'Caches command-line tools keep in ~/.cache, after known developer caches are counted separately. Some tools store downloads here that take time to fetch again, so review before cleaning. Model stores are always kept.';
+
 function platformContext(options = {}) {
   const platform = options.platform || process.platform;
   const home = options.home || os.homedir();
@@ -106,20 +120,20 @@ function buildDeveloperTargets(ctx) {
   if (platform === 'linux') {
     return [
       makeTarget('npm', 'npm cache', 'Developer', 'node', [join('.npm', '_cacache')], 'Downloaded npm package tarballs. Rebuilds on next install.'),
-      makeTarget('yarn', 'Yarn cache', 'Developer', 'node', [join('.cache', 'yarn')], 'Yarn package cache.'),
+      makeTarget('yarn', 'Yarn cache', 'Developer', 'node', [xdgCache(ctx, 'yarn')], 'Yarn package cache.'),
       makeTarget('pnpm', 'pnpm store', 'Developer', 'node', [join('.local', 'share', 'pnpm', 'store')], 'pnpm content-addressable store.'),
       makeTarget('gradle', 'Gradle cache', 'Developer', 'gradle', [join('.gradle', 'caches')], 'Global Gradle build cache & downloaded deps.'),
       makeTarget('gradle-wrapper', 'Gradle wrapper downloads', 'Developer', 'gradle', [join('.gradle', 'wrapper', 'dists')], 'Gradle distributions fetched by project wrappers. Re-downloads on the next build.'),
       makeTarget('maven', 'Maven repository', 'Developer', 'java', [join('.m2', 'repository')], 'Downloaded Maven artifacts. Re-downloads on build.'),
       makeTarget('nuget', 'NuGet packages', 'Developer', 'box', [join('.nuget', 'packages')], 'Downloaded NuGet packages. Re-downloads on restore.'),
       makeTarget('cargo', 'Cargo registry', 'Developer', 'rust', [join('.cargo', 'registry', 'cache'), join('.cargo', 'registry', 'src')], 'Rust crate cache.'),
-      makeTarget('pip', 'pip cache', 'Developer', 'python', [join('.cache', 'pip')], 'Python pip download cache.'),
-      makeTarget('go', 'Go build/mod cache', 'Developer', 'go', [join('.cache', 'go-build'), goModCache(ctx, join('go', 'pkg', 'mod'))], 'Go build cache and downloaded modules. Re-downloads on the next build.'),
+      makeTarget('pip', 'pip cache', 'Developer', 'python', [xdgCache(ctx, 'pip')], 'Python pip download cache.'),
+      makeTarget('go', 'Go build/mod cache', 'Developer', 'go', [xdgCache(ctx, 'go-build'), goModCache(ctx, join('go', 'pkg', 'mod'))], 'Go build cache and downloaded modules. Re-downloads on the next build.'),
       makeTarget('pub', 'Dart/Flutter pub', 'Developer', 'flutter', [join('.pub-cache', 'hosted')], 'Dart/Flutter downloaded packages.'),
       makeTarget('dart-server', 'Dart analysis server', 'Developer', 'flutter', [join('.dartServer')], 'Dart and Flutter analysis cache. Rebuilds the next time your editor analyses code.'),
       makeTarget('bun', 'Bun cache', 'Developer', 'flash', [join('.bun', 'install', 'cache')], 'Bun install cache.'),
-      makeTarget('deno', 'Deno cache', 'Developer', 'flash', [join('.cache', 'deno')], 'Deno dependency cache.'),
-      makeTarget('huggingface', 'Hugging Face models', 'Developer', 'cpu', [huggingFaceHome(ctx, join('.cache', 'huggingface'))], HF_DESCRIPTION, { safe: false }),
+      makeTarget('deno', 'Deno cache', 'Developer', 'flash', [xdgCache(ctx, 'deno')], 'Deno dependency cache.'),
+      makeTarget('huggingface', 'Hugging Face models', 'Developer', 'cpu', [huggingFaceHome(ctx, xdgCache(ctx, 'huggingface'))], HF_DESCRIPTION, { safe: false }),
     ];
   }
 
@@ -154,24 +168,30 @@ function buildSystemTargets(options = {}) {
       makeTarget('xcode-devicesupport', 'iOS DeviceSupport', 'Xcode', 'apple', [lib('Developer', 'Xcode', 'iOS DeviceSupport')], 'Cached symbols per iOS version. Regenerates when you attach a device.', { storyCategory: 'xcode' }),
       makeTarget('simulator-caches', 'Simulator caches', 'Xcode', 'apple', [lib('Developer', 'CoreSimulator', 'Caches')], 'Core Simulator caches.', { storyCategory: 'xcode' }),
       makeTarget('user-caches', 'Other app caches', 'System', 'broom-2', [lib('Caches')], 'Generic per-app caches after known developer and browser caches are counted separately.', { storyCategory: 'caches' }),
-      makeTarget('cli-cache', 'Command-line tool caches', 'System', 'database', [join('.cache')], 'Caches command-line tools keep in ~/.cache, after known developer caches are counted separately.', { storyCategory: 'caches', protect: ['huggingface'] }),
+      makeTarget('cli-cache', 'Command-line tool caches', 'System', 'database', [join('.cache')], CLI_CACHE_DESCRIPTION, { storyCategory: 'caches', safe: false, protect: CLI_CACHE_PROTECT }),
       makeTarget('user-logs', 'User logs', 'System', 'log', [lib('Logs')], 'Application log files.', { storyCategory: 'caches' }),
       makeTarget('trash', 'Trash', 'System', 'trash', [join('.Trash')], 'Files in the Trash.', { storyCategory: 'system' }),
       makeTarget('saved-state', 'Saved app state', 'System', 'grid', [lib('Saved Application State')], 'Window restore state. Apps just open fresh.', { storyCategory: 'system' }),
     );
   } else if (platform === 'linux') {
     targets.push(
-      makeTarget('user-cache', 'Other user cache', 'System', 'database', [join('.cache')], 'Generic per-user cache after known developer and browser caches are counted separately.', { storyCategory: 'caches', protect: ['huggingface'] }),
+      makeTarget('user-cache', 'Other user cache', 'System', 'database', [xdgCache(ctx)], CLI_CACHE_DESCRIPTION.replace('~/.cache', 'your cache folder'), { storyCategory: 'caches', safe: false, protect: CLI_CACHE_PROTECT }),
       makeTarget('trash', 'Trash', 'System', 'trash', [join('.local', 'share', 'Trash', 'files'), join('.local', 'share', 'Trash', 'info')], 'Files in the Trash.', { storyCategory: 'system' }),
-      makeTarget('thumbnails', 'Thumbnails', 'System', 'image', [join('.cache', 'thumbnails')], 'Cached image thumbnails. Regenerated on demand.', { storyCategory: 'caches' }),
+      makeTarget('thumbnails', 'Thumbnails', 'System', 'image', [xdgCache(ctx, 'thumbnails')], 'Cached image thumbnails. Regenerated on demand.', { storyCategory: 'caches' }),
     );
   } else if (platform === 'win32') {
     const local = env.LOCALAPPDATA;
     const temp = env.TEMP;
     targets.push(
       makeTarget('local-temp', 'User temp files', 'System', 'trash', [from(local, 'Temp')], 'Per-user temporary files.', { storyCategory: 'caches' }),
-      makeTarget('windows-temp', 'Windows temp files', 'System', 'trash', [temp], 'Temporary files from %TEMP%.', { storyCategory: 'caches' }),
     );
+    // %TEMP% is usually %LOCALAPPDATA%\Temp, which would be sized and counted
+    // twice. Only list it separately when it really is somewhere else.
+    const localTemp = from(local, 'Temp');
+    const sameFolder = (a, b) => Boolean(a && b) && ctx.pathApi.resolve(a).toLowerCase() === ctx.pathApi.resolve(b).toLowerCase();
+    if (temp && !sameFolder(temp, localTemp)) {
+      targets.push(makeTarget('windows-temp', 'Windows temp files', 'System', 'trash', [temp], 'Temporary files from %TEMP%.', { storyCategory: 'caches' }));
+    }
   }
 
   return targets
@@ -223,7 +243,7 @@ function buildStoryCategories(options = {}) {
     platform === 'darwin'
       ? [join('Library', 'Caches'), join('Library', 'Logs'), join('.cache')]
       : platform === 'linux'
-        ? [join('.cache')]
+        ? [xdgCache(ctx)]
         : [env.TEMP, from(env.LOCALAPPDATA, 'Temp')];
 
   const videoDir = platform === 'darwin' ? join('Movies') : join('Videos');
