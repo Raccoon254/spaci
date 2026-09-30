@@ -78,16 +78,23 @@ function parseDuBytes(stdout) {
   return Number.isNaN(kb) ? 0 : kb * 1024;
 }
 
+// Folders whose `du` did not finish. A big developer folder (node_modules by
+// the thousand) can take minutes; counting it as 0 silently moved tens of GB
+// into the System remainder, so timeouts are recorded and reported instead.
+const timedOut = new Set();
+const DU_TIMEOUT_MS = 300000;
+
 function duSize(p) {
   return new Promise((resolve) => {
     // `du -sk` reports real disk blocks used (APFS clones counted once). On
     // failure/timeout we resolve 0 rather than falling back to a node walk,
     // because that walk sums APPARENT sizes and APFS clones inflate it wildly
     // (e.g. ~/Library measured at 365 GB instead of 62 GB).
-    execFile('du', ['-sk', p], { timeout: 90000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+    execFile('du', ['-sk', p], { timeout: DU_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
       const bytes = parseDuBytes(stdout);
       if (bytes > 0 || !err) { resolve(bytes); return; }
-      resolve(err ? 0 : 0);
+      if (err && (err.killed || err.signal)) timedOut.add(p);
+      resolve(0);
     });
   });
 }
@@ -209,6 +216,40 @@ function attributeSystemData(input) {
   };
 }
 
+// The boot disk's other APFS volumes (the sealed system, Preboot, Recovery,
+// swap, pending updates). They share the container, so statfs counts them in
+// `used`, but no folder under your home holds them.
+const VOLUME_LABELS = {
+  System: 'macOS system files', Preboot: 'Startup files (Preboot)', Recovery: 'Recovery',
+  VM: 'Swap (virtual memory)', Update: 'Pending macOS updates',
+};
+function parseApfsVolumes(list, containerRef) {
+  const out = [];
+  for (const c of (list && list.Containers) || []) {
+    if (c.ContainerReference !== containerRef) continue;
+    for (const v of c.Volumes || []) {
+      const role = (v.Roles || [])[0] || '';
+      if (role === 'Data' || !VOLUME_LABELS[role]) continue;
+      const bytes = Number(v.CapacityInUse) || 0;
+      if (bytes > 0) out.push({ role, name: VOLUME_LABELS[role], bytes });
+    }
+  }
+  return out.sort((a, b) => b.bytes - a.bytes);
+}
+function plist(args) {
+  return new Promise((resolve) => {
+    execFile('/bin/sh', ['-c', `diskutil ${args} -plist | plutil -convert json -o - -`], { timeout: 8000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      if (err) { resolve(null); return; }
+      try { resolve(JSON.parse(stdout)); } catch { resolve(null); }
+    });
+  });
+}
+async function osVolumes() {
+  const [info, list] = await Promise.all([plist('info /'), plist('apfs list')]);
+  if (!info || !list || !info.APFSContainerReference) return [];
+  return parseApfsVolumes(list, info.APFSContainerReference);
+}
+
 function localSnapshots() {
   return new Promise((resolve) => {
     execFile('tmutil', ['listlocalsnapshots', '/'], { timeout: 5000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
@@ -283,6 +324,7 @@ async function diskBreakdown(home = os.homedir()) {
 
   // 2. Measure every directory of every category concurrently, sharing one
   //    global deadline so the whole pass stays bounded (~20s).
+  timedOut.clear();
   const deadline = Date.now() + DEADLINE_MS;
   const defs = buildStoryCategories({ home });
 
@@ -304,6 +346,7 @@ async function diskBreakdown(home = os.homedir()) {
   let measured = [];
   let measuredTotal = 0;
   for (const def of defs) {
+    const partial = def.dirs.some((d) => timedOut.has(d));
     let bytes = 0;
     for (const dir of def.dirs) bytes += sizeByDir.get(dir) || 0;
     // Parent buckets such as ~/Library/Caches subtract known child targets
@@ -321,6 +364,7 @@ async function diskBreakdown(home = os.homedir()) {
       dirs: def.dirs,
       subtractDirs: def.subtractDirs || [],
       bytes,
+      partial,
     });
   }
 
@@ -351,10 +395,16 @@ async function diskBreakdown(home = os.homedir()) {
       hint: c.hint,
       dirs: c.dirs,
       bytes: Math.round(c.bytes),
+      partial: c.partial || undefined,
     }));
     const remainder = Math.round(used - measuredTotal);
     if (remainder > 0) {
-      categories.push(systemCategory(remainder));
+      const sys = systemCategory(remainder, { home });
+      // Folders that could not be measured in time end up in the remainder;
+      // say which, so the number is not mistaken for the OS.
+      const unmeasured = allDirs.filter((d) => timedOut.has(d));
+      if (unmeasured.length) sys.unmeasured = unmeasured;
+      categories.push(sys);
     }
   }
 
@@ -367,6 +417,14 @@ async function diskBreakdown(home = os.homedir()) {
   const result = categories
     .filter((c) => c.bytes > 0)
     .sort((a, b) => b.bytes - a.bytes);
+
+  // macOS only: the system volumes that share the disk. Never fails the breakdown.
+  let volumes = [];
+  if (process.platform === 'darwin' && used > 0) {
+    try { volumes = await osVolumes(); } catch { volumes = []; }
+  }
+  const sysCat = result.find((c) => c.key === 'system');
+  if (sysCat && volumes.length) sysCat.volumes = volumes;
 
   // macOS only: the System Data explainer. Never allowed to fail the breakdown.
   let systemData = null;
@@ -396,8 +454,13 @@ async function diskBreakdown(home = os.homedir()) {
 // the Storage category drill-down). Lists each dir's direct entries, measures
 // them with `du` (bounded concurrency, real disk blocks), and returns the
 // largest, sorted descending. Never throws: unreadable dirs are skipped.
-async function topChildren(dirs, limit = 25, deadlineMs = 45000) {
+async function topChildren(dirs, limit = 25, deadlineMs = 45000, exclude = []) {
   const list = Array.isArray(dirs) ? dirs : [];
+  // `exclude`: paths another category already counts. An entry that is one of
+  // them, or contains one (~/Library holds Application Support), is skipped;
+  // its unclassified children still show when its folder is also listed.
+  const ex = (Array.isArray(exclude) ? exclude : []).filter(Boolean);
+  const covered = (p) => ex.some((e) => e === p || isInside(p, e) || isInside(e, p));
   const deadline = Date.now() + deadlineMs;
   const entries = [];
   for (const dir of list) {
@@ -405,6 +468,7 @@ async function topChildren(dirs, limit = 25, deadlineMs = 45000) {
     try { names = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { continue; }
     for (const d of names) {
       if (d.name === '.DS_Store') continue;
+      if (ex.length && covered(path.join(dir, d.name))) continue;
       entries.push({ path: path.join(dir, d.name), name: d.name, isDir: d.isDirectory() });
     }
   }
@@ -416,4 +480,4 @@ async function topChildren(dirs, limit = 25, deadlineMs = 45000) {
     .slice(0, limit);
 }
 
-module.exports = { diskBreakdown, topChildren, parseDuBytes, attributeSystemData };
+module.exports = { diskBreakdown, topChildren, parseDuBytes, attributeSystemData, parseApfsVolumes };

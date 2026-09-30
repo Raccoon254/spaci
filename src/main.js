@@ -615,8 +615,13 @@ ipcMain.handle('icon:get', (_e, name) => getIcon(name));
 let lastTopChildren = new Set();
 ipcMain.handle('fs:top-children', async (_e, dirs) => {
   const list = Array.isArray(dirs) ? dirs : [];
-  const items = await diskbreakdown.topChildren(list, 25);
-  const categoryDirs = ipcGuards.knownPathSet(((cache.diskBreakdown && cache.diskBreakdown.categories) || []).flatMap((c) => (c && c.dirs) || []));
+  const cats = (cache.diskBreakdown && cache.diskBreakdown.categories) || [];
+  // The System drill-down lists only what no other category counts.
+  const sys = cats.find((c) => c && c.key === 'system');
+  const isSystemDrill = sys && Array.isArray(sys.dirs) && list.length === sys.dirs.length && list.every((d, i) => d === sys.dirs[i]);
+  const classified = isSystemDrill ? cats.filter((c) => c && c.key !== 'system').flatMap((c) => (c && c.dirs) || []) : [];
+  const items = await diskbreakdown.topChildren(list, 25, undefined, classified);
+  const categoryDirs = ipcGuards.knownPathSet(cats.flatMap((c) => (c && c.dirs) || []));
   const parents = ipcGuards.knownPathSet(list.filter((d) => categoryDirs.has(d)));
   // Accumulate rather than replace: the renderer keeps each category's list, so
   // going back to an earlier category must not break its Open buttons.

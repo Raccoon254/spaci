@@ -229,7 +229,7 @@
 
     // Kick off the largest-items fetch once per category, caching the result.
     function ensureChildren() {
-      if (isSystem || !dirs.length) return;
+      if (!dirs.length) return;
       if (S.catChildren[c.key] !== undefined) return; // cached (array or [])
       if (S._catLoading === c.key) return; // already in flight
       if (typeof api.topChildren !== 'function') { S.catChildren[c.key] = []; if (latestCatRender) latestCatRender(); return; }
@@ -306,10 +306,43 @@
       host.innerHTML = '';
       host.appendChild(header());
 
-      // System remainder: no user folders to drill into, keep the explainer.
-      if (isSystem || !dirs.length) {
-        host.appendChild(infoCard('Spaci measures this category as a whole. It is the part of your disk macOS reserves and reports as a single block (system files, snapshots, sleep image), so there are no individual folders to drill into here. The reclaimable parts of other categories are surfaced in Recommendations.'));
+      if (!dirs.length) {
+        host.appendChild(infoCard('Spaci measures this category as a whole, so there are no individual folders to drill into here. The reclaimable parts of other categories are surfaced in Recommendations.'));
         return;
+      }
+      // System is what is left after every category Spaci measures: the OS
+      // itself, snapshots and swap, plus any folder no category claims. List
+      // those folders so the number is explained, not just stated.
+      if (isSystem) {
+        host.appendChild(infoCard('This is everything Spaci could not put in another category. Part of it is the operating system itself, swap and snapshots, which are not folders you can open. The rest is folders listed below, biggest first. Folders Spaci is not allowed to read (on macOS, grant Full Disk Access in System Settings > Privacy & Security) can be missing or measured short, so the list may not add up to the total.'));
+        host.appendChild(el('div', { style: 'height:18px' }));
+        const unmeasured = Array.isArray(c.unmeasured) ? c.unmeasured : [];
+        if (unmeasured.length) {
+          host.appendChild(infoCard('Spaci ran out of time measuring ' + unmeasured.map((d) => shortPath(d, S._homeDir)).join(', ') + ', so their size is counted here for now. Scan again to measure them properly.'));
+          host.appendChild(el('div', { style: 'height:18px' }));
+        }
+        // macOS keeps its own files on separate volumes of the same disk.
+        const vols = Array.isArray(c.volumes) ? c.volumes : [];
+        if (vols.length) {
+          host.appendChild(capsLabel('macOS volumes on this disk'));
+          const vmax = Math.max(...vols.map((v) => v.bytes || 0));
+          host.appendChild(el('div', { style: 'display:flex;flex-direction:column;gap:9px;margin-bottom:24px' }, vols.map((v) => {
+            const pct = vmax ? Math.max(2, (v.bytes / vmax) * 100) : 0;
+            return el('div', { style: 'display:flex;align-items:center;gap:15px;padding:14px 17px;border-radius:14px;background:var(--panel);border:1px solid var(--border)' }, [
+              el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:' + color }, [ic('cpu', 22)]),
+              el('div', { style: 'flex:1;min-width:0' }, [
+                el('div', { style: 'font-weight:600;font-size:14.5px', text: v.name }),
+                el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px', text: 'Managed by macOS, not a folder you can clean' })
+              ]),
+              el('div', { style: 'width:120px;flex:none' }, [
+                el('div', { style: 'height:6px;border-radius:99px;background:var(--track);overflow:hidden' }, [
+                  el('span', { style: 'display:block;height:100%;border-radius:99px;background:' + color + ';width:' + pct.toFixed(1) + '%' })
+                ])
+              ]),
+              el('div', { style: 'font-weight:700;font-size:15px;font-variant-numeric:tabular-nums;min-width:70px;text-align:right', text: fmt(v.bytes || 0) })
+            ]);
+          })));
+        }
       }
 
       host.appendChild(capsLabel('Largest items'));

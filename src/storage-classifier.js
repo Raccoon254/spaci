@@ -292,8 +292,21 @@ function storyDef(key, dirs, pathsByStory) {
   return { key, ...meta, dirs: uniq(dirs), subtractDirs: uniq(subtractDirs) };
 }
 
-function systemCategory(bytes) {
-  return { key: 'system', ...CATEGORY_META.system, bytes };
+/**
+ * The unclassified remainder. Its bytes are used minus everything measured, so
+ * there is no folder that "is" System; `dirs` are the places unclassified data
+ * usually lives, for the drill-down, which leaves out anything another category
+ * already counts.
+ */
+function systemCategory(bytes, { platform = process.platform, home = require('os').homedir() } = {}) {
+  const api = platform === 'win32' ? require('path').win32 : require('path').posix;
+  const j = (...p) => api.join(home, ...p);
+  const dirs = platform === 'darwin'
+    ? [home, j('Library'), '/opt', '/usr/local', '/Library', '/Users/Shared', '/private/var']
+    : platform === 'win32'
+      ? [home, j('AppData', 'Local'), j('AppData', 'Roaming'), 'C:\\ProgramData']
+      : [home, j('.local', 'share'), '/opt', '/usr/local', '/var'];
+  return { key: 'system', ...CATEGORY_META.system, bytes, dirs, drill: 'unclassified' };
 }
 
 module.exports = {
