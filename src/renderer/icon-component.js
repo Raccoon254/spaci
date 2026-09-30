@@ -17,10 +17,20 @@
     + '@keyframes sp-elastic{0%{transform:scale(0);opacity:0}30%{transform:scale(1.18);opacity:1}44%{transform:scale(.94)}56%{transform:scale(1.02)}66%{transform:scale(1)}86%{transform:scale(1);opacity:1}100%{transform:scale(0);opacity:0}}'
     + '@keyframes sp-swing{0%,100%{transform:rotate(-13deg)}50%{transform:rotate(13deg)}}'
     + '@keyframes sp-bloom{0%,100%{transform:translateY(0)}50%{transform:translateY(-9px)}}'
-    + '@keyframes sp-shimmerseg{0%{opacity:.2}50%{opacity:1}100%{opacity:.2}}';
+    + '@keyframes sp-shimmerseg{0%{opacity:.2}50%{opacity:1}100%{opacity:.2}}'
+    // Reduced motion: the ring holds still, fully drawn (inline animations lose
+    // to !important).
+    + '@media (prefers-reduced-motion: reduce){*{animation:none!important}}';
   customElements.define('spaci-icon', class extends HTMLElement {
     static get observedAttributes() { return ['name', 'kind', 'anim']; }
-    connectedCallback() { if (!this._root) { this._root = this.attachShadow({ mode: 'open' }); } this._r(); }
+    connectedCallback() {
+      if (!this._root) { this._root = this.attachShadow({ mode: 'open' }); }
+      // Icons are decorative unless given a label: the text beside them (or the
+      // button's aria-label) names the control.
+      if (this.hasAttribute('label')) { this.setAttribute('role', 'img'); this.setAttribute('aria-label', this.getAttribute('label')); }
+      else if (!this.hasAttribute('aria-hidden')) this.setAttribute('aria-hidden', 'true');
+      this._r();
+    }
     attributeChangedCallback() { this._r(); }
     _r() {
       if (!this._root) return;
