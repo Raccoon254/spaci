@@ -363,7 +363,9 @@ function winExec({ images, cmdlines, psError }) {
     assert.equal(file, 'powershell');
     assert.ok(args.includes('-NoProfile'));
     if (psError) return cb(Object.assign(new Error('denied'), { code: 1 }), '', '');
-    cb(null, cmdlines.join('\r\n'), '');
+    // Same shape as the real query: one tagged row per node.exe. A null entry
+    // is a process whose command line could not be read (elevated).
+    cb(null, cmdlines.map((l) => 'SPACI_CMD:' + (l == null ? '' : l)).join('\r\n'), '');
   };
   fn.calls = calls;
   return fn;
@@ -403,4 +405,36 @@ test('windows: host editor images mark continue and copilot as running', async (
     const r = await aiToolStatus({ platform: 'win32', exec: winExec({ images: [img.toLowerCase()], cmdlines: [] }) });
     assert.deepEqual(r, { ok: true, running: ['continue', 'copilot'] }, img);
   }
+});
+
+test('windows: an unreadable node.exe command line (elevated) fails closed', async () => {
+  const exec = winExec({ images: ['node.exe', 'explorer.exe'], cmdlines: ['C:\\node\\node.exe C:\\srv\\eslint.js', null] });
+  assert.deepEqual(await aiToolStatus({ platform: 'win32', exec }), { ok: false, running: [] });
+});
+
+test('windows: npm-installed Codex and opencode are recognised by command line', async () => {
+  const exec = winExec({
+    images: ['node.exe'],
+    cmdlines: [
+      'C:\\node\\node.exe C:\\Users\\a\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js',
+      'node C:\\Users\\a\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode',
+    ],
+  });
+  const r = await aiToolStatus({ platform: 'win32', exec });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.running.sort(), ['codex', 'opencode']);
+});
+
+test('npm shims run through node are detected, bare arguments are not', async () => {
+  for (const platform of ['darwin', 'linux']) {
+    assert.deepEqual((await runs(platform, ['/usr/bin/node /usr/local/bin/claude --resume'])).running, ['claude']);
+    assert.deepEqual((await runs(platform, ['node /home/u/.npm-global/bin/codex exec'])).running, ['codex']);
+    assert.deepEqual((await runs(platform, ['vim /home/u/bin/gemini-notes', 'less /tmp/claude'])).running, []);
+  }
+});
+
+test('Linux editor hosts count only as the executable, not as an argument', async () => {
+  assert.deepEqual((await runs('linux', ['vim /home/bob/code', 'tmux -c /home/bob/code'])).running, []);
+  const r = await runs('linux', ['/usr/share/code/code --unity-launch']);
+  assert.deepEqual(r.running.sort(), ['continue', 'copilot']);
 });

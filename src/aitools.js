@@ -10,6 +10,7 @@
 // basename is listed in `protect` (the cleaner must never delete a protected
 // basename at any depth).
 
+const path = require('node:path');
 const { execFile } = require('node:child_process');
 
 const CATEGORY = 'AI tools';
@@ -74,14 +75,21 @@ function buildAiToolTargets(ctx) {
   // Home-relative dotdirs: same place on every platform (Windows uses the profile).
   const dot = (...parts) => (isWin ? winJoin(...parts) : join(...parts));
 
+  // XDG base directories count only when absolute; the spec says relative
+  // values are invalid, and a relative path would resolve against Spaci's own
+  // working directory at clean time.
+  const pathApi = ctx.pathApi || (isWin ? path.win32 : path.posix);
+  const abs = (value) => (value && pathApi.isAbsolute(value) ? value : null);
+  const xdgConfig = abs(env.XDG_CONFIG_HOME) || join('.config');
+
   // Per-user app data roots for Electron style apps.
   const appSupport = isMac ? join('Library', 'Application Support')
     : isWin ? env.APPDATA
-      : (env.XDG_CONFIG_HOME || join('.config'));
+      : xdgConfig;
   const app = (name, ...parts) => (isMac ? join('Library', 'Application Support', name, ...parts) : from(appSupport, name, ...parts));
-  const xdgData = isWin ? null : (env.XDG_DATA_HOME || join('.local', 'share'));
+  const xdgData = isWin ? null : (abs(env.XDG_DATA_HOME) || join('.local', 'share'));
   const localApp = isWin ? env.LOCALAPPDATA : null;
-  const cacheHome = isMac || isWin ? null : (env.XDG_CACHE_HOME || join('.cache'));
+  const cacheHome = isMac || isWin ? null : (abs(env.XDG_CACHE_HOME) || join('.cache'));
 
   // A relocated config home is honoured only when it is an absolute path.
   const absEnv = (v) => (typeof v === 'string' && /^([A-Za-z]:[\\/]|[\\/])/.test(v) ? v : null);
@@ -184,7 +192,7 @@ function buildAiToolTargets(ctx) {
     'Saved Continue chat sessions. ' + TRANSCRIPT_NOTE, { reversible: false }));
 
   // ---- GitHub Copilot (JetBrains plugin data) ----------------------------
-  const copilotRoot = isWin ? from(localApp, 'github-copilot') : (isMac ? join('.config', 'github-copilot') : from(env.XDG_CONFIG_HOME || join('.config'), 'github-copilot'));
+  const copilotRoot = isWin ? from(localApp, 'github-copilot') : (isMac ? join('.config', 'github-copilot') : from(xdgConfig, 'github-copilot'));
   const copilotSessions = [];
   for (const ide of COPILOT_IDES) for (const d of COPILOT_SESSION_DIRS) copilotSessions.push(from(copilotRoot, ide, d));
   t.push(T('copilot-sessions', 'GitHub Copilot chat sessions',
@@ -205,17 +213,25 @@ function buildAiToolTargets(ctx) {
 
 // ---- running tool detection ----------------------------------------------
 
+// A CLI started directly (`/usr/local/bin/gemini`) or through a JavaScript
+// runtime as `node .../bin/gemini`, which is how npm installs global commands.
+// Anchored at the start of the command line, so a mere argument such as
+// `vim ~/bin/gemini-notes` never counts. POSIX ERE, so no \S shorthands.
+function viaRuntime(name) {
+  return `^([^ ]*/)?((node|nodejs|bun)( -[^ ]*)* ([^ ]*/)?)?${name}( |$)`;
+}
+
 // pgrep argument lists per tool id (macOS and Linux). Any match means the tool
 // is running. Claude Code runs as the `claude` CLI, inside the Claude desktop
 // app, or as `node` when installed from npm; Gemini CLI is usually `node` too,
 // so those are matched on the command line.
 const PGREP_COMMON = {
-  claude: [['-x', 'claude'], ['-f', 'Claude.app/Contents/MacOS'], ['-f', '@anthropic-ai/claude-code']],
-  codex: [['-x', 'codex'], ['-f', 'Codex.app/Contents/MacOS']],
-  opencode: [['-x', 'opencode']],
+  claude: [['-x', 'claude'], ['-f', 'Claude.app/Contents/MacOS'], ['-f', '@anthropic-ai/claude-code'], ['-f', viaRuntime('claude')]],
+  codex: [['-x', 'codex'], ['-f', 'Codex.app/Contents/MacOS'], ['-f', '@openai/codex'], ['-f', viaRuntime('codex')]],
+  opencode: [['-x', 'opencode'], ['-f', 'opencode-ai'], ['-f', viaRuntime('opencode')]],
   cursor: [['-f', 'Cursor.app/Contents/MacOS'], ['-x', 'cursor']],
   windsurf: [['-f', 'Windsurf.app/Contents/MacOS'], ['-x', 'windsurf']],
-  gemini: [['-x', 'gemini'], ['-f', '@google/gemini-cli'], ['-f', 'bin/gemini']],
+  gemini: [['-x', 'gemini'], ['-f', '@google/gemini-cli'], ['-f', viaRuntime('gemini')]],
   grok: [['-x', 'grok']],
   t3: [['-f', 'T3 Code.app/Contents/MacOS'], ['-f', 'T3.app/Contents/MacOS']],
   zed: [['-x', 'zed'], ['-x', 'zed-editor'], ['-f', 'Zed.app/Contents/MacOS']],
@@ -234,9 +250,11 @@ const HOST_EDITORS = {
   ],
   // VS Code's binary is .../code (also snap and flatpak paths). JetBrains IDEs
   // run as java with a paths selector, or start from an idea.sh style launcher.
+  // Editor names are anchored to the executable (argv[0]), so an argument that
+  // merely ends in /code, as in `vim ~/code`, does not count.
   linux: [
-    ['-f', '(^|/)(code(-insiders)?|cursor|windsurf)( |$)'],
-    ['-f', 'com\\.intellij\\.idea\\.Main|-Didea\\.paths\\.selector=|(^|/)(idea|pycharm|webstorm|goland|rider|clion|phpstorm|rubymine|datagrip|studio)(64)?(\\.sh)?( |$)'],
+    ['-f', '^[^ ]*/(code(-insiders)?|cursor|windsurf)( |$)'],
+    ['-f', 'com\\.intellij\\.idea\\.Main|-Didea\\.paths\\.selector=|^[^ ]*/(idea|pycharm|webstorm|goland|rider|clion|phpstorm|rubymine|datagrip|studio)(64)?(\\.sh)?( |$)'],
   ],
 };
 
@@ -269,9 +287,15 @@ const WIN_IMAGES = {
 // npm installed CLIs run as node.exe, so they are told apart by command line.
 const WIN_NODE_CMDLINE = {
   claude: /@anthropic-ai[\\/]claude-code/i,
+  codex: /@openai[\\/]codex/i,
+  opencode: /opencode-ai/i,
   gemini: /@google[\\/]gemini-cli/i,
 };
-const WIN_NODE_QUERY = "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' } | ForEach-Object { $_.CommandLine }";
+// One tagged line per node.exe. CommandLine is null for a process Spaci may not
+// inspect (for example an elevated terminal), which yields a bare tag: that is
+// "could not tell", not "not running".
+const WIN_NODE_TAG = 'SPACI_CMD:';
+const WIN_NODE_QUERY = `Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' } | ForEach-Object { '${WIN_NODE_TAG}' + $_.CommandLine }`;
 
 // Resolves to 'hit', 'miss', or 'error'. pgrep exits 1 when nothing matches,
 // which is a clean answer; any other failure means we could not tell.
@@ -307,16 +331,21 @@ function tasklist(exec, timeout) {
   });
 }
 
-// Command lines of every node.exe, or null when they could not be read.
+// Command lines of every node.exe, or null when any could not be read.
 function nodeCommandLines(exec, timeout) {
   return new Promise((resolve) => {
     try {
       exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', WIN_NODE_QUERY],
         { timeout: Math.max(timeout, 10000), windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
           if (err) return resolve(null);
-          const lines = String(stdout || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-          // node.exe is running, so no command lines at all means access was denied.
-          resolve(lines.length > 0 ? lines : null);
+          const tagged = String(stdout || '').split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith(WIN_NODE_TAG));
+          // node.exe is running, so no rows at all means the query was blocked.
+          if (tagged.length === 0) return resolve(null);
+          const lines = tagged.map((l) => l.slice(WIN_NODE_TAG.length).trim());
+          // Any unreadable command line could be an elevated Claude Code or
+          // Gemini session: we cannot rule it out, so detection has failed.
+          if (lines.some((l) => l.length === 0)) return resolve(null);
+          resolve(lines);
         });
     } catch {
       resolve(null);
