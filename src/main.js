@@ -1433,7 +1433,9 @@ async function acRun() {
 
 function acGate(force) {
   const s = acSettings();
-  if (s.enabled && s.pendingPreview && !autoClean.isApproved(s)) return { run: false, reason: 'awaiting-approval' };
+  // Waiting for approval idles like "disabled" (no retry every quarter hour);
+  // approving or changing the rules calls reschedule().
+  if (s.enabled && s.pendingPreview && !autoClean.isApproved(s)) return { run: false, reason: 'disabled', detail: 'awaiting-approval' };
   return autoClean.autoCleanGate({ settings: s, onboarded: Boolean(loadPrefs().onboarded), force, ...acConditions() });
 }
 
