@@ -125,11 +125,14 @@
       });
       if (!jobs.length) return;
       const permanent = chosen.filter(isPermanent);
-      if (permanent.length) {
-        const names = permanent.slice(0, 3).map((t) => t.name).join(', ') + (permanent.length > 3 ? ' and ' + (permanent.length - 3) + ' more' : '');
+      const risky = chosen.filter((t) => !t.safe || isPermanent(t));
+      if (risky.length) {
+        // Each target says in its own words what deleting it means.
+        const body = risky.slice(0, 4).map((t) => t.name + ': ' + (t.description || 'Review before deleting.') + (isPermanent(t) ? ' This cannot be undone.' : '')).join('\n')
+          + (risky.length > 4 ? '\nand ' + (risky.length - 4) + ' more.' : '');
         const ok = await SP.confirm({
-          title: 'Permanently delete history?',
-          body: names + ' will be deleted for good. Session history cannot be regenerated or recovered, and you will not be able to resume those sessions.',
+          title: permanent.length ? 'Permanently delete ' + risky.length + (risky.length === 1 ? ' item?' : ' items?') : 'Clean ' + risky.length + ' item' + (risky.length === 1 ? '' : 's') + ' marked Review?',
+          body,
           confirmLabel: 'Delete',
           danger: true,
           icon: 'trash'
@@ -285,7 +288,10 @@
     // carry no `state`, so derive it from what they do have.
     function dockerState(d) {
       const st = d.status || {};
-      return st.state || d.state || (d.ok ? 'running' : (st.installed ? 'stopped' : 'not-installed'));
+      const given = st.state || d.state;
+      if (given === 'running' && !d.ok) return 'unreadable'; // engine answers, inventory does not
+      if (!given && !d.ok && !d.status && d.reason === 'error') return 'unavailable';
+      return given || d.state || (d.ok ? 'running' : (st.installed ? 'stopped' : 'not-installed'));
     }
 
     // The VM disk image is a sparse file: Finder shows the size it reserves, but
@@ -312,6 +318,8 @@
       const d = S.docker;
       if (!d) return null;
       const disk = d.desktopDisk || null;
+      // Refresh failed outright and we know nothing about Docker: neutral card,
+      // unless nothing points to Docker being installed at all.
       // A remote Docker context is never managed here, whatever its state.
       const remote = Boolean((d.status && d.status.remote) || d.remote);
       const state = remote ? 'remote' : dockerState(d);
@@ -329,6 +337,7 @@
         'engine-down': 'Docker Desktop is open, but its engine is not responding',
         'no-permission': 'Docker is running, but Spaci cannot talk to it',
         remote: 'Docker is pointed at a remote host',
+        unreadable: 'Docker is running, but Spaci could not read its usage',
         'not-installed': 'Docker is not installed',
       };
       const BADGE = {
@@ -336,6 +345,7 @@
         'engine-down': ['sp-badge-warn', 'Not responding'],
         'no-permission': ['sp-badge-warn', 'No access'],
         remote: ['sp-badge-caution', 'Remote'],
+        unreadable: ['sp-badge-caution', 'Unreadable'],
         'not-installed': ['sp-badge-caution', 'Not installed'],
       };
       const known = Object.prototype.hasOwnProperty.call(SUB, state);
@@ -362,6 +372,7 @@
           stopped: 'Start Docker Desktop and check again to see how much space images, volumes and build cache are holding.',
           'engine-down': 'Restart Docker Desktop, then check again. Nothing inside Docker can be cleaned until its engine responds.',
           'no-permission': 'Spaci does not have permission to use Docker. Add your user to the docker group or use rootless Docker, then check again.',
+          unreadable: 'Docker may still be starting or busy. Check again in a moment.',
           remote: 'Spaci only manages Docker on this Mac, so it shows no cleanup for a remote host.',
           'not-installed': 'Its disk image is still on this Mac and still using space. Spaci does not delete it.',
         };
@@ -468,12 +479,13 @@
       if (!n) { SP.setActionBar(null); return; }
       const bytes = chosen.reduce((a, t) => a + (t.size || 0), 0);
       const permanent = chosen.some(isPermanent);
+      const risky = chosen.some((t) => !t.safe);
       const noun = permanent ? 'item' : 'cache';
       SP.setActionBar({
         count: n + ' ' + noun + (n > 1 ? 's' : ''),
         size: fmt(bytes),
-        action: (permanent ? 'Delete ' : 'Clean ') + fmt(bytes),
-        danger: permanent,
+        action: (risky || permanent ? 'Delete ' : 'Clean ') + fmt(bytes),
+        danger: risky || permanent,
         onClear: () => { selSet().clear(); paint(); },
         onClean: () => cleanSelected(),
       });

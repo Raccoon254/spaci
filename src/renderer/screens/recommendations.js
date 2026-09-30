@@ -76,8 +76,10 @@
     if (rec.kind === 'project' || act.type === 'open-project') {
       const proj = (S.recsProjects || []).find((p) => p.path === act.path) || null;
       const items = (proj && proj.items) || [];
-      const reversible = items.every((i) => i.reversible !== false);
-      const safe = items.every((i) => i.safe);
+      // Unverified items are never cleaned by Spaci, so they are not offered.
+      const safeOnly = items.filter((i) => i.safe === true);
+      const reversible = safeOnly.every((i) => i.reversible !== false);
+      const safe = true;
       return {
         kind: 'project',
         rec,
@@ -85,12 +87,12 @@
         name: (proj && proj.name) || rec.title || 'Project',
         body: rec.body || '',
         savings: recSize(rec),
-        count: items.length,
+        count: safeOnly.length,
         safe,
         reversible,
         // remove the whole artifact folder (cleaner: no 'contents' = remove path)
-        jobs: items.map((i) => ({ path: i.path })),
-        items: items.map((i) => ({ icon: i.isDir ? 'folder-2' : 'file', path: i.path, name: i.name, note: i.note, size: i.size })),
+        jobs: safeOnly.map((i) => ({ path: i.path })),
+        items: safeOnly.map((i) => ({ icon: i.isDir ? 'folder-2' : 'file', path: i.path, name: i.name, note: i.note, size: i.size })),
         meta: { scope: 'projects', label: (proj && proj.name) || rec.title || '', reversible },
       };
     }
@@ -400,6 +402,11 @@
         const res = a.kind === 'docker'
           ? await api.dockerPrune(a.dockerKind).then((r) => (r && r.ok ? { ok: true, totalFreed: r.freed } : r))
           : await api.clean(a.jobs, a.meta);
+        if (a.kind !== 'docker' && res && res.ok !== false) {
+          // Try again resends only what was not removed.
+          const sumR = SP.summariseClean(res);
+          a.jobs = a.jobs.filter((j) => sumR.blocked(j.path));
+        }
         if (res && res.ok !== false) {
           const sum = SP.summariseClean(res, { fallbackFreed: a.savings != null ? a.savings : 0 });
           S.actionResult = { state: sum.state, totalFreed: sum.freed, refused: sum.refused, errors: sum.errors };

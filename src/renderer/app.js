@@ -120,7 +120,7 @@ function renderOverlays() {
           el('div', { class: cm.danger ? 'sp-cm-danger' : 'sp-cm-accent', style: 'width:44px;height:44px;border-radius:12px;display:grid;place-items:center;flex:none' }, [ic(cm.icon || (cm.danger ? 'trash' : 'broom'), 23)]),
           el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.3px', text: cm.title })
         ]),
-        el('div', { style: 'color:var(--text-2);font-size:13.5px;line-height:1.6;margin-bottom:22px', text: cm.body }),
+        el('div', { style: 'color:var(--text-2);font-size:13.5px;line-height:1.6;margin-bottom:22px;white-space:pre-line', text: cm.body }),
         el('div', { style: 'display:flex;gap:10px;justify-content:flex-end' }, [
           el('button', { style: 'height:42px;padding:0 18px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:14px;cursor:pointer', hov: 'background:var(--panel-3)', onclick: () => close(false) }, ['Cancel']),
           el('button', { class: cm.danger ? 'sp-ab-danger' : 'sp-ab-accent', style: 'height:42px;padding:0 20px;border-radius:11px;border:none;color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer', onclick: () => close(true) }, [ic(cm.icon || (cm.danger ? 'trash' : 'broom'), 15), cm.confirmLabel || 'Confirm'])
