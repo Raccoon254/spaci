@@ -384,13 +384,18 @@ function namesOf(args) {
   return names.filter(Boolean);
 }
 
-/** Parse `ps -axo pid=,args=` output. */
-function parsePs(stdout) {
+/**
+ * Parse `ps -axo pid=,uid=,args=` output. With `uid`, only that user's
+ * processes are kept: another user's process cannot be asked for its cwd, and
+ * cannot be running a build in this user's projects without sudo.
+ */
+function parsePs(stdout, uid = null) {
   const list = [];
   for (const line of String(stdout || '').split('\n')) {
-    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
     if (!m) continue;
-    list.push({ pid: Number(m[1]), names: namesOf(m[2]), cwd: null });
+    if (uid != null && Number(m[2]) !== uid) continue;
+    list.push({ pid: Number(m[1]), names: namesOf(m[3]), cwd: null });
   }
   return list;
 }
@@ -418,7 +423,8 @@ function run(exec, cmd, args, timeout) {
  * Which developer tools run, and where. Never rejects.
  * @returns {Promise<{ok:boolean, list:{pid:number,names:string[],cwd:string|null}[]}>}
  */
-async function snapshotProcesses({ platform = process.platform, exec = execFile, fs = nodeFs, timeout = 8000, selfPid = process.pid } = {}) {
+async function snapshotProcesses({ platform = process.platform, exec = execFile, fs = nodeFs, timeout = 8000, selfPid = process.pid,
+  uid = typeof process.getuid === 'function' ? process.getuid() : null } = {}) {
   try {
     if (platform === 'win32') {
       const r = await run(exec, 'tasklist', ['/fo', 'csv', '/nh'], timeout);
@@ -431,19 +437,19 @@ async function snapshotProcesses({ platform = process.platform, exec = execFile,
       // Windows gives no cwd without admin: a dev process makes projects inconclusive.
       return { ok: true, list: list.filter((p) => p.names.some((n) => DEV_PROCESS_NAMES.has(n))) };
     }
-    const r = await run(exec, 'ps', ['-axo', 'pid=,args='], timeout);
+    const r = await run(exec, 'ps', ['-axo', 'pid=,uid=,args='], timeout);
     if (r.err) return { ok: false, list: [] };
-    const dev = parsePs(r.stdout).filter((p) => p.pid !== selfPid && p.names.some((n) => DEV_PROCESS_NAMES.has(n)));
+    const dev = parsePs(r.stdout, uid).filter((p) => p.pid !== selfPid && p.names.some((n) => DEV_PROCESS_NAMES.has(n)));
     if (!dev.length) return { ok: true, list: [] };
     if (platform === 'linux') {
       await Promise.all(dev.map(async (p) => { p.cwd = await fs.promises.readlink(`/proc/${p.pid}/cwd`).catch(() => null); }));
     } else {
       const l = await run(exec, 'lsof', ['-a', '-d', 'cwd', '-p', dev.map((p) => p.pid).join(','), '-Fpn'], timeout);
       // lsof exits 1 when some pids vanished; whatever it printed still counts.
+      // A process of ours that it could not answer for keeps cwd null, which
+      // selection treats as "a tool runs somewhere": projects are skipped.
       const cwds = parseLsofCwd(l.stdout);
       for (const p of dev) p.cwd = cwds.get(p.pid) || null;
-      // A process that exited between ps and lsof has no cwd and no longer runs.
-      if (!l.err || cwds.size) return { ok: true, list: dev.filter((p) => p.cwd != null || cwds.size === 0) };
     }
     return { ok: true, list: dev };
   } catch {

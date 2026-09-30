@@ -239,23 +239,26 @@ test('process snapshot parses ps and lsof, and fails closed', async () => {
     if (!o) return cb(new Error('no ' + cmd), '');
     return cb(o.err || null, o.stdout);
   };
-  const ps = '  10 /usr/local/bin/node /usr/local/lib/node_modules/npm/bin/npm-cli.js install\n  11 /Applications/Safari.app/Contents/MacOS/Safari\n  12 cargo build --release\n  13 /opt/homebrew/bin/node server.mjs\n';
+  const ps = '  10 501 /usr/local/bin/node /usr/local/lib/node_modules/npm/bin/npm-cli.js install\n  11 501 /Applications/Safari.app/Contents/MacOS/Safari\n  12 501 cargo build --release\n  13 501 /opt/homebrew/bin/node server.mjs\n  14 0 /usr/local/bin/node /opt/daemon.js\n';
   const lsof = 'p10\nfcwd\nn/code/a\np12\nfcwd\nn/code/b\np13\nfcwd\nn/code/c\n';
-  const snap = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { stdout: ps }, lsof: { stdout: lsof } }), selfPid: 1 });
+  const snap = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { stdout: ps }, lsof: { stdout: lsof } }), selfPid: 1, uid: 501 });
   assert.equal(snap.ok, true);
   assert.deepEqual(snap.list.map((p) => [p.pid, p.names, p.cwd]), [
     [10, ['node', 'npm'], '/code/a'],
     [12, ['cargo'], '/code/b'],
     [13, ['node', 'server'], '/code/c'],
-  ]);
+  ], 'root\'s node daemon (uid 0) is not ours');
   const failed = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { err: new Error('boom'), stdout: '' } }) });
   assert.deepEqual(failed, { ok: false, list: [] });
-  const none = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { stdout: '  11 /Applications/Safari.app/Contents/MacOS/Safari\n' } }) });
+  const none = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { stdout: '  11 501 /Applications/Safari.app/Contents/MacOS/Safari\n' } }), uid: 501 });
   assert.deepEqual(none, { ok: true, list: [] });
   // lsof failing outright leaves cwd unknown, which selection treats as "skip".
-  const noLsof = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { stdout: ps }, lsof: { err: new Error('x'), stdout: '' } }) });
+  const noLsof = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { stdout: ps }, lsof: { err: new Error('x'), stdout: '' } }), uid: 501 });
   assert.ok(noLsof.list.length === 3 && noLsof.list.every((p) => p.cwd === null));
-  const lin = await ac.snapshotProcesses({ platform: 'linux', exec: fakeExec({ ps: { stdout: '  20 node x.js\n' } }), fs: { promises: { readlink: async () => '/code/l' } } });
+  // lsof answering for some pids only: the rest stay unknown (projects get skipped).
+  const partial = await ac.snapshotProcesses({ platform: 'darwin', exec: fakeExec({ ps: { stdout: ps }, lsof: { err: new Error('exit 1'), stdout: 'p10\nn/code/a\n' } }), uid: 501 });
+  assert.deepEqual(partial.list.map((p) => p.cwd), ['/code/a', null, null]);
+  const lin = await ac.snapshotProcesses({ platform: 'linux', exec: fakeExec({ ps: { stdout: '  20 1000 node x.js\n' } }), fs: { promises: { readlink: async () => '/code/l' } }, uid: 1000 });
   assert.deepEqual(lin.list.map((p) => p.cwd), ['/code/l']);
   const win = await ac.snapshotProcesses({ platform: 'win32', exec: fakeExec({ tasklist: { stdout: '"node.exe","30","Console","1","10 K"\r\n"explorer.exe","31","Console","1","10 K"\r\n' } }) });
   assert.deepEqual(win.list.map((p) => [p.names[0], p.cwd]), [['node', null]]);
