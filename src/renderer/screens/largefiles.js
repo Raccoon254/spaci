@@ -106,9 +106,14 @@
 
   // Current in-memory results (kept across mounts), and their files list.
   function dataNow() { return S.largeFiles || null; }
+  // Files at or above the chosen threshold. A scan found everything at or
+  // above its own minimum, so a higher chip filters these in place and a lower
+  // one needs a new scan (setThreshold decides).
   function currentFiles() {
     const d = dataNow();
-    return (d && Array.isArray(d.files)) ? d.files : [];
+    const all = (d && Array.isArray(d.files)) ? d.files : [];
+    const min = minBytes();
+    return all.filter((f) => (f.size || 0) >= min);
   }
 
   // ---------- screen ----------
@@ -165,8 +170,14 @@
     }
 
     function setThreshold(bytes) {
-      if (S.largeMinBytes === bytes) return;
+      if (S.largeMinBytes === bytes || S.largeFilesLoading) return;
       S.largeMinBytes = bytes;
+      const d = dataNow();
+      // Hidden files leave the selection, so Trash never acts on unseen rows.
+      const visible = new Set(currentFiles().map((f) => f.path));
+      const sel = selSet();
+      Array.from(sel).forEach((p) => { if (!visible.has(p)) sel.delete(p); });
+      if (d && bytes < (d.minBytes || DEFAULT_MIN)) { runScan(d.root || S.largeRoot); return; }
       paint();
     }
 
@@ -251,23 +262,24 @@
       const dir = dirName(f.path);
       const sel = selSet();
 
-      // selection check circle: toggles this file in/out of the delete set
-      // without triggering the row's reveal action.
+      // Clicking anywhere on the row selects it; Reveal and Open are their
+      // own buttons and never toggle the selection.
+      const on = sel.has(f.path);
       const check = el('div', {
-        class: 'sp-check' + (sel.has(f.path) ? ' sp-check-on' : ''),
+        class: 'sp-check' + (on ? ' sp-check-on' : ''),
         style: 'width:24px;height:24px;border-radius:50%;border:1.5px solid var(--border-2);flex:none;display:grid;place-items:center;color:transparent;transition:.14s'
       }, [ic('tick', 14)]);
-      check.addEventListener('click', (e) => {
-        stop(e);
-        if (sel.has(f.path)) sel.delete(f.path); else sel.add(f.path);
-        paint();
-      });
+      const toggle = () => { if (sel.has(f.path)) sel.delete(f.path); else sel.add(f.path); paint(); };
 
-      return el('div', {
-        class: 'sp-hov',
+      const node = el('div', {
+        class: 'sp-hov' + (on ? ' sp-row-sel' : ''),
+        role: 'checkbox',
+        'aria-checked': on ? 'true' : 'false',
+        'aria-label': name,
+        tabindex: '0',
         style: 'display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border);cursor:pointer;box-shadow:var(--shadow-sm)',
         hov: 'border-color:var(--border-2)',
-        onclick: () => reveal(f.path)
+        onclick: toggle
       }, [
         check,
         el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic(iconForExt(f.ext), 22)]),
@@ -283,15 +295,21 @@
         el('div', { style: 'font-weight:700;font-size:15px;color:var(--accent-fg);flex:none', text: fmt(f.size || 0) }),
         // row actions: reveal in Finder + open
         el('div', { style: 'display:flex;align-items:center;gap:6px;flex:none' }, [
-          rowAction('eye', 'Reveal in Finder', (e) => { stop(e); reveal(f.path); }),
+          rowAction('eye', 'Reveal in file manager', (e) => { stop(e); reveal(f.path); }),
           rowAction('external-link', 'Open file', (e) => { stop(e); open(f.path); })
         ])
       ]);
+      node.addEventListener('keydown', (e) => {
+        if (e.target !== node) return;
+        if (e.key === ' ' || e.key === 'Enter') { stop(e); toggle(); }
+      });
+      return node;
     }
 
     function rowAction(icon, title, onclick) {
       return el('button', {
         title,
+        'aria-label': title,
         style: 'width:34px;height:34px;border-radius:9px;border:1px solid var(--border);background:var(--panel-2);color:var(--text-3);display:grid;place-items:center;cursor:pointer;font-family:inherit',
         hov: 'background:var(--panel-3);color:var(--text);border-color:var(--border-2)',
         onclick
@@ -348,30 +366,31 @@
       }, [
         el('div', { style: 'color:var(--accent-fg)' }, [ring('breathe', 60)]),
         el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'No large files found' }),
-        el('div', { style: 'font-size:13.5px;max-width:400px', text: 'Nothing here is at or above ' + minLabel((dataNow() && dataNow().minBytes) || minBytes()) + '. Try a smaller threshold or a different folder.' }),
+        el('div', { style: 'font-size:13.5px;max-width:400px', text: 'Nothing here is at or above ' + minLabel(minBytes()) + '. Try a smaller threshold or a different folder.' }),
         el('button', {
           style: 'height:42px;padding:0 20px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;margin-top:4px',
           hov: 'background:var(--panel-3)',
           onclick: () => runScan(S.largeRoot)
-        }, [ic('scanner', 16), 'Scan again'])
+        }, [ic('scanner', 16), 'Scan'])
       ]);
     }
 
     // ---------- summary strip above the list ----------
     function summary(data) {
       const sel = selSet();
-      const totalBytes = data.files.reduce((a, f) => a + (f.size || 0), 0);
-      const allOn = data.files.length > 0 && data.files.every((f) => sel.has(f.path));
+      const files = currentFiles();
+      const totalBytes = files.reduce((a, f) => a + (f.size || 0), 0);
+      const allOn = files.length > 0 && files.every((f) => sel.has(f.path));
       return el('div', {
         style: 'display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;justify-content:space-between;margin-bottom:14px'
       }, [
         el('div', { style: 'display:flex;align-items:center;gap:18px;flex-wrap:wrap' }, [
-          el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600', text: data.files.length + (data.files.length === 1 ? ' large file' : ' large files') + ' · ' + fmt(totalBytes) }),
+          el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600', text: files.length + (files.length === 1 ? ' large file' : ' large files') + ' · ' + fmt(totalBytes) }),
           el('button', {
             style: 'height:32px;padding:0 12px;border-radius:9px;border:none;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer;font-family:inherit',
             hov: 'background:var(--panel);color:var(--text)',
             onclick: () => {
-              if (allOn) sel.clear(); else data.files.forEach((f) => sel.add(f.path));
+              if (allOn) sel.clear(); else files.forEach((f) => sel.add(f.path));
               paint();
             }
           }, [ic('check-circle', 15), allOn ? 'Clear all' : 'Select all'])
@@ -456,12 +475,13 @@
 
       // We have results: keep them visible. Rescans show the shared scan card
       // (centered) above the list.
-      if (data && data.files.length) {
+      const shown = currentFiles();
+      if (data && shown.length) {
         if (loading) host.appendChild(scanBlock());
         host.appendChild(warnBanner());
         host.appendChild(summary(data));
         host.appendChild(
-          el('div', { class: 'sp-stagger', style: 'display:flex;flex-direction:column;gap:9px' }, data.files.map(row))
+          el('div', { class: 'sp-stagger', style: 'display:flex;flex-direction:column;gap:9px' }, shown.map(row))
         );
         syncActionBar();
         return;

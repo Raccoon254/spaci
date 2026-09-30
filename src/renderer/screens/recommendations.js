@@ -23,6 +23,64 @@
     return Number(r && (r.savings != null ? r.savings : r.bytes != null ? r.bytes : r.size) || 0) || 0;
   }
 
+  // One three-tier risk scheme for the list and the action page alike:
+  // Safe (green), Review (amber), Permanent (red). It reads what the item
+  // really is (the target's safe/reversible flags, the project's verified
+  // items, the Docker kind), never the size-based severity.
+  const TIER = {
+    safe: { key: 'safe', cls: 'sp-badge-safe', text: 'Safe', long: 'Safe to clean' },
+    review: { key: 'review', cls: 'sp-badge-caution', text: 'Review', long: 'Review first' },
+    permanent: { key: 'permanent', cls: 'sp-badge-warn', text: 'Permanent', long: 'Permanent' },
+  };
+  function targetOf(r) {
+    const act = (r && r.action) || {};
+    if (act.type !== 'select-system') return null;
+    const list = S.recsSystem || S.sysTargets || [];
+    return list.find((t) => t.id === act.id) || null;
+  }
+  function projectOf(r) {
+    const act = (r && r.action) || {};
+    if (act.type !== 'open-project') return null;
+    const list = S.recsProjects || S.projects || [];
+    return list.find((p) => p.path === act.path) || null;
+  }
+  function recRisk(r) {
+    if (!r) return TIER.safe;
+    const act = r.action || {};
+    if (r.reversible === false || r.permanent === true) return TIER.permanent;
+    if (r.kind === 'docker' || act.type === 'docker-prune') {
+      // Unused tagged images download again but are not rebuilt for you.
+      return (act.kind === 'unused-images' || r.safe === false || r.optIn) ? TIER.review : TIER.safe;
+    }
+    const t = targetOf(r);
+    if (t) {
+      if (t.reversible === false) return TIER.permanent;
+      if (!t.safe) return TIER.review;
+    }
+    const p = projectOf(r);
+    if (p && (p.items || []).some((i) => i.safe === true && i.reversible === false)) return TIER.permanent;
+    if (r.safe === false) return TIER.review;
+    return TIER.safe;
+  }
+
+  // Mark for a recommendation: the brand of the app it belongs to (Docker, AI
+  // tools, browsers), the tech of a project or cache, else its own glyph.
+  function recMark(r, size) {
+    const B = window.SpaciBrandIcon;
+    const T = window.SpaciTechIcon;
+    const brand = B && B.forRec ? B.forRec(r, S.recsSystem || S.sysTargets || []) : null;
+    if (brand && SP.bic) return SP.bic(brand, size, { label: brand, fallback: r.icon || 'broom' });
+    const t = targetOf(r);
+    const tech = t && T && T.forTarget ? T.forTarget(t) : null;
+    if (tech && SP.tic) return SP.tic(tech, size, { label: t.name || tech });
+    const p = projectOf(r);
+    const en = p && S.enrich ? S.enrich[p.path] : null;
+    const pr = (en && en.primary) || (p && p.primary) || null;
+    const pid = pr && T ? T.cleanId(pr.id) : '';
+    if (pid && SP.tic) return SP.tic(pid, size, { label: pr.name || pid });
+    return ic(r.icon || 'broom', size);
+  }
+
   // ---- load + cache recommendations (and the raw scan they resolve against) ----
   async function loadRecs(force) {
     if (!force && S.recsLoaded) return;
@@ -56,8 +114,10 @@
     // Docker is reclaimed by the daemon, not by deleting paths, so it carries a
     // prune kind instead of clean jobs. Everything else on this screen is
     // path-based.
+    const risk = recRisk(rec);
     if (rec.kind === 'docker' || act.type === 'docker-prune') {
       return {
+        risk,
         kind: 'docker',
         dockerKind: act.kind,
         rec,
@@ -66,8 +126,8 @@
         body: rec.body || '',
         savings: recSize(rec),
         count: 1,
-        safe: true,
-        reversible: true,
+        safe: risk.key === 'safe',
+        reversible: risk.key !== 'permanent',
         jobs: [],
         items: [{ icon: 'box', path: act.kind === 'build-cache' ? 'docker builder prune' : 'docker image prune' }],
         meta: { scope: 'docker', label: rec.title || 'Docker' },
@@ -79,8 +139,9 @@
       // Unverified items are never cleaned by Spaci, so they are not offered.
       const safeOnly = items.filter((i) => i.safe === true);
       const reversible = safeOnly.every((i) => i.reversible !== false);
-      const safe = true;
+      const safe = risk.key === 'safe';
       return {
+        risk,
         kind: 'project',
         rec,
         icon: rec.icon || (proj && proj.type && proj.type.icon) || 'folder-2',
@@ -101,6 +162,7 @@
     const paths = (tgt && tgt.paths) || [];
     const reversible = tgt ? tgt.reversible !== false : true;
     return {
+      risk,
       kind: 'cache',
       rec,
       icon: rec.icon || (tgt && tgt.icon) || 'broom',
@@ -108,8 +170,8 @@
       body: rec.body || (tgt && tgt.description) || '',
       savings: recSize(rec),
       count: paths.length,
-      safe: tgt ? !!tgt.safe : true,
-      reversible,
+      safe: risk.key === 'safe',
+      reversible: reversible && risk.key !== 'permanent',
       jobs: paths.map((p) => ({ path: p, mode: (tgt && tgt.mode) || 'contents' })),
       items: paths.map((p) => ({ icon: 'folder-2', path: p })),
       meta: { scope: 'system', label: (tgt && tgt.name) || rec.title || '' },
@@ -146,7 +208,7 @@
       style: 'height:44px;padding:0 18px;border-radius:11px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;flex:none',
       hov: 'background:var(--panel-2)',
       onclick: () => { S.recsLoaded = false; window.SP_doScan ? window.SP_doScan() : reload(true); },
-    }, [ic('refresh', 16), 'Re-scan']);
+    }, [ic('scanner', 16), 'Scan']);
 
     host.appendChild(pageHeader('Recommendations', 'The biggest, safest wins, surfaced automatically.', rescanBtn));
 
@@ -178,14 +240,29 @@
             style: 'height:44px;padding:0 22px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:9px;cursor:pointer',
             hov: 'background:var(--accent-hover)',
             onclick: () => { window.SP_doScan ? window.SP_doScan() : reload(true); },
-          }, [ic('scanner', 16), 'Run a scan']),
+          }, [ic('scanner', 16), 'Scan']),
         ]));
         return;
       }
 
+      const tot = SP.reclaimTotals ? SP.reclaimTotals() : null;
+      if (tot) body.appendChild(totalsLine(tot));
       const list = el('div', { class: 'sp-stagger', style: 'display:flex;flex-direction:column;gap:11px' },
         recs.map((r) => recRow(r)));
       body.appendChild(list);
+    }
+
+    // The one headline figure (what these cards reclaim), the grand total of
+    // everything cleanable, and unverified bytes kept apart, never summed in.
+    function totalsLine(tot) {
+      const part = (label, value, color) => el('div', { style: 'display:flex;align-items:baseline;gap:7px;font-size:13.5px;color:var(--text-2)' }, [
+        el('span', { text: label }), el('b', { style: 'font-weight:700;color:' + color, text: value }),
+      ]);
+      return el('div', { style: 'display:flex;flex-wrap:wrap;gap:8px 28px;padding:14px 2px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:18px' }, [
+        part('Top recommendations:', fmt(tot.top), 'var(--accent-fg)'),
+        part('All cleanable found:', fmt(tot.grand), 'var(--text)'),
+        tot.unverified > 0 ? part('Unverified, not counted:', fmt(tot.unverified), 'var(--text-3)') : null,
+      ]);
     }
 
     function infoRow(r) {
@@ -209,16 +286,13 @@
 
     function recRow(r) {
       if (isInfo(r)) return infoRow(r);
-      const high = r.severity === 'high';
-      const tagSafe = !high; // high severity = stale/permanent-ish flag; normal = safe to clean
-      const borderColor = high ? 'var(--border-2)' : 'var(--border)';
-      const iconBg = high ? 'var(--danger-soft)' : 'var(--accent-soft)';
-      const color = high ? 'var(--danger-fg)' : 'var(--accent-fg)';
+      const risk = recRisk(r);
+      const borderColor = risk.key === 'safe' ? 'var(--border)' : 'var(--border-2)';
 
       const tag = el('span', {
-        class: tagSafe ? 'sp-badge-safe' : 'sp-badge-warn',
+        class: risk.cls,
         style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700',
-        text: tagSafe ? 'Safe' : 'Review',
+        text: risk.text,
       });
 
       const cleanBtn = el('button', {
@@ -233,7 +307,7 @@
         hov: 'border-color:var(--border-2);transform:translateX(2px)',
         onclick: () => openAction(r),
       }, [
-        el('div', { style: `width:48px;height:48px;border-radius:13px;background:${iconBg};display:grid;place-items:center;flex:none;color:${color}` }, [ic(r.icon || 'broom', 25)]),
+        el('div', { style: 'width:48px;height:48px;border-radius:13px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [recMark(r, 25)]),
         el('div', { style: 'flex:1;min-width:0' }, [
           el('div', { style: 'font-weight:700;font-size:15.5px;display:flex;align-items:center;gap:10px' }, [
             el('span', { style: 'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', text: r.title || 'Cleanable' }),
@@ -269,20 +343,21 @@
       return;
     }
 
-    const safe = a.safe;
-    const reversible = a.reversible;
+    const risk = a.risk || recRisk(a.rec);
+    const safe = risk.key === 'safe';
+    const reversible = risk.key !== 'permanent';
 
     // header: icon tile + name + badge + savings
     host.appendChild(
       el('div', { style: 'display:flex;align-items:center;gap:18px;margin-bottom:22px' }, [
-        el('div', { style: 'width:58px;height:58px;border-radius:15px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic(a.icon, 31)]),
+        el('div', { style: 'width:58px;height:58px;border-radius:15px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [a.rec ? recMark(a.rec, 31) : ic(a.icon, 31)]),
         el('div', { style: 'flex:1;min-width:0' }, [
           el('div', { style: 'font-size:25px;font-weight:700;letter-spacing:-.7px;display:flex;align-items:center;gap:11px' }, [
             el('span', { style: 'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', text: a.name }),
             el('span', {
-              class: safe ? 'sp-badge-safe' : 'sp-badge-warn',
+              class: risk.cls,
               style: 'display:inline-flex;padding:4px 10px;border-radius:8px;font-size:11.5px;font-weight:700',
-              text: safe ? 'Safe to clean' : 'Review first',
+              text: risk.long,
             }),
           ]),
           el('div', { style: 'color:var(--text-3);font-size:13px;margin-top:5px', text: a.body || 'Regenerable files that rebuild on demand.' }),
@@ -301,14 +376,14 @@
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:10px 32px;padding:16px 2px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:22px' }, [
         stat('hard-drive', 'Reclaimable', fmt(a.savings), 'var(--accent-fg)'),
         stat('box', 'Locations', String(a.count), 'var(--text)'),
-        stat(reversible ? 'undo' : 'lock', 'After cleaning', reversible ? 'Rebuilds on next install/build' : 'Permanent', reversible ? 'var(--text)' : 'var(--danger-fg)'),
+        stat(reversible ? 'refresh' : 'lock', 'After cleaning', reversible ? 'Rebuilds on next install/build' : 'Permanent', reversible ? 'var(--text)' : 'var(--danger-fg)'),
       ])
     );
 
     // reversible / safety note
     host.appendChild(
       el('div', { style: 'display:flex;align-items:flex-start;gap:14px;padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid var(--border);margin-bottom:20px' }, [
-        ic(reversible ? 'undo' : 'shield', 22, { color: reversible ? 'var(--accent-fg)' : 'var(--danger-fg)' }),
+        ic(reversible ? 'refresh' : 'shield', 22, { color: reversible ? 'var(--accent-fg)' : 'var(--danger-fg)' }),
         el('div', { style: 'flex:1' }, [
           el('div', { style: 'font-weight:700;font-size:14.5px;margin-bottom:4px', text: reversible ? 'Rebuilds on next install or build' : 'Permanent removal' }),
           el('div', { style: 'color:var(--text-2);font-size:13px;line-height:1.55', text: reversible
@@ -343,7 +418,7 @@
       }
       host.appendChild(listEl);
     } else {
-      host.appendChild(el('div', { style: 'color:var(--text-3);font-size:13.5px;margin-bottom:24px', text: 'The scan no longer lists files for this action. Re-scan to refresh.' }));
+      host.appendChild(el('div', { style: 'color:var(--text-3);font-size:13.5px;margin-bottom:24px', text: 'The scan no longer lists files for this action. Scan again to refresh.' }));
     }
 
     // result banner (after applying). A refused or failed clean never reads as
@@ -358,7 +433,8 @@
             : r.state === 'empty' ? 'Nothing was freed' : 'Could not clean';
       const reasons = Array.from(new Set((r.refused || []).map((x) => x.reason).filter(Boolean)));
       const lines = [];
-      if (done) lines.push('Space reclaimed. Build artifacts rebuild on your next install or build.');
+      if (done) lines.push(a.kind === 'docker' ? 'Space reclaimed inside Docker.' : 'Space reclaimed. Build artifacts rebuild on your next install or build.');
+      if (r.note) lines.push(r.note);
       else if (r.state === 'empty') lines.push('The selected items were already empty or gone.');
       else if (r.state === 'failed') lines.push((r.error || 'Something went wrong while removing files.') + '.');
       else {
@@ -424,7 +500,7 @@
       if (S.route === 'action') SP.go('action'); // reflect the cleaning state
       try {
         const res = a.kind === 'docker'
-          ? await api.dockerPrune(a.dockerKind).then((r) => (r && r.ok ? { ok: true, totalFreed: r.freed } : r))
+          ? await api.dockerPrune(a.dockerKind).then((r) => (r && r.ok ? { ok: true, totalFreed: r.freed, note: r.note || (S.docker && S.docker.diskNote) || null } : r))
           : await api.clean(a.jobs, confirmed ? Object.assign({}, a.meta, { confirmed: true }) : a.meta);
         if (a.kind !== 'docker' && res && res.ok !== false) {
           // Try again resends only what was not removed.
@@ -433,7 +509,7 @@
         }
         if (res && res.ok !== false) {
           const sum = SP.summariseClean(res, { fallbackFreed: a.savings != null ? a.savings : 0 });
-          S.actionResult = { state: sum.state, totalFreed: sum.freed, refused: sum.refused, errors: sum.errors };
+          S.actionResult = { state: sum.state, totalFreed: sum.freed, refused: sum.refused, errors: sum.errors, note: (res && res.note) || null };
           // Celebratory success overlay only when everything was removed.
           if (sum.state === 'done') SP.burst(SP.fmt(sum.freed), (a.meta && a.meta.label) || a.title || 'across cleaned items');
         } else {

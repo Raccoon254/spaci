@@ -162,6 +162,36 @@
     apple: 'apple', file: 'file',
   };
   function itemIcon(it) { return KIND_ICON[it.kind] || 'folder-2'; }
+  // Cleanable item mark: the Catppuccin tech the folder belongs to (node_modules
+  // by lockfile, target by stack, and so on), else the generic glyph.
+  function itemMark(it, p, size) {
+    const T = window.SpaciTechIcon;
+    const tech = T && T.forArtifact ? T.forArtifact(it, p, enrichOf(p)) : null;
+    if (tech) return tic(tech, size, { label: tech });
+    return ic(itemIcon(it), size);
+  }
+
+  // Git host mark. Only a repo whose origin points at github.com gets the
+  // GitHub logo; any other repo shows a plain branch glyph. The scan does not
+  // always know the origin (older caches), so unknown means plain git.
+  function gitOrigin(p, en) {
+    const g = (en && en.git) || null;
+    const raw = (g && (g.origin || g.remote || g.remoteUrl || g.url)) || (p && (p.gitOrigin || p.origin)) || '';
+    return typeof raw === 'string' ? raw : '';
+  }
+  function isGitHub(url) {
+    return /^(https?:\/\/|ssh:\/\/|git:\/\/)?([^@\/]+@)?(www\.)?github\.com[:\/]/i.test(url);
+  }
+  function gitMark(p, en, size) {
+    if (!(p.isGit || (en && en.git))) return null;
+    const url = gitOrigin(p, en);
+    if (isGitHub(url)) return ic('github', size, { color: 'var(--text-3)' });
+    return el('span', { title: url ? 'Git repository (' + url.replace(/\/\/[^@\/]*@/, '//') + ')' : 'Git repository', style: 'display:inline-flex' }, [ic('branch', size, { color: 'var(--text-3)' })]);
+  }
+  function dockerMark(size, active) {
+    if (SP.bic) return SP.bic('docker', size, { label: 'Uses Docker', fallback: 'box', style: active ? '' : 'opacity:.55;filter:grayscale(1)' });
+    return ic('box', size, { color: active ? 'var(--accent-fg)' : 'var(--text-4)' });
+  }
 
   // ----- helpers -----
   function enrichOf(p) {
@@ -548,10 +578,10 @@
 
       const titleLine = el('div', { style: 'font-weight:600;font-size:14.5px;display:flex;align-items:center;gap:9px' }, [
         el('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap', text: p.name }),
-        (p.isGit || (en && en.git)) ? ic('github', 15, { color: 'var(--text-3)' }) : null,
-        // Docker mark: dimmed when the project merely declares Docker, accented
-        // when the engine is actually holding storage for it.
-        p.docker ? ic('docker', 15, { kind: 'logo', color: dockerBytes(p) ? 'var(--accent-fg)' : 'var(--text-4)' }) : null,
+        gitMark(p, en, 15),
+        // Docker mark: dimmed when the project merely declares Docker, full
+        // colour when the engine is actually holding storage for it.
+        p.docker ? dockerMark(15, dockerBytes(p) > 0) : null,
       ]);
 
       const node = el('div', {
@@ -662,12 +692,12 @@
       }, [
         el('div', { style: 'color:var(--accent-fg)' }, [ring('breathe', 60)]),
         el('div', { style: 'font-size:18px;font-weight:700;letter-spacing:-.4px;color:var(--text)', text: 'No projects found' }),
-        el('div', { style: 'font-size:14px;max-width:360px', text: 'Nothing with regenerable build artifacts turned up here. Try Scan again or choose a different folder.' }),
+        el('div', { style: 'font-size:14px;max-width:360px', text: 'Nothing with regenerable build artifacts turned up here. Scan again or choose a different folder.' }),
         el('button', {
           style: 'height:42px;padding:0 20px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;margin-top:4px',
           hov: 'background:var(--accent-hover)',
           onclick: () => runScan(),
-        }, [ic('scanner', 16), 'Scan again']),
+        }, [ic('scanner', 16), 'Scan']),
       ]);
     }
 
@@ -879,14 +909,14 @@
 
     return el('div', { style: 'background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:20px;box-shadow:var(--shadow-sm);margin-top:16px' }, [
       el('div', { style: 'display:flex;align-items:center;gap:9px;margin-bottom:14px' }, [
-        ic('docker', 16, { kind: 'logo', color: 'var(--text-3)' }),
+        dockerMark(16, true),
         el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600', text: 'Docker' }),
       ]),
       el('div', { style: 'display:flex;gap:34px;flex-wrap:wrap' }, fields.map((g) => el('div', { style: 'min-width:0' }, [
         el('div', { style: 'color:var(--text-3);font-size:12px;display:flex;gap:6px;align-items:center;margin-bottom:5px' }, [ic(g.icon, 15), g.k]),
         el('div', { style: 'font-weight:700;font-size:15px;color:' + g.color + ';overflow:hidden;text-overflow:ellipsis', text: g.v }),
       ]))),
-      usage ? el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:13px;line-height:1.5', text: 'Spaci never deletes Docker volumes or running containers. Reclaim images and build cache from the System screen.' }) : null,
+      usage ? el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:13px;line-height:1.5', text: 'Spaci never removes Docker volumes in bulk and never touches running containers. Reclaim images and build cache, and review volumes one at a time, in System Cleaner.' }) : null,
     ]);
   }
 
@@ -1024,7 +1054,7 @@
     const itemsWrap = el('div', { style: 'display:flex;flex-direction:column;gap:9px' });
     host.appendChild(itemsWrap);
 
-    const itemRows = items.map((it) => buildItemRow(it, chosen, updateAfterToggle));
+    const itemRows = items.map((it) => buildItemRow(it, chosen, updateAfterToggle, p));
     if (!items.length) {
       itemsWrap.appendChild(el('div', { style: 'padding:24px 16px;text-align:center;color:var(--text-3);font-size:14px', text: 'No cleanable items in this project.' }));
     } else {
@@ -1107,8 +1137,10 @@
 
   function safeItems(p) { return (p.items || []).filter((it) => it.safe === true); }
 
-  function buildItemRow(it, chosen, onToggle) {
-    const badgeSafe = it.safe;
+  function buildItemRow(it, chosen, onToggle, p) {
+    // Three tiers, as everywhere: Safe (green), Review (amber), Permanent (red).
+    const risk = it.reversible === false ? { cls: 'sp-badge-warn', text: 'Permanent' }
+      : it.safe === true ? { cls: 'sp-badge-safe', text: 'Safe' } : { cls: 'sp-badge-caution', text: 'Review' };
     const locked = it.safe !== true; // unverified: information only, never cleaned by Spaci
     const check = locked ? el('div', { style: 'width:24px;flex:none' }) : el('div', {
       class: chosen.has(it.path) ? 'sp-check-on' : '',
@@ -1120,14 +1152,14 @@
       style: 'display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border);' + (locked ? '' : 'cursor:pointer'),
     }, [
       check,
-      el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic(itemIcon(it), 22)]),
+      el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [itemMark(it, p, 22)]),
       el('div', { style: 'flex:1;min-width:0' }, [
         el('div', { style: 'font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px' }, [
           el('span', { text: it.name }),
           el('span', {
-            class: badgeSafe ? 'sp-badge-safe' : 'sp-badge-warn',
+            class: risk.cls,
             style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700',
-            text: badgeSafe ? 'Safe' : 'Caution',
+            text: risk.text,
           }),
         ]),
         el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px;line-height:1.5', text: it.note || it.path }),

@@ -34,7 +34,7 @@
     var S = window.SP && window.SP.state;
     var theme = S && S.theme;
     if (!theme) {
-      var root = document.getElementById('app');
+      var root = document.getElementById('app') || document.getElementById('tray');
       theme = root && root.classList.contains('light') ? 'light' : 'dark';
     }
     return theme === 'light' ? 'latte' : 'mocha';
@@ -152,11 +152,91 @@
   function refreshAll() { LIVE.forEach(function (n) { n._render(); }); }
   window.addEventListener('sp-themechange', refreshAll);
 
+  // ---- which tech a cleanable thing belongs to --------------------------
+  // Package manager of a project, from the enrich step's lockfile evidence
+  // (frameworks[] carries npm / yarn / pnpm / bun as tool ids).
+  var MANAGERS = ['pnpm', 'yarn', 'bun', 'npm'];
+  function managerOf(project, enrich) {
+    var list = (enrich && Array.isArray(enrich.frameworks) ? enrich.frameworks : [])
+      .concat(project && Array.isArray(project.frameworks) ? project.frameworks : []);
+    for (var i = 0; i < MANAGERS.length; i++) {
+      for (var j = 0; j < list.length; j++) {
+        var f = list[j];
+        if (f && typeof f === 'object' && f.id === MANAGERS[i]) return MANAGERS[i];
+      }
+    }
+    return null;
+  }
+  function stackOf(project, enrich) {
+    var ids = [];
+    var pr = (enrich && enrich.primary) || (project && project.primary);
+    if (pr && typeof pr.id === 'string') ids.push(pr.id);
+    if (project && project.type && typeof project.type.id === 'string') ids.push(project.type.id);
+    (enrich && Array.isArray(enrich.frameworks) ? enrich.frameworks : []).forEach(function (f) {
+      if (f && typeof f.id === 'string') ids.push(f.id);
+    });
+    (enrich && Array.isArray(enrich.languages) ? enrich.languages : []).forEach(function (l) {
+      if (l && typeof l.id === 'string') ids.push(l.id);
+    });
+    return ids;
+  }
+  function has(ids, want) { for (var i = 0; i < want.length; i++) if (ids.indexOf(want[i]) >= 0) return want[i]; return null; }
+
+  // Artifact folder name -> tech mark. Folders shared by several ecosystems
+  // (target, build, vendor, dist) look at the project's stack to decide.
+  // Returns a tech id, or null when nothing fits (the caller keeps its icon).
+  // Catppuccin has no CocoaPods mark, so Pods uses the iOS one.
+  function forArtifact(item, project, enrich) {
+    var name = item && typeof item.name === 'string' ? item.name : '';
+    var ids = stackOf(project, enrich);
+    switch (name) {
+      case 'node_modules': return managerOf(project, enrich) || 'npm';
+      case '.next': return 'nextjs';
+      case '.nuxt': case '.output': return 'nuxt';
+      case '.turbo': return 'turbo';
+      case '.svelte-kit': return 'sveltekit';
+      case '.angular': return 'angular';
+      case '.gradle': return 'gradle';
+      case '__pycache__': case '.mypy_cache': case '.ruff_cache': case 'venv': case '.venv': return 'python';
+      case '.pytest_cache': return 'pytest';
+      case '.dart_tool': return 'dart';
+      case 'Pods': return 'ios';
+      case 'DerivedData': return 'xcode';
+      case '.terraform': return 'terraform';
+      case 'obj': return 'dotnet';
+      case 'target': return has(ids, ['rust']) || has(ids, ['maven', 'java', 'kotlin', 'scala', 'spring', 'spring-boot']) || 'rust';
+      case 'build': return has(ids, ['flutter', 'android', 'gradle']) || (has(ids, ['kotlin', 'java']) ? 'gradle' : null) || has(ids, ['react', 'vite']) || null;
+      case 'vendor': return has(ids, ['php', 'laravel', 'symfony']) ? 'php' : has(ids, ['go']) ? 'go' : has(ids, ['ruby', 'rails']) ? 'ruby' : 'php';
+      case 'dist': case 'out': return has(ids, ['vite', 'webpack', 'rollup', 'esbuild', 'nextjs', 'typescript', 'javascript', 'node']) || null;
+      default: break;
+    }
+    // Older scans only carry the rule's kind.
+    var KIND = { node: 'npm', python: 'python', flutter: 'dart', php: 'php', gradle: 'gradle', java: 'java', svelte: 'sveltekit' };
+    var k = item && typeof item.kind === 'string' ? item.kind : '';
+    return Object.prototype.hasOwnProperty.call(KIND, k) ? KIND[k] : null;
+  }
+
+  // System Cleaner developer caches -> tech mark (ids from storage-classifier).
+  var FOR_TARGET = {
+    npm: 'npm', yarn: 'yarn', pnpm: 'pnpm', bun: 'bun', deno: 'deno',
+    gradle: 'gradle', 'gradle-wrapper': 'gradle', maven: 'maven', nuget: 'dotnet',
+    cargo: 'cargo', cocoapods: 'ios', pub: 'flutter', 'dart-server': 'dart',
+    pip: 'python', go: 'go',
+    'xcode-derived': 'xcode', 'xcode-archives': 'xcode', 'xcode-devicesupport': 'xcode', 'simulator-caches': 'xcode',
+  };
+  function forTarget(t) {
+    var id = t && typeof t.id === 'string' ? t.id : '';
+    return Object.prototype.hasOwnProperty.call(FOR_TARGET, id) ? FOR_TARGET[id] : null;
+  }
+
   // Small public surface for screens: warm the cache for a set of ids (so a
   // long list swaps in together) and read the current flavor.
   window.SpaciTechIcon = {
     flavor: currentFlavor,
     cleanId: cleanId,
+    managerOf: managerOf,
+    forArtifact: forArtifact,
+    forTarget: forTarget,
     preload: function (ids) {
       var fl = currentFlavor();
       return Promise.all((ids || []).map(function (id) { return load(cleanId(id) || FALLBACK, fl); }));

@@ -38,7 +38,23 @@
     system: '#7a8a99', other: '#8b867f'
   };
   const PALETTE = ['#3b6fd0', '#8b6bd9', '#d96a8a', '#2fb8a8', '#e0954f', '#5e93dd', '#7fb5c9', '#7a8a99'];
-  const colorFor = (c, i) => COLORS[c.key] || PALETTE[i % PALETTE.length];
+  // The shell's shared category map (SP.catColor) wins when present, so the
+  // dashboard and this screen always colour a category the same way.
+  const colorFor = (c, i) => {
+    const f = SP.catColor;
+    let v = null;
+    try { v = typeof f === 'function' ? f(c && c.key, i) : (f && c ? f[c.key] : null); } catch (_) { v = null; }
+    return typeof v === 'string' && v ? v : (COLORS[c.key] || PALETTE[i % PALETTE.length]);
+  };
+
+  // Logo for a folder that belongs to a known app (Docker, AI tools,
+  // browsers), else the given glyph.
+  function pathMark(p, glyph, size) {
+    const B = window.SpaciBrandIcon;
+    const brand = B && B.forPath ? B.forPath(p) : null;
+    if (brand && SP.bic) return SP.bic(brand, size, { label: brand, fallback: glyph });
+    return ic(glyph, size);
+  }
 
   function recBytes(r) { return Number(r.bytes != null ? r.bytes : r.savings != null ? r.savings : r.size || 0) || 0; }
 
@@ -80,10 +96,13 @@
     const total = sd.estimate || sd.pieces.reduce((a, p) => a + p.bytes, 0);
     const bar = el('div', { style: 'display:flex;height:12px;border-radius:99px;overflow:hidden;background:var(--track);margin:18px 0 6px' },
       sd.pieces.map((p) => el('div', { title: p.label, style: 'height:100%;flex:none;border-right:2px solid var(--panel);background:' + (SD_COLORS[p.key] || '#8b867f') + ';width:' + (total ? (p.bytes / total) * 100 : 0) + '%' })));
-    const line = (color, label, hint, value, pct) => el('div', { style: 'display:flex;align-items:center;gap:13px;padding:11px 0;border-top:1px solid var(--border)' }, [
+    const line = (color, label, hint, value, pct, brand) => el('div', { style: 'display:flex;align-items:center;gap:13px;padding:11px 0;border-top:1px solid var(--border)' }, [
       el('span', { style: 'width:11px;height:11px;border-radius:4px;flex:none;background:' + color }),
       el('div', { style: 'flex:1;min-width:0' }, [
-        el('div', { style: 'font-weight:600;font-size:13.5px', text: label }),
+        el('div', { style: 'font-weight:600;font-size:13.5px;display:flex;align-items:center;gap:8px' }, [
+          brand && SP.bic ? SP.bic(brand, 16, { decorative: true, fallback: '' }) : null,
+          el('span', { text: label }),
+        ]),
         hint ? el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:1px;line-height:1.45', text: hint }) : null
       ]),
       el('div', { style: 'text-align:right;flex:none' }, [
@@ -91,7 +110,7 @@
         pct ? el('div', { style: 'font-size:11px;color:var(--text-4);margin-top:1px', text: pct }) : null
       ])
     ]);
-    const rows = sd.pieces.map((p) => line(SD_COLORS[p.key] || '#8b867f', p.label, p.hint, fmt(p.bytes), total ? (p.bytes / total * 100).toFixed(0) + '%' : ''));
+    const rows = sd.pieces.map((p) => line(SD_COLORS[p.key] || '#8b867f', p.label, p.hint, fmt(p.bytes), total ? (p.bytes / total * 100).toFixed(0) + '%' : '', p.key === 'docker' ? 'docker' : null));
     if (sd.snapshots) {
       const n = sd.snapshots.count;
       rows.push(line('var(--track-bright)', 'Local snapshots', 'APFS does not report their size, so they are counted under macOS and other system files. macOS removes them when it needs the space.', n + (n === 1 ? ' snapshot' : ' snapshots'), ''));
@@ -117,7 +136,8 @@
 
     const hover = S.storageHover;
     const maxCat = cats.reduce((m, c) => Math.max(m, c.bytes), 0) || 1;
-    const reclaim = (S.recs || []).filter((r) => !(r.action && r.action.type === 'none')).reduce((a, r) => a + recBytes(r), 0);
+    const tot = SP.reclaimTotals ? SP.reclaimTotals() : null;
+    const reclaim = tot ? tot.top : (S.recs || []).filter((r) => !(r.action && r.action.type === 'none')).reduce((a, r) => a + recBytes(r), 0);
 
     host.appendChild(el('div', { style: 'font-size:31px;font-weight:700;letter-spacing:-1.1px', text: 'Storage' }));
     host.appendChild(el('div', { style: 'color:var(--text-2);font-size:14.5px;margin-top:7px;max-width:560px;margin-bottom:30px', text: 'A clear picture of where your ' + fmt(total) + ' has gone. Hover any segment to inspect it.' }));
@@ -200,8 +220,8 @@
       host.appendChild(el('div', { style: 'display:flex;align-items:center;gap:16px;padding:18px 22px;border-radius:16px;background:var(--accent-soft);border:1px solid var(--border);margin-top:18px' }, [
         el('div', { style: 'width:46px;height:46px;border-radius:13px;background:var(--accent);color:var(--on-accent);display:grid;place-items:center;flex:none' }, [ic('sparkles', 24)]),
         el('div', { style: 'flex:1' }, [
-          el('div', { style: 'font-weight:700;font-size:15px', text: fmt(reclaim) + ' of this is reclaimable' }),
-          el('div', { style: 'color:var(--text-2);font-size:13px;margin-top:2px', text: 'Mostly developer build artifacts and caches that regenerate on demand.' })
+          el('div', { style: 'font-weight:700;font-size:15px', text: 'Top recommendations: ' + fmt(reclaim) }),
+          el('div', { style: 'color:var(--text-2);font-size:13px;margin-top:2px', text: (tot ? 'All cleanable found: ' + fmt(tot.grand) + (tot.unverified > 0 ? '. ' + fmt(tot.unverified) + ' unverified, not counted.' : '.') + ' ' : '') + 'Mostly build artifacts and caches that regenerate on demand.' })
         ]),
         el('button', { style: 'height:44px;padding:0 20px;border-radius:12px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer', hov: 'background:var(--accent-hover)', onclick: () => SP.go('recommendations') }, ['Review', ic('chevron-right', 15)])
       ]));
@@ -275,7 +295,7 @@
         style: 'display:flex;align-items:center;gap:15px;padding:14px 17px;border-radius:14px;background:var(--panel);border:1px solid var(--border)',
         hov: 'border-color:var(--border-2)'
       }, [
-        el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:' + color }, [ic(isDir ? 'folder' : 'file', 22)]),
+        el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:' + color }, [pathMark(item.path, isDir ? 'folder' : 'file', 22)]),
         el('div', { style: 'flex:1;min-width:0' }, [
           el('div', { style: 'font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: item.name || (item.path || '').split('/').pop() || '' }),
           el('div', { class: 'mono', style: 'color:var(--text-3);font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,SFMono-Regular,Menlo,monospace', text: shortPath(item.path, home) })
