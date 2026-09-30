@@ -48,19 +48,24 @@ const DOCKER_TYPE = { id: 'docker', name: 'Docker', icon: 'box', markers: [], pr
 /**
  * Cleanable artifacts. `match` is a directory/file name; `safe` indicates it is a
  * pure build-artifact (always regenerable). `note` explains what it is.
+ * `ambiguous` names are also used for committed source (Go vendor/, a library's
+ * dist/, electron-builder's build/), so outside a git repo they are downgraded to
+ * unsafe. `needsManifest` names are only safe beside a Cargo.toml or pom.xml.
+ * Whatever the rule says, a directory holding a git-tracked file is never offered.
  */
 const CLEAN_RULES = [
   { match: 'node_modules',   kind: 'node',    safe: true,  note: 'Installed npm packages, restore with `npm install`.' },
-  { match: 'target',         kind: 'java',    safe: true,  note: 'Maven/Rust build output.' },
-  { match: 'build',          kind: 'gradle',  safe: true,  note: 'Build output (Gradle/Android/etc.).' },
-  { match: 'dist',           kind: 'box',     safe: true,  note: 'Bundled distribution output.' },
-  { match: 'out',            kind: 'box',     safe: true,  note: 'Compiler/bundler output.' },
+  { match: 'target',         kind: 'java',    safe: true,  needsManifest: true, note: 'Maven/Rust build output.' },
+  { match: 'build',          kind: 'gradle',  safe: true,  ambiguous: true,  note: 'Build output (Gradle/Android/etc.).' },
+  { match: 'dist',           kind: 'box',     safe: true,  ambiguous: true,  note: 'Bundled distribution output.' },
+  { match: 'out',            kind: 'box',     safe: true,  ambiguous: true,  note: 'Compiler/bundler output.' },
   // .NET and C/C++ intermediates. Worth naming explicitly: an obj/ tree buries
   // hundreds of tiny build/ folders that are far more useful counted as one.
   { match: 'obj',            kind: 'box',     safe: true,  note: '.NET/C build intermediates.' },
   { match: '.next',          kind: 'react',   safe: true,  note: 'Next.js build cache.' },
   { match: '.nuxt',          kind: 'react',   safe: true,  note: 'Nuxt build cache.' },
   { match: '.turbo',         kind: 'flash',   safe: true,  note: 'Turborepo cache.' },
+  { match: '.output',        kind: 'box',     safe: true,  note: 'Nuxt/Nitro build output.' },
   { match: '.parcel-cache',  kind: 'flash',   safe: true,  note: 'Parcel bundler cache.' },
   { match: '.svelte-kit',    kind: 'svelte',  safe: true,  note: 'SvelteKit build output.' },
   { match: '.angular',       kind: 'react',   safe: true,  note: 'Angular build cache.' },
@@ -68,9 +73,11 @@ const CLEAN_RULES = [
   { match: '__pycache__',    kind: 'python',  safe: true,  note: 'Python bytecode cache.' },
   { match: '.pytest_cache',  kind: 'python',  safe: true,  note: 'Pytest cache.' },
   { match: '.mypy_cache',    kind: 'python',  safe: true,  note: 'Mypy type-check cache.' },
+  { match: '.ruff_cache',    kind: 'python',  safe: true,  note: 'Ruff lint cache.' },
+  { match: '.dart_tool',     kind: 'flutter', safe: true,  note: 'Dart/Flutter tool cache, restore with `pub get`.' },
   { match: 'venv',           kind: 'python',  safe: false, note: 'Python virtualenv, recreate with your tooling.' },
   { match: '.venv',          kind: 'python',  safe: false, note: 'Python virtualenv, recreate with your tooling.' },
-  { match: 'vendor',         kind: 'php',     safe: true,  note: 'Composer/Go vendored deps, restore with install.' },
+  { match: 'vendor',         kind: 'php',     safe: true,  ambiguous: true,  note: 'Composer/Go vendored deps, restore with install.' },
   { match: 'Pods',           kind: 'apple',   safe: true,  note: 'CocoaPods deps, restore with `pod install`.' },
   { match: 'DerivedData',    kind: 'apple',   safe: true,  note: 'Xcode build cache.' },
   { match: 'coverage',       kind: 'file',    safe: true,  note: 'Test coverage reports.' },
@@ -360,6 +367,30 @@ async function dockerShellProject(dir, dockerFiles) {
 }
 
 /**
+ * Which candidate paths contain a git-tracked file? One `git ls-files` per
+ * project root, however many candidates there are. Returns null when the
+ * project is not in a git repo (or git is unavailable), else the set of
+ * candidate paths that hold tracked files.
+ */
+function trackedCandidates(dir, candidates, signal) {
+  return new Promise((resolve) => {
+    const rels = candidates.map((c) => path.relative(dir, c.path).split(path.sep).join('/'));
+    execFile('git', ['--literal-pathspecs', '-C', dir, 'ls-files', '-z', '--', ...rels],
+      { timeout: 15000, signal, maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => {
+        const tracked = new Set();
+        // Output too big to read means a huge tracked tree: treat all as tracked.
+        if (err && err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return resolve(new Set(candidates));
+        if (err) return resolve(null);
+        for (const file of stdout.split('\0')) {
+          if (!file) continue;
+          rels.forEach((rel, i) => { if (file === rel || file.startsWith(rel + '/')) tracked.add(candidates[i]); });
+        }
+        resolve(tracked);
+      });
+  });
+}
+
+/**
  * Directories the artifact hunt never enters. `.git` is the expensive one: a
  * long-lived repo holds tens of thousands of loose objects and cannot contain a
  * build artifact, so descending into it was most of the old scan time.
@@ -388,7 +419,10 @@ async function buildProject(dir, detected, signal, rootEntries) {
       if (e.isSymbolicLink()) continue;
       const full = path.join(cur, e.name);
       if (CLEAN_NAMES.has(e.name)) {
-        found.push({ name: e.name, path: full, isDir: e.isDirectory() });
+        found.push({
+          name: e.name, path: full, isDir: e.isDirectory(),
+          hasManifest: ents.some((x) => x.name === 'Cargo.toml' || x.name === 'pom.xml'),
+        });
         continue; // do not descend into a cleanable dir
       }
       if (!e.isDirectory()) continue;
@@ -399,14 +433,28 @@ async function buildProject(dir, detected, signal, rootEntries) {
     return subdirs;
   }, signal);
 
-  const items = await mapPool(found, SIZE_WORKERS, async (f) => {
+  // Never offer anything that holds tracked source. One git query per project.
+  const tracked = found.length ? await trackedCandidates(dir, found, signal) : null;
+  const inGit = tracked !== null;
+  const offered = inGit ? found.filter((f) => !tracked.has(f)) : found;
+
+  const items = await mapPool(offered, SIZE_WORKERS, async (f) => {
     const rule = CLEAN_BY_NAME[f.name];
+    let safe = rule.safe;
+    let note = rule.note;
+    if (rule.needsManifest && !f.hasManifest) {
+      safe = false;
+      note = 'Could not verify this is build output (no Cargo.toml or pom.xml beside it).';
+    } else if (rule.ambiguous && !inGit) {
+      safe = false;
+      note = `${rule.note} Could not be verified as build output: not a git repo.`;
+    }
     let size = 0;
     try { size = f.isDir ? await dirSize(f.path, signal) : (await fsp.stat(f.path)).size; }
     catch { /* unreadable, count it as zero */ }
     return {
       name: f.name, path: f.path, size, isDir: f.isDir,
-      kind: rule.kind, safe: rule.safe, reversible: rule.reversible !== false, note: rule.note,
+      kind: rule.kind, safe, reversible: rule.reversible !== false, note,
     };
   });
   items.sort((a, b) => b.size - a.size);

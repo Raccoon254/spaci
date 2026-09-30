@@ -180,3 +180,82 @@ test('directory sizing agrees with a plain walk', async () => {
   // differ by allocation overhead rather than by an order of magnitude.
   assert.ok(fast >= walked, 'block usage should not be below apparent size for plain files');
 });
+
+// ---------------------------------------------------------------------------
+// Tracked-file protection: name alone never makes a directory cleanable.
+// ---------------------------------------------------------------------------
+
+const { execFileSync } = require('node:child_process');
+
+/** Throwaway project under os.tmpdir(), optionally a real git repo. */
+function makeRepo({ git, files, ignore }) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-git-'));
+  const proj = path.join(root, 'proj');
+  fs.mkdirSync(proj);
+  const write = (rel, body = 'x') => {
+    const full = path.join(proj, rel);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, body);
+  };
+  write('package.json', '{"name":"proj"}');
+  if (ignore) write('.gitignore', ignore);
+  for (const [rel, body] of Object.entries(files)) write(rel, body);
+  if (git) {
+    const run = (...args) => execFileSync('git', ['-C', proj, ...args], { stdio: 'ignore' });
+    run('init', '-q');
+    run('add', '-A');
+  }
+  return { root, proj };
+}
+
+async function scanOne({ root, proj }) {
+  const { projects } = await scanner.scanProjects(root, null, new AbortController().signal);
+  fs.rmSync(root, { recursive: true, force: true });
+  const p = projects.find((x) => x.path === proj);
+  assert.ok(p, 'project is detected');
+  return p.items;
+}
+
+test('a git-tracked build/ is never offered', async () => {
+  const items = await scanOne(makeRepo({ git: true, files: { 'build/entitlements.mac.plist': '<plist/>' } }));
+  assert.equal(items.find((i) => i.name === 'build'), undefined);
+});
+
+test('a gitignored build/ with output is offered and safe', async () => {
+  const items = await scanOne(makeRepo({
+    git: true, ignore: 'build/\n', files: { 'build/out.bin': 'y'.repeat(2048) },
+  }));
+  const build = items.find((i) => i.name === 'build');
+  assert.ok(build, 'ignored build output is offered');
+  assert.equal(build.safe, true);
+});
+
+test('a git-tracked vendor/ is never offered', async () => {
+  const items = await scanOne(makeRepo({ git: true, files: { 'vendor/lib.go': 'package lib' } }));
+  assert.equal(items.find((i) => i.name === 'vendor'), undefined);
+});
+
+test('a tracked file deep inside a candidate blocks it, siblings stay offered', async () => {
+  const items = await scanOne(makeRepo({
+    git: true, ignore: 'dist/\n',
+    files: { 'build/a/b/keep.txt': 'k', 'dist/bundle.js': 'z' },
+  }));
+  assert.deepEqual(items.map((i) => i.name), ['dist']);
+});
+
+test('outside git, ambiguous names are offered but not marked safe', async () => {
+  const items = await scanOne(makeRepo({ git: false, files: { 'build/out.bin': 'y' } }));
+  const build = items.find((i) => i.name === 'build');
+  assert.ok(build);
+  assert.equal(build.safe, false);
+  assert.match(build.note, /could not be verified/i);
+});
+
+test('.svelte-kit and __pycache__ are detected', async () => {
+  const items = await scanOne(makeRepo({
+    git: false, files: { '.svelte-kit/output/a.js': 'x', 'pkg/__pycache__/m.pyc': 'x' },
+  }));
+  const names = items.map((i) => i.name).sort();
+  assert.deepEqual(names, ['.svelte-kit', '__pycache__']);
+  assert.ok(items.every((i) => i.safe === true));
+});
