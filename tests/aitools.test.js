@@ -146,7 +146,9 @@ for (const [platform, home, env] of PLATFORMS) {
 
   test(`${platform}: claude projects target protects memory`, () => {
     const t = targets.find((x) => x.id === 'claude-transcripts');
-    assert.deepEqual(t.paths, [path.join(home, '.claude', 'projects')]);
+    // Target paths use the target platform's separators, not the host's.
+    const P = platform === 'win32' ? path.win32 : path.posix;
+    assert.deepEqual(t.paths, [P.join(home, '.claude', 'projects')]);
     assert.ok(t.protect.includes('memory'));
     assert.equal(t.reversible, false);
     assert.match(t.description, /memory/i);
@@ -176,7 +178,7 @@ for (const [platform, home, env] of PLATFORMS) {
 test('sqlite targets include their wal and shm sidecars', () => {
   const t = buildAiToolTargets(ctxFor('darwin', fx.home)).find((x) => x.id === 'codex-databases');
   for (const s of ['thread_history_1.sqlite', 'thread_history_1.sqlite-wal', 'logs_2.sqlite-shm']) {
-    assert.ok(t.paths.includes(path.join(fx.home, '.codex', s)), s);
+    assert.ok(t.paths.includes(path.posix.join(fx.home, '.codex', s)), s);
   }
 });
 

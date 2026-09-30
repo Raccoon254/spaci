@@ -573,7 +573,9 @@ test('personal global excludes are not proof of build output', async () => {
   const home = tmpRoot();
   write(home, '.config/git/ignore', 'build/\n');
   write(home, 'excludes', 'build/\n');
-  write(home, '.gitconfig', `[core]\n\texcludesFile = ${path.join(home, 'excludes')}\n`);
+  // Backslashes are escape characters in git config files; use forward slashes,
+  // which git accepts on every platform.
+  write(home, '.gitconfig', `[core]\n\texcludesFile = ${path.join(home, 'excludes').replace(/\\/g, '/')}\n`);
   const root = tmpRoot();
   const proj = path.join(root, 'proj');
   write(proj, 'package.json', '{}');

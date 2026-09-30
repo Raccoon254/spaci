@@ -449,7 +449,9 @@ test('the CLI is looked for outside PATH, which a GUI launch does not have', () 
   assert.ok(docker.candidateBinaries('win32', 'C:\\Users\\Demo').every((p) => p.endsWith('.exe')));
 });
 
-test('desktopDisk reports allocated bytes for a sparse image, not its apparent size', async () => {
+// NTFS only makes a file sparse when it is explicitly flagged, so truncate
+// cannot build this fixture on Windows.
+test('desktopDisk reports allocated bytes for a sparse image, not its apparent size', { skip: process.platform === 'win32' && 'NTFS files are not sparse unless flagged' }, async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-disk-'));
   try {
     const file = docker.desktopDiskPaths('darwin', home)[0];
@@ -478,7 +480,7 @@ const DISK = { path: '/x/Docker.raw', bytes: 54e9, allocatedBytes: 54e9, apparen
 
 test('with the engine down the disk image is still reported, with guidance', () => {
   for (const state of ['engine-down', 'stopped']) {
-    const out = docker.reclaimSuggestions({ ok: false, reason: 'daemon-not-running', status: { state }, desktopDisk: DISK });
+    const out = docker.reclaimSuggestions({ ok: false, reason: 'daemon-not-running', status: { state }, desktopDisk: DISK, platform: 'darwin' });
     assert.equal(out.length, 1, state);
     const s = out[0];
     assert.equal(s.kind, 'desktop-disk');
