@@ -46,11 +46,11 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        # npm ci: exactly the committed lockfile, so every platform builds from
-        # the same dependency tree. The lockfile lists the other-platform
-        # optional deps (dmg-license and friends); `npm ci --os=linux|win32
-        # --cpu=x64` with npm 10.8 (Node 20) installs cleanly from it.
-        run: npm ci --no-audit --no-fund
+        # npm install, not npm ci: the lockfile is resolved on one OS and lacks
+        # electron-builder's optional per-platform packages (for example
+        # electron-builder-squirrel-windows and archiver), so npm ci fails the
+        # strict lock check on the runners. v2.3.0-rc.1 failed exactly so.
+        run: npm install --no-audit --no-fund
 
       # macOS: build + code-sign + notarize. The signing env (CSC_LINK etc.) is
       # ONLY set here; passing an empty CSC_LINK to Windows/Linux makes

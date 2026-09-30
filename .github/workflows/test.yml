@@ -37,7 +37,7 @@ jobs:
 
       - name: Install dependencies
         # Aligned with release.yml: the committed lockfile, exactly.
-        run: npm ci --no-audit --no-fund
+        run: npm install --no-audit --no-fund  # see release.yml: npm ci fails on the runners
 
       - name: Syntax check
         # bash on every runner (Git Bash on Windows) so the loop below is

@@ -86,12 +86,11 @@ A top entry versioned `X.Y.Z-rc.N` is also accepted and released as is, but
 
 ## Dependencies in CI
 
-Every workflow installs with `npm ci`, so CI builds exactly the committed
-`package-lock.json`. The lockfile carries the other platforms' optional
-packages (for example `dmg-license`, macOS only); `npm ci --os=linux --cpu=x64`
-and `--os=win32` with npm 10.8.2 (the npm of Node 20) install from it without
-errors. After changing dependencies, commit the updated lockfile; `npm ci`
-fails when `package.json` and the lockfile disagree.
+Every workflow installs with `npm install`, not `npm ci`. The lockfile is
+resolved on one OS and does not list electron-builder's optional per-platform
+packages (for example `electron-builder-squirrel-windows` and `archiver`), so
+`npm ci` fails its strict lock check on the CI runners; v2.3.0-rc.1 failed that
+way on all three. After changing dependencies, still commit the updated lockfile.
 
 ## Where the changelog goes
 
