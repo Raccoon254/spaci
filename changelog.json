@@ -15,11 +15,12 @@
     "fixed": [
       "Emptying the Trash was preselected and labelled reversible. It is no longer preselected, it always asks first, and it is marked permanent. Xcode Archives are marked permanent too.",
       "Large files are now moved to the Trash instead of being deleted permanently, so you can put them back.",
+      "Files moved to the Trash are no longer counted as space freed, since the space only comes back when the Trash is emptied.",
       "History had a Restore button that did nothing. It has been removed, and the app no longer claims it can restore cleaned items.",
       "History counted items that failed or were skipped as cleaned. Counts now reflect what was actually removed, and a clean interrupted by a crash is recorded as interrupted.",
       "The tray showed a \"Guard on\" status, and the Tools screens showed sample figures as if they were real. Previews are now labelled as previews.",
       "The \"Desktop notifications\" setting is now respected.",
-      "Tightened what the app window is allowed to ask the background process to open, read or scan."
+      "Tightened what the app window is allowed to ask the background process to open, read or scan. The large-file scan now looks only in your home folder and in folders you choose."
     ]
   },
   {
