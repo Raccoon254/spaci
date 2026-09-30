@@ -18,6 +18,8 @@ export const RAW_BASE = 'https://raw.githubusercontent.com/Raccoon254/spaci';
 export const MEDIA_DIR = 'changelog/media/';
 export const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
 const MAX_NOTES_BYTES = 200 * 1024;
+// The site stores at most this many characters of notes and truncates the rest.
+const MAX_NOTES_CHARS = 50000;
 const SEVERITIES = ['info', 'update', 'important', 'critical'];
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -217,6 +219,10 @@ export function validateEntry(entry, { root = '.' } = {}) {
         else if (st.size > MAX_NOTES_BYTES) errors.push(`notes: ${rel} is larger than 200 KB.`);
         else md = readFileSync(join(root, rel), 'utf8');
       } catch { errors.push(`notes: ${rel} does not exist.`); }
+      if (md !== null && md.length > MAX_NOTES_CHARS) {
+        errors.push(`notes: ${rel} has ${md.length} characters; the site keeps at most ${MAX_NOTES_CHARS}.`);
+        md = null;
+      }
       if (md !== null) {
         if (!md.trim()) errors.push(`notes: ${rel} is empty.`);
         files.push(rel);

@@ -137,4 +137,10 @@ if (!res.ok) {
   console.error(`Publish failed: ${res.status} ${await res.text()}`);
   process.exit(1);
 }
+// The site may accept the release but drop or trim parts of it (for example
+// a notice it could not create); say so instead of reporting a clean sync.
+let body = {};
+try { body = await res.json(); } catch { /* older site: no JSON body */ }
+for (const w of Array.isArray(body.warnings) ? body.warnings : []) console.warn(`Warning from ${SITE}: ${w}`);
+if (body.notice) console.log(`Release notice ${body.notice.created ? 'created' : 'updated'} (${body.notice.id})`);
 console.log(`Synced ${version} (${files.length} files) to ${SITE}`);
