@@ -6,22 +6,24 @@ const fsp = fs.promises;
 const path = require('path');
 const { execFile } = require('child_process');
 
-const scanner = require('./scanner');
+// Scanning itself (scanner, languages, diskbreakdown, largefiles, aitools and
+// Docker's spawning calls) runs in the scan worker (src/scan-worker.js), never
+// here: spawning from Electron's main process blocks the UI. system.js and
+// docker.js are loaded only for their static tables and pure helpers.
 const system = require('./system');
 const docker = require('./docker');
 const cleaner = require('./cleaner');
-const aitools = require('./aitools');
 const cleanGuard = require('./clean-guard');
 const telemetry = require('./telemetry');
-const largefiles = require('./largefiles');
-const diskbreakdown = require('./diskbreakdown');
+const { createWorkerClient, workerEntryPath, utilityTransport } = require('./worker-client');
 const { initUpdater, getUpdateController } = require('./updater');
 const { createCacheStore, writeFileAtomic } = require('./scan-cache');
 const { createScanCoordinator, singleFlight, keyedSingleFlight } = require('./scan-coordinator');
 const { createScheduler, backgroundGate, clampIntervalHours, HOUR } = require('./scheduler');
-const { createScanService } = require('./background');
+const { createScanService, enrichRecord } = require('./background');
 const { startupRole, focusPlan } = require('./instance');
 const { sanitizeTechId, sanitizeFlavor } = require('./tech-ids');
+const { sanitizeBrandId, sanitizeTheme, hasDark: brandHasDark } = require('./brand-ids');
 const { createNoticesService } = require('./notices');
 const { createMediaCache } = require('./notice-media');
 
@@ -114,6 +116,44 @@ function appendHistory(entry) {
   catch (e) { console.error('appendHistory', e && e.message); }
 }
 
+// ---------- scan worker ----------
+// Every disk walk and every git/du/docker/pgrep spawn of a scan runs in one
+// utilityProcess (src/scan-worker.js). The main process only orchestrates:
+// scheduler, coordinator, cache, IPC, windows, tray. The worker starts on the
+// first request, stops after a few idle minutes, is restarted after a crash
+// (requests in flight fail with a clear error), and is killed, never awaited,
+// on quit. Cancelling a scan aborts the op's AbortController in the worker.
+// Read at load time, like the other electron imports (the wiring test stubs it).
+const electronUtility = require('electron').utilityProcess;
+const MIN = 60 * 1000;
+const WORKER_TIMEOUTS = {
+  ping: 10 * 1000,
+  scanProjects: 45 * MIN, // the scheduler's own watchdog gives up after an hour
+  scanSystem: 20 * MIN,
+  scanLargeFiles: 45 * MIN,
+  diskBreakdown: 10 * MIN,
+  topChildren: 2 * MIN,
+  enrichProject: 2 * MIN,
+  dockerSummary: 3 * MIN,
+  docker: 10 * MIN, // prune and Docker Desktop restart can be slow
+  revalidateArtifact: MIN,
+  aiToolStatus: 15 * 1000,
+};
+function spawnScanWorker() {
+  if (!electronUtility || typeof electronUtility.fork !== 'function') throw new Error('Scanning is unavailable: this Electron build has no utilityProcess.');
+  if (typeof app.isReady === 'function' && !app.isReady()) throw new Error('Scanning starts once Spaci is ready.');
+  return utilityTransport(electronUtility, workerEntryPath(app.getAppPath()));
+}
+const scanWorker = createWorkerClient({ spawn: spawnScanWorker, timeouts: WORKER_TIMEOUTS, idleMs: 5 * MIN });
+/** Run a scan operation in the worker. */
+function work(op, args = [], opts = {}) { return scanWorker.request(op, args, opts); }
+/**
+ * Call an allowlisted docker.js export by name in the worker (the list is
+ * DOCKER_ALLOWLIST in scan-worker-ops.js). Pass { onProgress } to receive the
+ * function's options.onProgress events.
+ */
+function dockerCall(name, args = [], opts = {}) { return work('docker', [name, args], opts); }
+
 // ---------- disk usage breakdown (by category) ----------
 // Single flight: every cache:updated makes the renderer ask for the breakdown
 // again, and each refresh walks the whole home folder. Concurrent callers share
@@ -122,7 +162,7 @@ const BREAKDOWN_FRESH_MS = 10 * 60 * 1000;
 const refreshBreakdown = singleFlight(async () => {
   const started = Date.now();
   try {
-    const b = await diskbreakdown.diskBreakdown(os.homedir());
+    const b = await work('diskBreakdown', [os.homedir()]);
     cache.diskBreakdown = { ...b, at: Date.now(), meta: { ...(b.meta || {}), durationMs: Date.now() - started } };
     writeCache();
     if (win && !win.isDestroyed()) win.webContents.send('disk:breakdown-updated', cache.diskBreakdown);
@@ -148,23 +188,13 @@ async function refreshDocker(projects, options = {}) {
 /** The Docker summary for a scan, without touching the cache (scans commit it). */
 async function computeDocker(projects, options = {}) {
   try {
-    const { inventory } = await scanner.attachDockerUsage(projects || [], options);
-    const disk = await docker.desktopDisk();
-    return inventory && inventory.ok
-      ? {
-        ok: true,
-        approximate: Boolean(inventory.approximate),
-        status: inventory.status,
-        categories: inventory.categories,
-        totals: inventory.totals,
-        desktopDisk: disk,
-        projects: (projects || []).filter((p) => p.docker && p.docker.usage).length,
-        at: Date.now(),
-      }
-      // Keep the disk image size and engine state on failure too: when Docker
-      // Desktop is up but its engine is down, the disk image is still the
-      // biggest thing Spaci can explain to the user.
-      : { ok: false, reason: inventory ? inventory.reason : 'unavailable', status: inventory ? inventory.status : null, state: inventory ? inventory.state : null, desktopDisk: disk, at: Date.now() };
+    // The worker gets only { path, docker } per project and answers with the
+    // summary plus the docker record of each project it attributed storage to.
+    const list = projects || [];
+    const stubs = list.map((p) => ({ path: p.path, docker: p.docker || null }));
+    const { summary, attached } = await work('dockerSummary', [stubs, options]);
+    for (const a of attached || []) if (list[a.index]) list[a.index].docker = a.docker;
+    return summary;
   } catch (e) {
     return { ok: false, reason: 'error', error: e && e.message, at: Date.now() };
   }
@@ -185,10 +215,12 @@ function updateTrayTitle() {
 scanService = createScanService({
   coordinator: scanCoordinator,
   store: cacheStore,
-  scanProjects: (root, onProgress, signal) => scanner.scanProjects(root, onProgress, signal),
-  scanSystem: (onProgress, signal) => system.scanSystem(onProgress, signal),
+  // Project scans also attach `languages` and `primary` to every project (in
+  // the worker), so the project list shows language strips for every row.
+  scanProjects: (root, onProgress, signal) => work('scanProjects', [root, { languages: true }], { onProgress, signal }),
+  scanSystem: (onProgress, signal) => work('scanSystem', [], { onProgress, signal }),
   computeDocker: (projects) => computeDocker(projects),
-  enrichProject: (dir, signal) => scanner.enrichProject(dir, signal),
+  enrichProject: (dir, signal) => work('enrichProject', [dir], { signal }),
   refreshBreakdown: () => refreshBreakdown(),
   keepProject,
   getRoot: () => (loadPrefs().scanRoots || [])[0] || os.homedir(),
@@ -478,10 +510,15 @@ app.on('before-quit', () => {
   const u = getUpdateController();
   if (u) u.stop();
   scanCoordinator.abortAll('quit');
+  // Kill the scan worker now instead of waiting for its ops to wind down, so
+  // Quit is never held up by a scan. A cancelled quit simply starts a new one.
+  Object.values(aborts).forEach((a) => a && a.abort());
+  scanWorker.stop('quit');
 });
 app.on('will-quit', () => {
   // Past this point nothing is written: a scan that settles late is dropped.
   scanService.close();
+  scanWorker.close();
 });
 
 // ---------- helpers ----------
@@ -536,6 +573,22 @@ function getTechIcon(id, flavor) {
   try { svg = fs.readFileSync(path.join(__dirname, 'renderer', 'icons', 'tech', fl, key + '.svg'), 'utf8'); }
   catch { svg = null; }
   techIconCache.set(ck, svg);
+  return svg;
+}
+
+// Vendored brand logos from src/renderer/icons/brand. Ids are checked against
+// the vendored list; theme 'dark' prefers <id>-dark.svg when one exists.
+const brandIconCache = new Map();
+function getBrandIcon(id, theme) {
+  const key = sanitizeBrandId(id);
+  if (!key) return null;
+  const th = sanitizeTheme(theme);
+  const file = th === 'dark' && brandHasDark.has(key) ? key + '-dark' : key;
+  if (brandIconCache.has(file)) return brandIconCache.get(file);
+  let svg = null;
+  try { svg = fs.readFileSync(path.join(__dirname, 'renderer', 'icons', 'brand', file + '.svg'), 'utf8'); }
+  catch { svg = null; }
+  brandIconCache.set(file, svg);
   return svg;
 }
 
@@ -655,9 +708,11 @@ ipcMain.handle('disk:breakdown', async () => {
 });
 ipcMain.handle('icon:get', (_e, name) => getIcon(name));
 ipcMain.handle('techicon:get', (_e, id, flavor) => getTechIcon(id, flavor));
+ipcMain.handle('brandicon:get', (_e, id, theme) => getBrandIcon(id, theme));
 
 // Biggest immediate children of a category's directories (Storage drill-down).
-ipcMain.handle('fs:top-children', (_e, dirs) => diskbreakdown.topChildren(Array.isArray(dirs) ? dirs : [], 25));
+ipcMain.handle('fs:top-children', (_e, dirs) => work('topChildren', [Array.isArray(dirs) ? dirs : [], 25])
+  .catch((e) => { console.error('[top-children] failed:', e && e.message); return []; }));
 ipcMain.handle('logo:get', (_e, name) => getLogo(name));
 ipcMain.handle('cache:get', () => cache);
 // Explicit request: bypasses the battery/load gate, joins a run in flight.
@@ -721,7 +776,9 @@ ipcMain.handle('docker:kinds', () => Object.values(docker.PRUNE_KINDS)
 ipcMain.handle('docker:prune', async (_e, kind) => {
   const spec = docker.PRUNE_KINDS[kind];
   if (!spec) return { ok: false, error: 'Unknown Docker cleanup: ' + kind, freed: 0 };
-  const res = await docker.prune(kind);
+  let res;
+  try { res = await dockerCall('prune', [kind]); }
+  catch (e) { return { ok: false, error: (e && e.message) || 'Docker cleanup failed.', freed: 0 }; }
   if (res.ok) {
     appendHistory({
       at: Date.now(), scope: 'docker', label: spec.name, count: 1,
@@ -737,9 +794,10 @@ ipcMain.handle('docker:prune', async (_e, kind) => {
 
 const refreshEnrich = keyedSingleFlight(async (p) => {
   try {
-    const r = await scanner.enrichProject(p, new AbortController().signal);
+    // Size, git, languages, frameworks, primary and analysis, all computed in the worker.
+    const r = await work('enrichProject', [p]);
     cache.enrich = cache.enrich || {};
-    cache.enrich[p] = { totalSize: r.totalSize, git: r.git, at: Date.now() };
+    cache.enrich[p] = enrichRecord(r, Date.now());
     writeCache();
     if (win && !win.isDestroyed()) win.webContents.send('enrich:updated', { path: p, ...cache.enrich[p] });
     return cache.enrich[p];
@@ -747,7 +805,7 @@ const refreshEnrich = keyedSingleFlight(async (p) => {
     return (cache.enrich && cache.enrich[p]) || { totalSize: 0, git: null };
   }
 });
-// Returns cached git/size instantly (refreshing in the background); pass force to recompute now.
+// Returns cached size/git/languages instantly (refreshing in the background); pass force to recompute now.
 ipcMain.handle('project:enrich', async (_e, p, force) => {
   if (!force && cache.enrich && cache.enrich[p]) { refreshEnrich(p); return cache.enrich[p]; }
   return await refreshEnrich(p);
@@ -770,10 +828,11 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
     const known = new Set([...TARGET_INDEX.keys(), ...projectPaths, ...lastLargeFiles]);
     const { allowed, refused } = await cleanGuard.enforceTargetRules(jobs, {
       index: TARGET_INDEX,
-      toolStatus: () => aitools.aiToolStatus(),
+      // Both checks spawn processes (pgrep, git), so they run in the worker.
+      toolStatus: () => work('aiToolStatus').catch(() => ({ ok: false, running: [] })),
       known,
       projectPaths,
-      revalidate: (p) => scanner.revalidateArtifact(p),
+      revalidate: (p) => work('revalidateArtifact', [p]),
     });
     const res = allowed.length
       ? await cleaner.clean(allowed, onProgress, ac.signal)
@@ -795,7 +854,7 @@ ipcMain.handle('scan:largefiles', async (e, root, minBytes) => {
   aborts.largefiles?.abort(); aborts.largefiles = new AbortController();
   const onProgress = (p) => e.sender.send('largefiles:progress', p);
   try {
-    const res = await largefiles.scanLargeFiles(root || os.homedir(), minBytes, onProgress, aborts.largefiles.signal);
+    const res = await work('scanLargeFiles', [root || os.homedir(), minBytes], { onProgress, signal: aborts.largefiles.signal });
     // Remember what was found: only these files may be deleted from that screen.
     lastLargeFiles = new Set((res.files || []).map((f) => f.path));
     return { ok: true, ...res };

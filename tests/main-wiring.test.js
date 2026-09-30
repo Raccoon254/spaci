@@ -12,6 +12,7 @@ const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { deferred, flush } = require('./fake-clock');
+const { createDispatcher } = require('../src/scan-worker-ops');
 
 const SRC = path.join(__dirname, '..', 'src');
 
@@ -51,9 +52,11 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
     restore() { counts.restores++; this.minimized = false; }
   }
   const img = { isEmpty: () => true, setTemplateImage() {} };
+  const appPath = path.join(__dirname, '..');
   const electron = {
     app: Object.assign(appEvents, {
       getPath: () => userData,
+      getAppPath: () => appPath,
       isPackaged: false,
       getVersion: () => '2.1.0',
       whenReady: () => ready.promise,
@@ -76,21 +79,75 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
   };
   const mk = (kind) => (...args) => {
     const d = deferred();
-    jobs[kind].push({ signal: args[args.length - 1], finish: d.resolve });
+    jobs[kind].push({ args, signal: args[args.length - 1], finish: d.resolve });
     return d.promise;
   };
+  // What the scan worker runs. The worker is faked in process (below) with the
+  // real dispatcher from scan-worker-ops.js, so messages take the same path as
+  // in the app, structured-cloned and asynchronous.
+  const calls = { main: [], worker: [] };
+  const workerModules = {
+    scanner: {
+      scanProjects: mk('projects'),
+      attachDockerUsage: async () => ({ inventory: { ok: false, reason: 'stub' } }),
+      enrichProject: async (dir) => {
+        calls.worker.push(['enrichProject', dir]);
+        return {
+          totalSize: 1, git: null,
+          languages: [{ id: 'typescript', name: 'TypeScript', bytes: 10, percent: 100 }],
+          frameworks: [{ id: 'react', name: 'React' }],
+          primary: { id: 'react', name: 'React' },
+          analysis: { fileCount: 1, source: 'git', truncated: false },
+        };
+      },
+      analyzeTech: async (dir) => {
+        calls.worker.push(['analyzeTech', dir]);
+        return { languages: [{ id: 'go', name: 'Go', bytes: 1, percent: 100 }], primary: { id: 'go', name: 'Go' } };
+      },
+      revalidateArtifact: async (p) => { calls.worker.push(['revalidateArtifact', p]); return { ok: false, reason: 'Stub refused.' }; },
+    },
+    system: { scanSystem: mk('system') },
+    docker: { desktopDisk: async () => null },
+    diskbreakdown: { diskBreakdown: async () => ({ categories: [] }), topChildren: async () => [{ path: '/x', bytes: 1 }] },
+    largefiles: { scanLargeFiles: async (root, min, onProgress) => { onProgress && onProgress({ phase: 'done' }); return { files: [], scanned: 0 }; } },
+    aitools: { aiToolStatus: async () => ({ ok: true, running: [] }) },
+  };
+  const forks = [];
+  electron.utilityProcess = {
+    fork(modulePath, args, opts) {
+      const child = new EventEmitter();
+      let dead = false;
+      const d = createDispatcher({
+        modules: workerModules,
+        send: (m) => { const c = structuredClone(m); setImmediate(() => { if (!dead) child.emit('message', c); }); },
+      });
+      child.postMessage = (m) => { if (dead) return; const c = structuredClone(m); setImmediate(() => { if (!dead) d.handle(c); }); };
+      // A killed process takes its ops with it.
+      child.kill = () => { if (dead) return false; dead = true; child.killed = true; d.abortAll(); setImmediate(() => child.emit('exit', null)); return true; };
+      child.crash = (code = 1) => { dead = true; d.abortAll(); child.emit('exit', code); };
+      forks.push({ modulePath, opts, child });
+      return child;
+    },
+  };
+  // Main must never reach the scan modules itself: those calls spawn processes
+  // on Electron's main thread. Only static tables and pure helpers are allowed.
+  const poison = (name) => (...args) => { calls.main.push([name, args]); throw new Error(`main.js called ${name} directly`); };
   const stubs = {
     electron,
     [path.join(SRC, 'scanner.js')]: {
-      scanProjects: mk('projects'),
-      attachDockerUsage: async () => ({ inventory: { ok: false, reason: 'stub' } }),
-      enrichProject: async () => ({ totalSize: 1, git: null }),
-      revalidateArtifact: async () => true,
+      scanProjects: poison('scanner.scanProjects'), attachDockerUsage: poison('scanner.attachDockerUsage'),
+      enrichProject: poison('scanner.enrichProject'), revalidateArtifact: poison('scanner.revalidateArtifact'),
     },
-    [path.join(SRC, 'system.js')]: { scanSystem: mk('system'), TARGETS: [] },
-    [path.join(SRC, 'docker.js')]: { desktopDisk: async () => null, PRUNE_KINDS: {}, reclaimSuggestions: () => [] },
-    [path.join(SRC, 'diskbreakdown.js')]: { diskBreakdown: async () => ({ categories: [] }), topChildren: async () => [] },
+    [path.join(SRC, 'system.js')]: { scanSystem: poison('system.scanSystem'), TARGETS: [] },
+    [path.join(SRC, 'docker.js')]: {
+      desktopDisk: poison('docker.desktopDisk'), prune: poison('docker.prune'), inventory: poison('docker.inventory'),
+      status: poison('docker.status'), PRUNE_KINDS: {}, reclaimSuggestions: () => [],
+    },
+    [path.join(SRC, 'diskbreakdown.js')]: { diskBreakdown: poison('diskbreakdown.diskBreakdown'), topChildren: poison('diskbreakdown.topChildren') },
+    [path.join(SRC, 'largefiles.js')]: { scanLargeFiles: poison('largefiles.scanLargeFiles') },
+    [path.join(SRC, 'aitools.js')]: { aiToolStatus: poison('aitools.aiToolStatus') },
   };
+  const required = [];
 
   const origLoad = Module._load;
   Module._load = function (request, parent, isMain) {
@@ -98,6 +155,7 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
     if (parent && parent.filename && parent.filename.startsWith(SRC)) {
       let resolved = null;
       try { resolved = Module._resolveFilename(request, parent, isMain); } catch (_) { /* not a file */ }
+      if (parent.filename === path.join(SRC, 'main.js')) required.push(resolved || request);
       if (resolved && stubs[resolved]) return stubs[resolved];
     }
     return origLoad.apply(this, arguments);
@@ -116,7 +174,7 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
     delete require.cache[updaterPath];
     fs.rmSync(userData, { recursive: true, force: true });
   };
-  return { handlers, appEvents, ready, sent, jobs, userData, electron, cleanup, counts, windows };
+  return { handlers, appEvents, ready, sent, jobs, userData, electron, cleanup, counts, windows, forks, calls, required, appPath };
 }
 
 test('startup survives a truncated cache.json and serves an empty, well-formed cache', async () => {
@@ -339,5 +397,130 @@ test('a fresh install records its version at launch and never shows What\'s new'
     assert.equal(await m.handlers['whatsnew:get'](), null);
     assert.equal(fetched, 0);
     m.appEvents.emit('before-quit');
+  } finally { m.cleanup(); }
+});
+
+// ---------- scan worker ----------
+
+const SCAN_MODULES = ['scanner.js', 'languages.js', 'diskbreakdown.js', 'largefiles.js', 'aitools.js'].map((f) => path.join(SRC, f));
+
+test('scan work runs in the worker: one utilityProcess from the app path, main never touches the scan modules', async () => {
+  const m = loadMain();
+  try {
+    assert.equal(m.forks.length, 0, 'no worker before the first scan');
+    for (const f of SCAN_MODULES) assert.ok(!m.required.includes(f), `main.js does not require ${path.basename(f)}`);
+    const sender = { send: (ch, p) => m.sent.push([ch, p]), isDestroyed: () => false };
+    const scan = m.handlers['scan:projects']({ sender }, '/home/u');
+    await flush();
+    assert.equal(m.forks.length, 1);
+    assert.equal(m.forks[0].modulePath, path.join(m.appPath, 'src', 'scan-worker.js'));
+    assert.ok(fs.existsSync(m.forks[0].modulePath));
+    // Progress from the worker reaches the renderer's existing channel.
+    m.jobs.projects[0].args[1]({ phase: 'scanning', percent: 7 });
+    await flush();
+    assert.ok(m.sent.some(([ch, p]) => ch === 'scan:progress' && p.percent === 7));
+    m.jobs.projects[0].finish({ projects: [{ path: '/home/u/a', items: [{ path: '/home/u/a/node_modules', size: 3 }], cleanableSize: 3 }] });
+    const res = await scan;
+    assert.equal(res.ok, true);
+    // Every scanned project carries a language strip, computed in the worker.
+    assert.deepEqual(res.projects[0].languages.map((l) => l.id), ['go']);
+    assert.equal(res.projects[0].primary.id, 'go');
+    const c = await m.handlers['cache:get']();
+    assert.deepEqual(c.projects[0].languages.map((l) => l.id), ['go']);
+    assert.ok(m.calls.worker.some(([op, dir]) => op === 'analyzeTech' && dir === '/home/u/a'));
+
+    // System scan, breakdown, drill-down, large files, Docker, clean revalidation.
+    const sys = m.handlers['scan:system']({ sender });
+    await flush();
+    m.jobs.system[0].finish([{ id: 'npm', size: 1, safe: true }]);
+    assert.equal((await sys).ok, true);
+    assert.deepEqual((await m.handlers['disk:breakdown']()).categories, []);
+    assert.deepEqual(await m.handlers['fs:top-children']({}, ['/x']), [{ path: '/x', bytes: 1 }]);
+    const lf = await m.handlers['scan:largefiles']({ sender }, '/home/u', 1);
+    assert.equal(lf.ok, true);
+    assert.ok(m.sent.some(([ch]) => ch === 'largefiles:progress'));
+    assert.equal((await m.handlers['docker:status']({}, true)).ok, false);
+    const cleaned = await m.handlers['clean']({ sender }, [{ path: '/home/u/a/node_modules' }], { scope: 'projects' });
+    assert.equal(cleaned.ok, true);
+    assert.deepEqual(cleaned.refused.map((r) => r.reason), ['Stub refused.'], 'revalidated in the worker, fails closed');
+    assert.ok(m.calls.worker.some(([op]) => op === 'revalidateArtifact'));
+
+    assert.deepEqual(m.calls.main, [], 'main.js never called a scan function directly');
+    assert.equal(m.forks.length, 1, 'one worker served everything');
+    m.appEvents.emit('before-quit');
+  } finally { m.cleanup(); }
+});
+
+test('project:enrich stores and returns languages, frameworks, primary and analysis; enrich:updated carries them', async () => {
+  const m = loadMain();
+  try {
+    m.ready.resolve(); // a window to push to
+    await flush();
+    const r = await m.handlers['project:enrich']({}, '/home/u/a', true);
+    assert.equal(r.totalSize, 1);
+    assert.deepEqual(r.languages.map((l) => l.id), ['typescript']);
+    assert.deepEqual(r.frameworks.map((f) => f.id), ['react']);
+    assert.equal(r.primary.id, 'react');
+    assert.equal(r.analysis.source, 'git');
+    const pushed = m.sent.find(([ch]) => ch === 'enrich:updated');
+    assert.ok(pushed);
+    assert.equal(pushed[1].path, '/home/u/a');
+    assert.deepEqual(pushed[1].languages, r.languages);
+    assert.deepEqual(pushed[1].primary, r.primary);
+    assert.deepEqual(pushed[1].frameworks, r.frameworks);
+    const c = await m.handlers['cache:get']();
+    assert.deepEqual(c.enrich['/home/u/a'].languages, r.languages);
+    // Cached answer is served at once, with the same fields.
+    const again = await m.handlers['project:enrich']({}, '/home/u/a');
+    assert.deepEqual(again.primary, r.primary);
+    assert.deepEqual(m.calls.main, []);
+    const onDisk = JSON.parse(fs.readFileSync(path.join(m.userData, 'cache.json'), 'utf8'));
+    assert.equal(onDisk.enrich['/home/u/a'].analysis.source, 'git');
+    m.appEvents.emit('before-quit');
+  } finally { m.cleanup(); }
+});
+
+test('a worker crash mid-scan fails that scan cleanly and the next scan gets a new worker', async () => {
+  const m = loadMain();
+  try {
+    const sender = { send() {}, isDestroyed: () => false };
+    const first = m.handlers['scan:projects']({ sender }, '/home/u');
+    await flush();
+    m.forks[0].child.crash(11);
+    const r1 = await first;
+    assert.equal(r1.ok, false);
+    assert.match(r1.error, /stopped unexpectedly/);
+    const second = m.handlers['scan:projects']({ sender }, '/home/u');
+    await flush();
+    assert.equal(m.forks.length, 2, 'respawned');
+    m.jobs.projects[1].finish({ projects: [{ path: '/home/u/b', items: [{ path: '/home/u/b/target', size: 1 }], cleanableSize: 1 }] });
+    assert.equal((await second).ok, true);
+    // Enrichment degrades to the cached answer rather than throwing.
+    m.forks[1].child.crash(1);
+    assert.deepEqual(await m.handlers['project:enrich']({}, '/nowhere', true).then((x) => typeof x), 'object');
+  } finally { m.cleanup(); }
+});
+
+test('Quit kills the worker at once, with a scan in flight, and nothing starts it again after will-quit', async () => {
+  const m = loadMain();
+  try {
+    m.ready.resolve();
+    await flush();
+    const sender = { send() {}, isDestroyed: () => false };
+    const scan = m.handlers['scan:projects']({ sender }, '/home/u');
+    const sys = m.handlers['scan:system']({ sender });
+    await flush();
+    const child = m.forks[0].child;
+    const t0 = Date.now();
+    m.appEvents.emit('before-quit');
+    assert.equal(child.killed, true, 'killed synchronously in before-quit');
+    m.appEvents.emit('will-quit');
+    const [r1, r2] = await Promise.all([scan, sys]);
+    assert.ok(Date.now() - t0 < 500, 'quit never waits on the worker');
+    assert.equal(r1.ok, false);
+    assert.equal(r1.cancelled, true);
+    assert.equal(r2.cancelled, true);
+    assert.equal((await m.handlers['project:enrich']({}, '/p', true)).totalSize, 0);
+    assert.equal(m.forks.length, 1, 'no worker started after quit');
   } finally { m.cleanup(); }
 });

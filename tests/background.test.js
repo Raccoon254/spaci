@@ -273,3 +273,64 @@ test('watchdog expiry: a hung background scan that settles later never writes, a
   assert.equal((await run2).status, 'ok');
   assert.deepEqual(h.store.get().projects.map((x) => x.path), ['/home/fresh']);
 });
+
+// ---------- scan worker failure modes (the scans run in a worker process) ----------
+
+test('a scan whose worker was stopped under it (cancel or quit) reports cancelled, not a failure', async () => {
+  const h = harness();
+  const p = h.svc.manualProjects('/home', () => {});
+  await flush();
+  h.svc.cancel('projects');
+  h.jobs.projects[0].fail(Object.assign(new Error('The scan worker was stopped (quit).'), { code: 'EWORKERSTOPPED' }));
+  const res = await p;
+  assert.equal(res.ok, false);
+  assert.equal(res.cancelled, true);
+  assert.deepEqual(h.log.lines.error, [], 'not logged as a failure');
+  assert.equal(h.store.writes.length, 0, 'nothing committed');
+});
+
+test('a superseded scan that fails on abort still hands its caller the newer result', async () => {
+  const h = harness();
+  const first = h.svc.manualSystem(() => {});
+  await flush();
+  const second = h.svc.manualSystem(() => {});
+  await flush();
+  assert.equal(h.jobs.system[0].signal.aborted, true);
+  h.jobs.system[0].fail(Object.assign(new Error('scanSystem was aborted.'), { name: 'AbortError' }));
+  h.jobs.system[1].finish([{ id: 'npm', size: 5, safe: true }]);
+  const [r1, r2] = await Promise.all([first, second]);
+  assert.deepEqual(r2.targets.map((t) => t.id), ['npm']);
+  assert.deepEqual(r1.targets.map((t) => t.id), ['npm']);
+});
+
+test('a real worker error on a live scan is still reported as a failure', async () => {
+  const h = harness();
+  const p = h.svc.manualProjects('/home', null);
+  await flush();
+  h.jobs.projects[0].fail(Object.assign(new Error('The scan worker stopped unexpectedly (exit code 1).'), { code: 'EWORKERCRASH' }));
+  const res = await p;
+  assert.equal(res.ok, false);
+  assert.match(res.error, /stopped unexpectedly/);
+  assert.equal(h.store.writes.length, 0);
+});
+
+test('background enrichment stores languages, frameworks, primary and analysis with size and git', async () => {
+  const { enrichRecord } = require('../src/background');
+  const r = {
+    totalSize: 7, git: { branch: 'main' },
+    languages: [{ id: 'rust', name: 'Rust', percent: 100 }], frameworks: [{ id: 'axum', name: 'Axum' }],
+    primary: { id: 'axum', name: 'Axum' }, analysis: { source: 'git', truncated: false },
+  };
+  const h = harness({ enrichProject: async () => r });
+  const bg = h.svc.backgroundRun();
+  await flush();
+  h.jobs.projects[0].finish({ projects: [project('/home/a')] });
+  await flush();
+  h.jobs.system[0].finish([]);
+  await bg;
+  const e = h.store.get().enrich['/home/a'];
+  assert.deepEqual({ ...e, at: 0 }, { ...enrichRecord(r, 0) });
+  assert.deepEqual(e.languages, r.languages);
+  assert.deepEqual(e.primary, r.primary);
+  assert.deepEqual(enrichRecord({ totalSize: 1 }, 5), { totalSize: 1, git: null, languages: [], frameworks: [], primary: null, analysis: null, at: 5 });
+});

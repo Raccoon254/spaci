@@ -12,13 +12,30 @@
 const msg = (e) => (e && e.message ? e.message : String(e));
 
 /**
+ * What cache.enrich[path] holds for one project: size and git, plus the
+ * language and framework analysis from scanner.enrichProject.
+ */
+function enrichRecord(r, at) {
+  const x = r || {};
+  return {
+    totalSize: x.totalSize || 0,
+    git: x.git || null,
+    languages: Array.isArray(x.languages) ? x.languages : [],
+    frameworks: Array.isArray(x.frameworks) ? x.frameworks : [],
+    primary: x.primary || null,
+    analysis: x.analysis || null,
+    at,
+  };
+}
+
+/**
  * @param {object} d
  * @param {ReturnType<import('./scan-coordinator').createScanCoordinator>} d.coordinator
  * @param {ReturnType<import('./scan-cache').createCacheStore>} d.store
  * @param {(root:string, onProgress:Function|null, signal:AbortSignal) => Promise<{projects:object[]}>} d.scanProjects
  * @param {(onProgress:Function|null, signal:AbortSignal) => Promise<object[]>} d.scanSystem
  * @param {(projects:object[]) => Promise<object>} d.computeDocker  Docker summary, attaches usage to projects
- * @param {(dir:string, signal:AbortSignal) => Promise<{totalSize:number,git:any}>} [d.enrichProject]
+ * @param {(dir:string, signal:AbortSignal) => Promise<{totalSize:number,git:any,languages?:object[],frameworks?:object[],primary?:object,analysis?:object}>} [d.enrichProject]
  * @param {() => Promise<object|null>} [d.refreshBreakdown]
  * @param {() => string} d.getRoot
  * @param {(channel:string, payload:any) => void} [d.emit]
@@ -93,6 +110,17 @@ function createScanService(d) {
         }
         return { ok: false, error: 'Scan cancelled.', cancelled: true };
       } catch (e) {
+        // Aborted (cancel, superseded, quit): the worker may have been stopped
+        // under it, which is not a failure worth reporting.
+        if (t.signal.aborted) {
+          if (t.reason === 'superseded') {
+            return supersededResult(t, () => {
+              const c = store.get();
+              return { ok: true, projects: c.projects, docker: c.docker, superseded: true };
+            });
+          }
+          return { ok: false, error: 'Scan cancelled.', cancelled: true };
+        }
         log.error('[scan] projects scan failed:', e);
         return { ok: false, error: msg(e) };
       } finally {
@@ -116,6 +144,10 @@ function createScanService(d) {
         }
         return { ok: false, error: 'Scan cancelled.', cancelled: true };
       } catch (e) {
+        if (t.signal.aborted) {
+          if (t.reason === 'superseded') return supersededResult(t, () => ({ ok: true, targets: store.get().system, superseded: true }));
+          return { ok: false, error: 'Scan cancelled.', cancelled: true };
+        }
         log.error('[scan] system scan failed:', e);
         return { ok: false, error: msg(e) };
       } finally {
@@ -201,7 +233,7 @@ function createScanService(d) {
           try {
             const r = await enrichProject(pr.path, ac.signal);
             if (!live()) break;
-            store.get().enrich[pr.path] = { totalSize: r.totalSize, git: r.git, at: now() };
+            store.get().enrich[pr.path] = enrichRecord(r, now());
             done++;
           } catch (e) { log.warn && log.warn('[bg] enrich failed for', pr.path, msg(e)); }
         }
@@ -252,4 +284,4 @@ function createScanService(d) {
   };
 }
 
-module.exports = { createScanService };
+module.exports = { createScanService, enrichRecord };
