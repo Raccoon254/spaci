@@ -74,6 +74,7 @@ const historyLog = require('./history-log');
 const restoreHints = require('./restore-hints');
 const cleanPlan = require('./clean-plan');
 const ipcGuards = require('./ipc-guards');
+const trayPolicy = require('./tray-policy');
 
 const isDev = process.argv.includes('--dev');
 
@@ -85,6 +86,9 @@ const isDev = process.argv.includes('--dev');
 // quits before any window, tray or timer exists (see the whenReady guard).
 const isPrimary = startupRole(app.requestSingleInstanceLock()) === 'primary';
 if (!isPrimary) app.quit();
+// Windows groups the taskbar button and routes notifications by this id; it
+// must match build.appId or toasts are attributed to electron.exe.
+if (process.platform === 'win32') { try { app.setAppUserModelId('ke.co.kentom.spaci'); } catch (_) { /* older Electron */ } }
 let win;
 let tray = null;
 let isQuitting = false;
@@ -462,8 +466,14 @@ function createWindow() {
   });
   win.webContents.on('preload-error', (_e, p, err) => console.log('[preload-error]', err && err.message));
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });
-  // Closing the window hides it instead of quitting, so the app keeps running in the menu bar.
-  win.on('close', (e) => { if (!isQuitting) { e.preventDefault(); win.hide(); } });
+  // Closing the window hides it, so the app keeps running in the menu bar or
+  // tray. Without a usable tray (some Linux desktops) closing quits instead,
+  // or the app would be running with no way back to it.
+  win.on('close', (e) => {
+    const action = trayPolicy.closeAction({ platform: process.platform, hasTray: trayUsable, isQuitting });
+    if (action === 'hide') { e.preventDefault(); win.hide(); }
+    else if (action === 'quit') { isQuitting = true; app.quit(); }
+  });
 }
 
 function showWin() { if (!win || win.isDestroyed()) createWindow(); else { win.show(); win.focus(); } }
@@ -519,42 +529,50 @@ function createTrayWindow() {
   trayWin.on('close', (e) => { if (!isQuitting) { e.preventDefault(); trayWin.hide(); } });
 }
 
-function toggleTrayPopover() {
+function toggleTrayPopover(_e, clickBounds) {
   if (!trayWin || trayWin.isDestroyed()) createTrayWindow();
   if (trayWin.isVisible()) { trayWin.hide(); return; }
-  // Position the popover under the tray icon, kept on screen.
+  // Next to the tray icon, kept on screen. getBounds() is all zeros on Linux
+  // and sometimes on Windows, so fall back to the pointer, then to the
+  // taskbar's corner (tray-policy.popoverPosition).
   try {
-    const tb = tray.getBounds();
     const screen = require('electron').screen;
-    const area = screen.getDisplayNearestPoint({ x: tb.x, y: tb.y }).workArea;
-    let x = Math.round(tb.x + tb.width / 2 - TRAY_W / 2);
-    x = Math.max(area.x + 6, Math.min(x, area.x + area.width - TRAY_W - 6));
-    const y = process.platform === 'darwin' ? Math.round(tb.y + tb.height + 2) : Math.round(area.y + 6);
-    trayWin.setPosition(x, y, false);
-  } catch (_) {}
+    let tb = clickBounds && clickBounds.width ? clickBounds : null;
+    if (!tb) { try { tb = tray.getBounds(); } catch (_) { tb = null; } }
+    let cursor = null;
+    try { cursor = screen.getCursorScreenPoint(); } catch (_) { cursor = null; }
+    const hasBounds = tb && tb.width > 0 && tb.height > 0;
+    const probe = hasBounds ? { x: Math.round(tb.x), y: Math.round(tb.y) } : cursor;
+    const display = probe ? screen.getDisplayNearestPoint(probe) : screen.getPrimaryDisplay();
+    const pos = trayPolicy.popoverPosition({ platform: process.platform, trayBounds: tb, cursor, display, width: TRAY_W, height: TRAY_H });
+    trayWin.setPosition(pos.x, pos.y, false);
+  } catch (e) { crashLog.warn(`tray popover position: ${e && e.message}`); }
   trayWin.show();
   trayWin.focus();
 }
 
 let updateReadyVersion = null;
+const TRAY_ACTIONS = {
+  open: () => showWin(),
+  scan: () => { showWin(); if (win && !win.isDestroyed()) win.webContents.send('tray:scan'); },
+  update: () => { const u = getUpdateController(); if (u) u.install(); },
+  quit: () => { isQuitting = true; app.quit(); },
+};
 function buildTrayMenu() {
-  const items = [
-    { label: 'Open Spaci', click: showWin },
-    { label: 'Smart Scan', click: () => { showWin(); win && win.webContents.send('tray:scan'); } },
-  ];
-  if (updateReadyVersion) {
-    items.push({ type: 'separator' }, {
-      label: `Restart to Update (${updateReadyVersion})`,
-      click: () => { const u = getUpdateController(); if (u) u.install(); },
-    });
-  }
-  items.push({ type: 'separator' }, { label: 'Quit Spaci', click: () => { isQuitting = true; app.quit(); } });
-  return Menu.buildFromTemplate(items);
+  return Menu.buildFromTemplate(trayPolicy.trayMenuItems({ updateReadyVersion }).map((it) => (
+    it.type === 'separator' ? { type: 'separator' } : { label: it.label, click: TRAY_ACTIONS[it.id] }
+  )));
+}
+/** Linux shows only the context menu, so it is set up front and rebuilt when an update is ready or withdrawn. */
+function refreshTrayMenu() {
+  if (!tray || !trayPolicy.usesContextMenuOnly(process.platform)) return;
+  try { tray.setContextMenu(buildTrayMenu()); } catch (e) { crashLog.warn(`tray menu: ${e && e.message}`); }
 }
 
 /** A verified update finished downloading: say so once, outside the Settings screen too. */
 function announceUpdate(version) {
   updateReadyVersion = version;
+  refreshTrayMenu();
   try {
     if (notificationsAllowed()) {
       const n = new Notification({
@@ -570,18 +588,38 @@ function announceUpdate(version) {
   } catch (e) { console.warn('[update] notification failed:', e && e.message); }
 }
 
-function createTray() {
+function trayImage() {
+  const spec = trayPolicy.trayIconSpec(process.platform);
   let image = nativeImage.createEmpty();
   try {
-    const trayPng = path.join(__dirname, '..', 'assets', 'branding', 'trayTemplate.png');
-    const img = nativeImage.createFromPath(trayPng);
-    if (img && !img.isEmpty()) { img.setTemplateImage(true); image = img; }
-    else { image = nativeImage.createFromNamedImage('NSActionTemplate', [0, 0, 0]); }
+    let img = nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'branding', spec.file));
+    if (img && !img.isEmpty() && spec.size && typeof img.resize === 'function') img = img.resize({ width: spec.size, height: spec.size });
+    if (img && !img.isEmpty()) { if (spec.template) img.setTemplateImage(true); image = img; }
+    else if (process.platform === 'darwin') image = nativeImage.createFromNamedImage('NSActionTemplate', [0, 0, 0]);
   } catch (_) {
-    try { image = nativeImage.createFromNamedImage('NSActionTemplate'); } catch (e2) { /* keep empty */ }
+    if (process.platform === 'darwin') { try { image = nativeImage.createFromNamedImage('NSActionTemplate'); } catch (e2) { /* keep empty */ } }
   }
-  tray = new Tray(image);
+  return image;
+}
+
+// False when there is no tray to return to (it failed, or this Linux desktop
+// cannot show one); closing the window then quits.
+let trayUsable = false;
+function createTray() {
+  try {
+    tray = new Tray(trayImage());
+  } catch (e) {
+    tray = null;
+    crashLog.warn(`no tray: ${e && e.message}`);
+    return;
+  }
+  trayUsable = process.platform !== 'linux' || trayPolicy.linuxTrayLikelyWorks(process.env);
   tray.setToolTip('Spaci');
+  if (trayPolicy.usesContextMenuOnly(process.platform)) {
+    // AppIndicator trays never send click events: the menu is the whole UI.
+    refreshTrayMenu();
+    return;
+  }
   // Left click opens the popover widget; right click shows the classic menu,
   // rebuilt each time so it can offer a downloaded update.
   tray.on('click', toggleTrayPopover);
@@ -629,7 +667,7 @@ function startApp() {
     onReady: announceUpdate,
     // Squirrel failed after "ready": drop the tray item and, if a restart was
     // under way, go back to close-to-tray behaviour.
-    onReadyWithdrawn: () => { updateReadyVersion = null; },
+    onReadyWithdrawn: () => { updateReadyVersion = null; refreshTrayMenu(); },
     onInstallAbandoned: () => { isQuitting = false; },
   });
   // After sleep, screen unlock or plugging in, re-check once (never a burst):

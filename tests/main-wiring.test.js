@@ -26,6 +26,7 @@ for (const name of ['setTimeout', 'setInterval']) {
 function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-')), { lock = true, shell = {}, dialog = {}, scanner = {}, system = {}, docker = {}, notification = null, updater = null, largefiles = null } = {}) {
   const counts = { windows: 0, trays: 0, quits: 0, shows: 0, focuses: 0, restores: 0 };
   const windows = [];
+  const trays = [];
   const handlers = {};
   const appEvents = new EventEmitter();
   const ready = deferred();
@@ -70,7 +71,11 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
     ipcMain: { handle: (ch, fn) => { handlers[ch] = fn; } },
     dialog,
     shell,
-    Tray: class extends EventEmitter { constructor() { super(); counts.trays++; } setToolTip(t) { sent.push(['tooltip', t]); } getBounds() { return {}; } },
+    Tray: class extends EventEmitter {
+      constructor() { super(); counts.trays++; trays.push(this); this.menus = []; }
+      setToolTip(t) { sent.push(['tooltip', t]); } getBounds() { return {}; }
+      setContextMenu(m) { this.menus.push(m); }
+    },
     Menu: { buildFromTemplate: (t) => t },
     nativeImage: { createEmpty: () => img, createFromPath: () => img, createFromNamedImage: () => img },
     powerMonitor: Object.assign(new EventEmitter(), { isOnBatteryPower: () => false, getCurrentThermalState: () => 'nominal' }),
@@ -193,7 +198,7 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
     delete require.cache[updaterPath];
     fs.rmSync(userData, { recursive: true, force: true });
   };
-  return { handlers, appEvents, ready, sent, jobs, userData, electron, cleanup, counts, windows, forks, calls, required, requiredAnywhere, appPath, processHandlers };
+  return { handlers, appEvents, ready, sent, jobs, userData, electron, cleanup, counts, windows, forks, calls, required, requiredAnywhere, appPath, processHandlers, trays };
 }
 
 test('startup survives a truncated cache.json and serves an empty, well-formed cache', async () => {
@@ -940,4 +945,61 @@ test('every window denies window.open (https goes to the browser) and blocks nav
     assert.deepEqual(opened, m.windows.map(() => 'https://spaci.kentom.co.ke/docs'));
     m.appEvents.emit('before-quit');
   } finally { m.cleanup(); }
+});
+
+/** Run `fn` with process.platform (and env keys) pretending to be another OS. */
+async function asPlatform(platform, env, fn) {
+  const desc = Object.getOwnPropertyDescriptor(process, 'platform');
+  const saved = {};
+  for (const k of Object.keys(env)) { saved[k] = process.env[k]; process.env[k] = env[k]; }
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+  try { return await fn(); } finally {
+    Object.defineProperty(process, 'platform', desc);
+    for (const k of Object.keys(env)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  }
+}
+
+test('linux tray: a context menu (Open, Scan now, Quit) rebuilt when an update is ready; no tray on stock GNOME means close quits', async () => {
+  let onReady = null;
+  let onWithdrawn = null;
+  const updater = {
+    initUpdater: (_w, opts) => { onReady = opts.onReady; onWithdrawn = opts.onReadyWithdrawn; return { wake() {} }; },
+    getUpdateController: () => null,
+  };
+  await asPlatform('linux', { XDG_CURRENT_DESKTOP: 'KDE', SPACI_TRAY: '' }, async () => {
+    const m = loadMain(undefined, { updater });
+    try {
+      m.ready.resolve();
+      await flush();
+      const tray = m.trays[0];
+      const labels = (menu) => menu.filter((i) => i.label).map((i) => i.label);
+      assert.deepEqual(labels(tray.menus[0]), ['Open Spaci', 'Scan now', 'Quit Spaci']);
+      assert.equal(tray.listenerCount('click'), 0, 'AppIndicator trays get the menu, not a popover');
+      assert.equal(m.windows.length, 1, 'no popover window on Linux');
+      onReady('2.3.0');
+      assert.deepEqual(labels(tray.menus[1]), ['Open Spaci', 'Scan now', 'Restart to Update (2.3.0)', 'Quit Spaci']);
+      onWithdrawn();
+      assert.deepEqual(labels(tray.menus[2]), ['Open Spaci', 'Scan now', 'Quit Spaci']);
+      // Scan now opens the window and starts a scan there.
+      tray.menus[2].find((i) => i.label === 'Scan now').click();
+      assert.ok(m.sent.some(([ch]) => ch === 'tray:scan'));
+      // A working tray: closing hides.
+      let prevented = false;
+      m.windows[0].emit('close', { preventDefault: () => { prevented = true; } });
+      assert.equal(prevented, true);
+      assert.equal(m.counts.quits, 0);
+      m.appEvents.emit('before-quit');
+    } finally { m.cleanup(); }
+  });
+  await asPlatform('linux', { XDG_CURRENT_DESKTOP: 'GNOME', SPACI_TRAY: '' }, async () => {
+    const m = loadMain(undefined, { updater });
+    try {
+      m.ready.resolve();
+      await flush();
+      let prevented = false;
+      m.windows[0].emit('close', { preventDefault: () => { prevented = true; } });
+      assert.equal(prevented, false, 'the window really closes');
+      assert.equal(m.counts.quits, 1, 'and Spaci quits instead of hiding with no way back');
+    } finally { m.cleanup(); }
+  });
 });
