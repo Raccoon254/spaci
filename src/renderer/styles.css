@@ -3,6 +3,26 @@
    live here; per-element layout is inline in the view code (as in the design).
    The root element is .sp-root; theme is toggled by adding .light to it. */
 
+/* DM Sans, bundled (SIL Open Font License 1.1, fonts/OFL.txt) so the app never
+   fetches fonts from Google at runtime. Variable font: weights 100 to 1000 and
+   the optical size axis, from @fontsource-variable/dm-sans 5.3.0. */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 1000;
+  src: url(fonts/dm-sans-latin-ext-opsz-normal.woff2) format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 1000;
+  src: url(fonts/dm-sans-latin-opsz-normal.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -18,18 +38,20 @@
   --border-2: #454545;
   --text: #f8f3f0;
   --text-2: #b6b1ab;
-  --text-3: #8b867f;
-  --text-4: #615d57;
+  /* text-3 and accent-fg reach 4.5:1 on bg, panel and panel-2. text-4 is for
+     decorative marks only (3:1 on bg and panel), never for text. */
+  --text-3: #9d978f;
+  --text-4: #7a756e;
   --accent: #014baa;
   --accent-hover: #0257c4;
-  --accent-fg: #5e93dd;
+  --accent-fg: #6aa0e6;
   --accent-soft: rgba(1, 75, 170, 0.18);
   --accent-soft-2: rgba(1, 75, 170, 0.3);
   --on-accent: #f8f3f0;
   --success: #34b27b;
   --success-soft: rgba(52, 178, 123, 0.16);
   --success-fg: #4fcb93;
-  --danger: #d65a45;
+  --danger: #c24e3b; /* white text on it: 4.72:1 */
   --danger-soft: rgba(214, 90, 69, 0.16);
   --danger-fg: #e8836f;
   --warn: #d9a441;
@@ -55,8 +77,8 @@
   --border-2: #d6cbbf;
   --text: #1f2024;
   --text-2: #5b5650;
-  --text-3: #8b857d;
-  --text-4: #b4aaa0;
+  --text-3: #6a655e;
+  --text-4: #8f8a83;
   --accent: #014baa;
   --accent-hover: #013f90;
   --accent-fg: #014baa;
@@ -65,13 +87,13 @@
   --on-accent: #ffffff;
   --success: #1f8a5b;
   --success-soft: rgba(31, 138, 91, 0.12);
-  --success-fg: #1f8a5b;
+  --success-fg: #177a4e;
   --danger: #c5503a;
   --danger-soft: rgba(197, 80, 58, 0.12);
-  --danger-fg: #c5503a;
+  --danger-fg: #b0442f;
   --warn: #b8862a;
   --warn-soft: rgba(184, 134, 42, 0.13);
-  --warn-fg: #a9781f;
+  --warn-fg: #86600f;
   --track: rgba(120, 110, 100, 0.16);
   --track-bright: rgba(120, 110, 100, 0.3);
   --desk: #e9e2d9;
@@ -136,7 +158,7 @@ spaci-tech-icon {
   flex: none;
 }
 input::placeholder {
-  color: var(--text-4);
+  color: var(--text-3);
 }
 input:focus {
   outline: none;
@@ -200,12 +222,13 @@ button {
 .sp-wd-on { background: var(--accent-fg); }
 .sp-chip-on { background: var(--accent) !important; color: var(--on-accent) !important; border-color: transparent !important; }
 .sp-tog-on { background: var(--accent) !important; border-color: transparent !important; }
-.sp-tog-on .sp-knob { transform: translateX(20px); background: var(--on-accent); }
+.sp-knob { background: var(--text-2); }
+.sp-tog-on .sp-knob { transform: translateX(20px); background: #ffffff; }
 .sp-fchip-on { background: var(--panel); color: var(--text) !important; box-shadow: var(--shadow-sm); }
 .sp-ab-accent { background: var(--accent); }
 .sp-ab-accent:hover { background: var(--accent-hover); }
 .sp-ab-danger { background: var(--danger); }
-.sp-ab-danger:hover { background: #c24e3b; }
+.sp-ab-danger:hover { background: #ad432f; }
 .sp-dot { width: 20px; }
 .sp-dot-on { background: var(--accent-fg) !important; width: 32px; }
 .sp-cm-danger { background: var(--danger-soft); color: var(--danger-fg); }
@@ -226,3 +249,47 @@ button {
 
 /* Skeleton placeholders while a project is being analysed. */
 .sp-skel { background: var(--track); animation: sp-pulse 1.6s ease-in-out infinite; }
+
+/* Keyboard focus, everywhere: buttons, the rows el() makes operable, switches,
+   checkboxes, links. Mouse clicks do not show it (focus-visible). */
+.sp-root :is(button, a, [role='button'], [role='switch'], [role='checkbox'], [role='radio'], [role='tab'], [tabindex='0']):focus { outline: none; }
+.sp-root :is(button, a, [role='button'], [role='switch'], [role='checkbox'], [role='radio'], [role='tab'], [tabindex='0']):focus-visible {
+  outline: 2px solid var(--accent-fg);
+  outline-offset: 2px;
+}
+.sp-root .sp-ab-accent:focus-visible,
+.sp-root .sp-ab-danger:focus-visible,
+.sp-root .sp-chip-on:focus-visible { outline-color: var(--text); }
+
+/* Notice banner (notices-ui.js). */
+.sp-notice-important { background: var(--warn-soft); color: var(--warn-fg); }
+.sp-notice-critical { background: var(--danger-soft); color: var(--danger-fg); }
+
+/* Notice and What's new bodies, rendered from the Block model. */
+.sp-notice-body { font-size: 13.5px; line-height: 1.6; color: var(--text-2); overflow-wrap: anywhere; }
+.sp-notice-body .sp-nb-h2 { font-size: 15.5px; font-weight: 700; color: var(--text); margin: 16px 0 6px; letter-spacing: -0.2px; }
+.sp-notice-body .sp-nb-h3 { font-size: 14px; font-weight: 700; color: var(--text); margin: 14px 0 4px; }
+.sp-notice-body > :first-child { margin-top: 0; }
+.sp-nb-p { margin: 0 0 10px; font-size: 13.5px; line-height: 1.6; color: var(--text-2); }
+.sp-nb-list { margin: 0 0 10px; padding-left: 20px; }
+.sp-nb-list li { margin: 3px 0; }
+.sp-nb-quote { margin: 0 0 10px; padding: 4px 0 4px 12px; border-left: 3px solid var(--border-2); color: var(--text-2); }
+.sp-nb-pre { margin: 0 0 10px; padding: 10px 12px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); overflow-x: auto; font-size: 12.5px; }
+.sp-nb-code { padding: 1px 5px; border-radius: 5px; background: var(--panel-2); font-size: 12.5px; }
+.sp-nb-hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+.sp-nb-link { color: var(--accent-fg); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+
+/* Reduced motion: no looping rings, spinners, shimmer or pulses, and no
+   entrance slides. The spaci-icon rings live in shadow DOM and carry the same
+   rule in icon-component.js. */
+@media (prefers-reduced-motion: reduce) {
+  .sp-root *,
+  .sp-root *::before,
+  .sp-root *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0s !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
