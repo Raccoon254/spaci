@@ -238,8 +238,8 @@
           el('div', { style: 'font-weight:600;font-size:15px', text: s.title }),
           el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:2px', text: s.sub })
         ]),
-        el('div', { class: s.on ? 'sp-tog-on' : '', style: 'width:46px;height:26px;border-radius:99px;position:relative;flex:none;border:1px solid var(--border);background:var(--panel-3)' }, [
-          el('span', { class: 'sp-knob', style: 'position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:var(--text-2);transition:transform .2s,background .2s' })
+        el('div', { class: s.on ? 'sp-tog-on' : '', role: 'img', 'aria-label': s.on ? 'On (preview)' : 'Off (preview)', style: 'width:46px;height:26px;border-radius:99px;position:relative;flex:none;border:1px solid var(--border);background:var(--panel-3)' }, [
+          el('span', { class: 'sp-knob', style: 'position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;transition:transform .2s,background .2s' })
         ])
       ])
     );
