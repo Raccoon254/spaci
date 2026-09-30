@@ -1003,3 +1003,37 @@ test('linux tray: a context menu (Open, Scan now, Quit) rebuilt when an update i
     } finally { m.cleanup(); }
   });
 });
+
+test('macOS: a packaged first launch outside Applications offers the move once and remembers the answer', async () => {
+  await asPlatform('darwin', {}, async () => {
+    const asked = [];
+    const moves = [];
+    const dialog = { showMessageBoxSync: (opts) => { asked.push(opts.message); return 1; } };
+    const m = loadMain(undefined, { dialog });
+    try {
+      Object.assign(m.electron.app, { isPackaged: true, isInApplicationsFolder: () => false, moveToApplicationsFolder: () => { moves.push(1); return true; } });
+      m.ready.resolve();
+      await flush();
+      assert.deepEqual(asked, ['Move Spaci to your Applications folder?']);
+      assert.deepEqual(moves, [], 'Not Now: nothing moved');
+      assert.equal(m.counts.windows >= 1, true, 'and Spaci starts normally');
+      const prefs = await m.handlers['prefs:get']();
+      assert.equal(prefs.moveToApplicationsAnswer, 'declined');
+      // The renderer cannot re-arm the prompt.
+      await m.handlers['prefs:set']({}, { moveToApplicationsAnswer: null });
+      assert.equal((await m.handlers['prefs:get']()).moveToApplicationsAnswer, 'declined');
+      m.appEvents.emit('before-quit');
+    } finally { m.cleanup(); }
+
+    // Choosing Move: nothing else starts, Electron relaunches the moved copy.
+    const m2 = loadMain(undefined, { dialog: { showMessageBoxSync: () => 0 } });
+    try {
+      Object.assign(m2.electron.app, { isPackaged: true, isInApplicationsFolder: () => false, moveToApplicationsFolder: (o) => { moves.push(o.conflictHandler('existsAndRunning')); return true; } });
+      m2.ready.resolve();
+      await flush();
+      assert.deepEqual(moves, [false], 'moved, never killing a running copy');
+      assert.equal(m2.counts.windows, 0, 'no window, tray or timers before the relaunch');
+      assert.equal(m2.counts.trays, 0);
+    } finally { m2.cleanup(); }
+  });
+});

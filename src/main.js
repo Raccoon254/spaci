@@ -75,6 +75,7 @@ const restoreHints = require('./restore-hints');
 const cleanPlan = require('./clean-plan');
 const ipcGuards = require('./ipc-guards');
 const trayPolicy = require('./tray-policy');
+const installLocation = require('./install-location');
 
 const isDev = process.argv.includes('--dev');
 
@@ -113,7 +114,8 @@ const DEFAULT_PREFS = {
 };
 // Written only by the notices service, never through prefs:set, so a renderer
 // that saves a stale copy of its prefs cannot resurrect a dismissed notice.
-const NOTICE_OWNED_PREFS = ['dismissedNotices', 'seenNoticeIds', 'notifiedNoticeIds', 'lastSeenVersion'];
+// moveToApplicationsAnswer is main's own too: the renderer cannot re-arm the prompt.
+const NOTICE_OWNED_PREFS = ['dismissedNotices', 'seenNoticeIds', 'notifiedNoticeIds', 'lastSeenVersion', installLocation.PREF];
 function loadPrefs() {
   try { return { ...DEFAULT_PREFS, ...JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8')) }; }
   catch { return { ...DEFAULT_PREFS }; }
@@ -645,7 +647,42 @@ app.whenReady().then(() => {
   startApp();
 }).catch(startupFailed);
 
+/**
+ * macOS, first packaged launch outside /Applications: offer to move there
+ * (once). True when the move is under way, in which case Electron quits and
+ * relaunches the moved copy, so nothing else may start.
+ */
+function maybeMoveToApplications() {
+  let inApplications = true;
+  try { inApplications = typeof app.isInApplicationsFolder === 'function' ? app.isInApplicationsFolder() : true; } catch (_) { inApplications = true; }
+  const outcome = installLocation.offerMove({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    inApplications,
+    prefs: loadPrefs(),
+    ask: () => dialog.showMessageBoxSync({
+      type: 'question',
+      buttons: ['Move to Applications', 'Not Now'],
+      defaultId: 0,
+      cancelId: 1,
+      message: 'Move Spaci to your Applications folder?',
+      detail: 'Spaci is running from outside Applications. Moved there, it can keep itself up to date and it stays put when you eject the disk image or clean up Downloads. Spaci will ask only once.',
+    }) === 0,
+    move: () => {
+      isQuitting = true;
+      const moved = app.moveToApplicationsFolder({ conflictHandler: installLocation.conflictChoice });
+      if (!moved) isQuitting = false;
+      return moved;
+    },
+    save: patchPrefs,
+    log: (msg) => crashLog.warn(msg),
+  });
+  if (outcome) crashLog.info(`move to Applications: ${outcome}`);
+  return outcome === 'moved';
+}
+
 function startApp() {
+  if (maybeMoveToApplications()) return;
   // Before any clean can run: a 'started' entry left by a crash is not "done".
   recoverInterruptedHistory();
   // Off the startup path; the interval catches an app left open past midnight.
