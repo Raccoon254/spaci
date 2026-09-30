@@ -23,6 +23,21 @@ function write(p, data = 'x') { fs.mkdirSync(path.dirname(p), { recursive: true 
 function age(p, ms) { const t = new Date(ms); fs.utimesSync(p, t, t); }
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 const quiet = { ok: true, list: [] };
+/**
+ * Make `dir` impossible to rename, the way real caches get stuck, until the
+ * returned function is called. POSIX: a read-only directory (like a root-owned
+ * ~/.npm/_cacache/content-v2), whose own '..' entry cannot change. Windows
+ * ignores directory modes for rename; there a folder holding an open file
+ * cannot move (npm or an antivirus scanner holding a cache file open).
+ */
+function pin(dir) {
+  if (process.platform === 'win32') {
+    const fd = fs.openSync(path.join(dir, 'f'), 'r');
+    return () => fs.closeSync(fd);
+  }
+  fs.chmodSync(dir, 0o555);
+  return () => fs.chmodSync(dir, 0o755);
+}
 const noAi = { ok: true, running: [] };
 
 /** A run over one npm cache (and optionally one project), on temp folders. */
@@ -72,8 +87,8 @@ function harness({ children = ['a', 'b'], project = false } = {}) {
 
 test('finding 1: a cache whose later child cannot move is rolled back, logged as failed, and nothing is purged', { skip: isRoot && 'root can rename anything' }, async () => {
   const h = harness();
-  // b cannot be renamed (like a root-owned ~/.npm/_cacache/content-v2): its own '..' cannot change.
-  fs.chmodSync(path.join(h.cache, 'b'), 0o555);
+  // b cannot be renamed (see pin).
+  const unpin = pin(path.join(h.cache, 'b'));
   try {
     const r = await ac.runAutoClean(h.deps);
     assert.equal(r.status, 'partial');
@@ -92,13 +107,13 @@ test('finding 1: a cache whose later child cannot move is rolled back, logged as
     assert.equal(done[0].bytes, 0);
     assert.deepEqual(fs.readdirSync(h.cache).sort(), ['a', 'b']);
   } finally {
-    fs.chmodSync(path.join(h.cache, 'b'), 0o755);
+    unpin();
   }
 });
 
 test('finding 1: when the roll back itself fails, what stayed staged is logged as trashed and partial so Undo shows', { skip: isRoot && 'root can rename anything' }, async () => {
   const h = harness();
-  fs.chmodSync(path.join(h.cache, 'b'), 0o555);
+  const unpin = pin(path.join(h.cache, 'b'));
   // npm writes a new "a" right after the old one moved: it cannot go back.
   const stage = h.staging.stage;
   h.staging.stage = (m, src, info) => {
@@ -122,7 +137,7 @@ test('finding 1: when the roll back itself fails, what stayed staged is logged a
     assert.match(h.notes[0].body, /Undo it from History/);
     assert.doesNotMatch(h.notes[0].body, /stopped before moving anything/);
   } finally {
-    fs.chmodSync(path.join(h.cache, 'b'), 0o755);
+    unpin();
   }
 });
 
