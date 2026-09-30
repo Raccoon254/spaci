@@ -247,6 +247,7 @@ function planTierA(shown = {}, tiers = classifyScan(shown)) {
       const r = tiers.items[it.path];
       if (!r || r.tier !== TIERS.A) continue;
       const bytes = Number(it.size) || 0;
+      if (bytes <= 0) continue;
       const name = it.name || baseName(it.path);
       const g = ARTIFACT_GROUPS[name];
       jobs.push({ path: it.path, isDir: it.isDir !== false, size: bytes, kind: 'artifact', project: p.path, name });
@@ -259,8 +260,8 @@ function planTierA(shown = {}, tiers = classifyScan(shown)) {
     const r = tiers.system[t.id];
     if (!r || r.tier !== TIERS.A) continue;
     const paths = (Array.isArray(t.existingPaths) && t.existingPaths.length) ? t.existingPaths : (Array.isArray(t.paths) ? t.paths : []);
-    if (!paths.length) continue;
     const bytes = Number(t.size) || 0;
+    if (!paths.length || bytes <= 0) continue;
     const g = A_TARGETS[t.id];
     // The size belongs to the target; spread nothing, so the total stays exact.
     paths.forEach((path, i) => jobs.push({ path, mode: 'contents', size: i === 0 ? bytes : 0, kind: 'cache', target: t.id, name: t.name }));

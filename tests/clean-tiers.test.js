@@ -141,6 +141,14 @@ test('planTierA selects every A item across projects and caches, grouped by kind
   assert.equal(plan.groups[0].key, 'Package caches', 'largest group first');
 });
 
+test('planTierA skips empty things', () => {
+  const plan = planTierA({
+    projects: [{ path: '/p/a', items: [item('node_modules', { path: '/p/a/node_modules', size: 0 })] }],
+    sysTargets: [{ id: 'npm', safe: true, reversible: true, size: 0, existingPaths: ['/h/.npm/_cacache'] }],
+  });
+  assert.equal(plan.count, 0);
+});
+
 test('planTierA of an empty scan is empty', () => {
   const plan = planTierA({});
   assert.deepEqual(plan, { jobs: [], groups: [], count: 0, bytes: 0, projects: 0 });
