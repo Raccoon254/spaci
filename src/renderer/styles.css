@@ -130,6 +130,11 @@ spaci-icon svg {
   height: 100%;
   display: block;
 }
+spaci-tech-icon {
+  display: inline-flex;
+  line-height: 0;
+  flex: none;
+}
 input::placeholder {
   color: var(--text-4);
 }
@@ -163,6 +168,7 @@ button {
 @keyframes sp-explode { 0% { transform: translateY(0) scale(1); opacity: 1; } 42% { transform: translateY(-18px) scale(0.35); opacity: 0; } 58% { transform: translateY(-18px) scale(0.35); opacity: 0; } 100% { transform: translateY(0) scale(1); opacity: 1; } }
 @keyframes sp-ping { 0% { transform: scale(0.4); opacity: 0.55; } 80% { opacity: 0; } 100% { transform: scale(1.7); opacity: 0; } }
 @keyframes sp-indet { 0% { transform: translateX(-120%); } 100% { transform: translateX(330%); } }
+@keyframes sp-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
 @keyframes sp-barflow { from { background-position: 0% 0; } to { background-position: 200% 0; } }
 
 /* Entrance animations only play under an .sp-anim ancestor. The shell adds it
@@ -207,3 +213,16 @@ button {
 
 /* Generic hover transition for interactive rows/cards (design uses style-hover). */
 .sp-hov { transition: background 0.16s, border-color 0.16s, color 0.16s, transform 0.16s; }
+
+/* Keyboard focus for the tech stack controls (filter chips, detected chips). */
+.sp-focus:focus { outline: none; }
+.sp-focus:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
+
+/* Tech filter chip (projects list) and detected tech chip (project detail). */
+.sp-tchip { transition: background 0.16s, border-color 0.16s, color 0.16s; }
+.sp-tchip:hover { border-color: var(--border-2) !important; color: var(--text) !important; }
+.sp-tchip-on,
+.sp-tchip-on:hover { border-color: var(--accent-fg) !important; background: var(--accent-soft) !important; color: var(--text) !important; }
+
+/* Skeleton placeholders while a project is being analysed. */
+.sp-skel { background: var(--track); animation: sp-pulse 1.6s ease-in-out infinite; }

@@ -10,7 +10,7 @@
    paint when the scan finishes. */
 (function () {
   const SP = window.SP;
-  const { el, ic, ring, fmt } = SP;
+  const { el, ic, tic, ring, fmt } = SP;
   const S = SP.state;
   const api = window.api;
 
@@ -66,9 +66,93 @@
   function dockerBytes(p) {
     return (p.docker && p.docker.usage && p.docker.usage.totalBytes) || 0;
   }
-  function projectLogo(p) {
+  // Scanner project.type id -> the matching Catppuccin tech id, so a project
+  // the engine has not analysed yet still gets a mark in the same style.
+  const TYPE_TECH = {
+    node: 'node', rust: 'rust', go: 'go', flutter: 'flutter', android: 'android',
+    gradle: 'gradle', maven: 'maven', python: 'python', php: 'php',
+    dotnet: 'dotnet', xcode: 'xcode', docker: 'docker',
+  };
+
+  // The project's mark: its primary tech (from the enrich step, else the
+  // lightweight one the scan attaches), then the scanner type, then the brand
+  // logo, then the generic folder.
+  function projectMark(p, size) {
+    const pr = primaryOf(p);
+    if (pr) return tic(techId(pr.id), size, { label: pr.name || pr.id });
     const t = p && p.type ? p.type : {};
-    return TYPE_LOGO[t.id] || TYPE_LOGO[t.icon] || t.icon || 'node';
+    const tech = TYPE_TECH[t.id];
+    if (tech) return tic(tech, size, { label: t.name || tech });
+    const logo = TYPE_LOGO[t.id] || TYPE_LOGO[t.icon] || ((window.SPACI_LOGOS || {})[t.icon] ? t.icon : null);
+    if (logo) return ic(logo, size, { kind: 'logo', color: 'var(--text-2)' });
+    return ic('folder-2', size);
+  }
+
+  // ----- tech stack data (Spaci 2.3 enrich contract) -----
+  // Everything below reads data that came off disk, so each field is checked
+  // before use and older cached results without these fields render cleanly.
+  const HEX_RE = /^#[0-9a-f]{3,8}$/i;
+  function techId(id) {
+    const T = window.SpaciTechIcon;
+    return T ? T.cleanId(id) : (typeof id === 'string' ? id : '');
+  }
+  function langColor(l) {
+    if (l.id === 'other') return 'var(--track-bright)';
+    return typeof l.color === 'string' && HEX_RE.test(l.color) ? l.color : 'var(--text-4)';
+  }
+  function primaryOf(p) {
+    const en = enrichOf(p);
+    const pr = (en && en.primary) || (p && p.primary) || null;
+    return pr && typeof pr === 'object' && techId(pr.id) ? pr : null;
+  }
+  // null = not analysed yet; [] = analysed, no source code found.
+  function languagesOf(p) {
+    const en = enrichOf(p);
+    const raw = en && Array.isArray(en.languages) ? en.languages : (p && Array.isArray(p.languages) ? p.languages : null);
+    if (!raw) return null;
+    return raw.filter((l) => l && typeof l === 'object' && Number(l.percent) > 0 && (l.id === 'other' || techId(l.id)))
+      .map((l) => ({ id: l.id === 'other' ? 'other' : techId(l.id), name: String(l.name || l.id), percent: Number(l.percent), bytes: Number(l.bytes) || 0, color: langColor(l) }));
+  }
+  // 72.4 -> "72.4%", 8 -> "8%", 0.04 -> "<0.1%"; `whole` rounds for tight spots.
+  function pctText(n, whole) {
+    if (whole) return n < 1 ? '<1%' : Math.round(n) + '%';
+    if (n < 0.1) return '<0.1%';
+    return Math.round(n * 10) / 10 + '%';
+  }
+  function langSummary(langs, whole) {
+    return langs.map((l) => l.name + ' ' + pctText(l.percent, whole)).join(', ');
+  }
+  // A single-line proportional bar. Segments grow by their share, so the 2px
+  // gaps never push the total past the track.
+  function langBar(langs, height) {
+    return el('div', { style: 'display:flex;gap:2px;height:' + height + 'px;border-radius:99px;overflow:hidden;background:var(--track)' },
+      langs.map((l) => el('span', {
+        title: l.name + ' ' + pctText(l.percent) + (l.bytes ? ' · ' + fmt(l.bytes) : ''),
+        style: 'display:block;height:100%;min-width:2px;flex:' + l.percent + ' 1 0;background:' + l.color,
+      })));
+  }
+
+  // Enrichment runs for the detail view; the list keeps an index of its rows so
+  // a result that lands later updates that one row in place.
+  const rowIndex = new Map(); // path -> { update }
+  if (!S.enrichPending) S.enrichPending = new Set();
+  if (!S.enrichAsked) S.enrichAsked = {};
+  function onEnriched(path) {
+    if (S.route === 'project' && S.currentProject && S.currentProject.path === path) SP.go('project');
+    else if (S.route === 'projects') { const r = rowIndex.get(path); if (r) r.update(); }
+  }
+  // The main process pushes a fresh result after refreshing a cached one.
+  if (api && api.onEnrichUpdated) {
+    api.onEnrichUpdated((u) => {
+      if (!u || typeof u.path !== 'string') return;
+      const map = (S.enrich = S.enrich || {});
+      const prev = map[u.path];
+      if (prev && prev.at && u.at && prev.at === u.at) return;
+      const next = Object.assign({}, prev, u);
+      delete next.path;
+      map[u.path] = next;
+      onEnriched(u.path);
+    });
   }
 
   // Cleanable-item kind -> a content icon for the item tile.
@@ -240,7 +324,86 @@
         }, [ic(c.icon, 15), c.label]);
       });
 
-      host.appendChild(el('div', { style: 'display:flex;align-items:center;gap:10px;margin-bottom:18px' }, [searchBox, ...chips]));
+      const techRow = techFilter(projectsNow());
+      host.appendChild(el('div', { style: 'display:flex;align-items:center;gap:10px;margin-bottom:' + (techRow ? 12 : 18) + 'px' }, [searchBox, ...chips]));
+      if (techRow) host.appendChild(techRow);
+    }
+
+    // ----- filter by primary tech -----
+    // One pill per primary tech across the list ("Flutter 4"), most common first.
+    // Only shown once there are at least two to choose between. Selecting a pill
+    // filters in place, the same way the search box does.
+    const TECH_LIMIT = 7;
+    function techCounts(all) {
+      const m = new Map();
+      all.forEach((p) => {
+        const pr = primaryOf(p);
+        if (!pr) return;
+        const id = techId(pr.id);
+        const e = m.get(id) || { id, name: String(pr.name || id), n: 0 };
+        e.n++;
+        m.set(id, e);
+      });
+      return Array.from(m.values()).sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
+    }
+
+    function techFilter(all) {
+      const counts = techCounts(all);
+      if (S.projTech && !counts.some((c) => c.id === S.projTech)) S.projTech = null;
+      if (counts.length < 2) { S.projTech = null; return null; }
+
+      const wrap = el('div', { role: 'group', 'aria-label': 'Filter by technology', style: 'display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:18px' });
+      const pills = [];
+      const pill = (id, name, n) => {
+        const on = (S.projTech || null) === id;
+        const b = el('button', {
+          type: 'button',
+          class: 'sp-tchip sp-focus' + (on ? ' sp-tchip-on' : ''),
+          'aria-pressed': String(on),
+          title: id ? 'Show only ' + name + ' projects' : 'Show every project',
+          style: 'height:32px;padding:0 12px 0 ' + (id ? 9 : 12) + 'px;border-radius:99px;border:1px solid var(--border);background:var(--panel);color:var(--text-2);font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:7px;cursor:pointer;flex:none',
+          onclick: () => {
+            S.projTech = id && S.projTech !== id ? id : null;
+            pills.forEach((x) => {
+              const sel = (S.projTech || null) === x.id;
+              x.node.classList.toggle('sp-tchip-on', sel);
+              x.node.setAttribute('aria-pressed', String(sel));
+            });
+            applyFilter();
+          },
+        }, [
+          id ? tic(id, 16, { decorative: true }) : null,
+          el('span', { style: 'max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', text: name }),
+          el('span', { style: 'color:var(--text-3);font-variant-numeric:tabular-nums', text: String(n) }),
+        ]);
+        pills.push({ id, node: b });
+        return b;
+      };
+
+      function fill() {
+        wrap.textContent = '';
+        pills.length = 0;
+        wrap.appendChild(pill(null, 'All', all.length));
+        // Never fold away a single pill: "1 more" costs as much room as the pill.
+        const limit = counts.length <= TECH_LIMIT + 1 ? counts.length : TECH_LIMIT;
+        let shown = S.projTechMore ? counts : counts.slice(0, limit);
+        // An active filter that sits past the fold stays visible.
+        if (S.projTech && !shown.some((c) => c.id === S.projTech)) shown = shown.concat(counts.filter((c) => c.id === S.projTech));
+        shown.forEach((c) => wrap.appendChild(pill(c.id, c.name, c.n)));
+        const hidden = counts.length - shown.length;
+        if (hidden > 0 || (S.projTechMore && counts.length > limit)) {
+          wrap.appendChild(el('button', {
+            type: 'button',
+            class: 'sp-hov sp-focus',
+            'aria-expanded': String(!!S.projTechMore),
+            style: 'height:32px;padding:0 10px 0 12px;border-radius:99px;border:none;background:transparent;color:var(--text-3);font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px;cursor:pointer;flex:none',
+            hov: 'color:var(--text)',
+            onclick: () => { S.projTechMore = !S.projTechMore; fill(); },
+          }, [S.projTechMore ? 'Fewer' : hidden + ' more', ic(S.projTechMore ? 'chevron-up' : 'chevron-down', 14)]));
+        }
+      }
+      fill();
+      return wrap;
     }
 
     // Live progress text + scan root label. The scanner gives no total/percent,
@@ -329,6 +492,7 @@
       });
 
       const sorted = sortProjects(all);
+      rowIndex.clear();
       const rows = sorted.map((p) => buildRow(p));
       rows.forEach((r) => listWrap.appendChild(r.node));
       listWrap.appendChild(noMatch);
@@ -336,9 +500,12 @@
       // Filter in place (no flicker): hide/show existing rows by name/path.
       function doFilter() {
         const q = (S.projQuery || '').trim().toLowerCase();
+        const tech = S.projTech || null;
         let visible = 0;
         rows.forEach((r) => {
-          const match = !q || r.name.toLowerCase().includes(q) || (r.path || '').toLowerCase().includes(q);
+          const pr = tech ? primaryOf(r.p) : null;
+          const match = (!q || r.name.toLowerCase().includes(q) || (r.path || '').toLowerCase().includes(q))
+            && (!tech || (pr && techId(pr.id) === tech));
           r.node.style.display = match ? 'flex' : 'none';
           if (match) visible++;
         });
@@ -356,7 +523,6 @@
     function buildRow(p) {
       const sel = selSet();
       const en = enrichOf(p);
-      const logo = projectLogo(p);
       const desc = rowDesc(p);
 
       // selection check circle
@@ -373,11 +539,15 @@
 
       const folderTile = el('div', {
         style: 'width:44px;height:44px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2);position:relative',
-      }, [ic('folder-2', 24)]);
+      }, [projectMark(p, 24)]);
+
+      // Fixed-width language column: reserved even while empty, so a result
+      // landing later never shifts the row.
+      const langSlot = el('div', { style: 'width:120px;flex:none;margin-right:6px' });
+      fillLangStrip(langSlot, languagesOf(p));
 
       const titleLine = el('div', { style: 'font-weight:600;font-size:14.5px;display:flex;align-items:center;gap:9px' }, [
         el('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap', text: p.name }),
-        ic(logo, 15, { kind: 'logo', color: 'var(--text-3)' }),
         (p.isGit || (en && en.git)) ? ic('github', 15, { color: 'var(--text-3)' }) : null,
         // Docker mark: dimmed when the project merely declares Docker, accented
         // when the engine is actually holding storage for it.
@@ -396,11 +566,20 @@
           titleLine,
           el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: desc }),
         ]),
-        el('div', { style: 'font-weight:700;font-size:15px;color:var(--accent-fg);flex:none', text: fmt(p.cleanableSize || 0) }),
+        langSlot,
+        el('div', { style: 'font-weight:700;font-size:15px;color:var(--accent-fg);flex:none;min-width:64px;text-align:right;font-variant-numeric:tabular-nums', text: fmt(p.cleanableSize || 0) }),
         ic('chevron-right', 18, { color: 'var(--text-4)' }),
       ]);
 
-      return { node, name: p.name || '', path: p.path || '' };
+      if (p.path) {
+        rowIndex.set(p.path, {
+          update() {
+            folderTile.replaceChildren(projectMark(p, 24));
+            fillLangStrip(langSlot, languagesOf(p));
+          },
+        });
+      }
+      return { node, p, name: p.name || '', path: p.path || '' };
     }
 
     // Floating action bar reflects the current project selection.
@@ -498,6 +677,158 @@
     if (!S.bgScanning && !S.projectsLoading && (!haveData || stale)) runScan();
   };
 
+  // Compact language strip for a list row: a thin proportional bar and the
+  // top language underneath. Hover (or a screen reader) gets the top three.
+  function fillLangStrip(slot, langs) {
+    slot.replaceChildren();
+    slot.removeAttribute('title');
+    slot.removeAttribute('role');
+    slot.removeAttribute('aria-label');
+    if (!langs) return;
+    if (!langs.length) {
+      slot.appendChild(el('div', { style: 'font-size:11.5px;color:var(--text-3);text-align:right', text: 'No source code' }));
+      return;
+    }
+    const top = langs[0];
+    const summary = langSummary(langs.filter((l) => l.id !== 'other').slice(0, 3), true);
+    slot.setAttribute('title', summary);
+    slot.setAttribute('role', 'img');
+    slot.setAttribute('aria-label', 'Languages: ' + summary);
+    slot.appendChild(langBar(langs, 5));
+    slot.appendChild(el('div', { style: 'display:flex;justify-content:flex-end;gap:5px;font-size:11.5px;margin-top:6px;line-height:1.2;white-space:nowrap' }, [
+      el('span', { style: 'color:var(--text-2);font-weight:600;overflow:hidden;text-overflow:ellipsis;min-width:0', text: top.name }),
+      el('span', { style: 'color:var(--text-3);font-variant-numeric:tabular-nums;flex:none', text: pctText(top.percent, true) }),
+    ]));
+  }
+
+  const CAT_ORDER = [
+    ['framework', 'Frameworks'], ['library', 'Libraries'], ['runtime', 'Runtime'],
+    ['tool', 'Tooling'], ['testing', 'Testing'], ['styling', 'Styling'],
+    ['database', 'Databases'], ['mobile', 'Mobile'], ['infra', 'Infrastructure'],
+  ];
+  const CAT_KEYS = new Set(CAT_ORDER.map((c) => c[0]));
+  const capsStyle = 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600';
+
+  // Still waiting on the first analysis of this project (or its refresh).
+  function analysing(p) {
+    if (S.enrichPending.has(p.path)) return true;
+    const asked = S.enrichAsked[p.path];
+    return Boolean(asked && Date.now() - asked < 45000);
+  }
+
+  /**
+   * Tech stack card on the project detail: a proportional language bar with a
+   * legend, detected frameworks and tools grouped by category (evidence on
+   * hover), and a footnote saying how much was analysed and how.
+   */
+  function buildTechCard(p) {
+    const en = enrichOf(p) || {};
+    const langs = languagesOf(p);
+    const fws = (Array.isArray(en.frameworks) ? en.frameworks : [])
+      .filter((f) => f && typeof f === 'object' && techId(f.id));
+    const an = en.analysis && typeof en.analysis === 'object' ? en.analysis : null;
+    const loading = !langs && analysing(p);
+
+    const card = el('div', { style: 'background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:20px;box-shadow:var(--shadow-sm);margin-top:16px' }, [
+      el('div', { style: 'display:flex;align-items:center;gap:9px;margin-bottom:16px' }, [
+        ic('code', 16, { color: 'var(--text-3)' }),
+        el('div', { style: capsStyle, text: 'Tech stack' }),
+        el('div', { style: 'flex:1' }),
+        loading ? el('div', { style: 'display:flex;align-items:center;gap:7px;color:var(--text-3);font-size:12px;font-weight:600' }, [
+          el('span', { style: 'display:flex;color:var(--accent-fg)' }, [ring('chase', 15)]), 'Analysing',
+        ]) : null,
+      ]),
+    ]);
+
+    if (loading) {
+      card.setAttribute('aria-busy', 'true');
+      // A cached result without languages is refreshed in the background and
+      // normally arrives via onEnrichUpdated. If it never does, stop waiting.
+      if (!S.enrichPending.has(p.path)) {
+        const wait = Math.max(0, 45000 - (Date.now() - (S.enrichAsked[p.path] || 0))) + 50;
+        setTimeout(() => { if (S.route === 'project' && S.currentProject === p && !languagesOf(p)) SP.go('project'); }, wait);
+      }
+      card.appendChild(el('div', { class: 'sp-skel', style: 'height:10px;border-radius:99px' }));
+      card.appendChild(el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,236px));gap:12px 36px;margin-top:18px' },
+        [92, 70, 108].map((w) => el('div', { style: 'display:flex;align-items:center;gap:9px;height:20px' }, [
+          el('span', { class: 'sp-skel', style: 'width:8px;height:8px;border-radius:50%;flex:none' }),
+          el('span', { class: 'sp-skel', style: 'width:16px;height:16px;border-radius:5px;flex:none' }),
+          el('span', { class: 'sp-skel', style: 'width:' + w + 'px;height:10px;border-radius:6px' }),
+        ]))));
+      return card;
+    }
+
+    if (!langs) {
+      card.appendChild(el('div', { style: 'color:var(--text-3);font-size:13px', text: 'Languages have not been analysed for this project yet.' }));
+    } else if (!langs.length) {
+      card.appendChild(el('div', { style: 'display:flex;align-items:center;gap:12px' }, [
+        el('div', { style: 'width:36px;height:36px;border-radius:10px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-3)' }, [ic('code', 18)]),
+        el('div', {}, [
+          el('div', { style: 'font-weight:600;font-size:14px', text: 'No source code found' }),
+          el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:1px', text: 'Spaci looked for programming and markup files here and found none.' }),
+        ]),
+      ]));
+    } else {
+      const bar = langBar(langs, 10);
+      bar.setAttribute('role', 'img');
+      bar.setAttribute('aria-label', 'Languages: ' + langSummary(langs));
+      card.appendChild(bar);
+      card.appendChild(el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,236px));gap:12px 36px;margin-top:18px' },
+        langs.map((l) => el('div', {
+          title: l.name + ' ' + pctText(l.percent) + (l.bytes ? ' · ' + fmt(l.bytes) : ''),
+          style: 'display:flex;align-items:center;gap:9px;min-width:0;height:20px',
+        }, [
+          el('span', { style: 'width:8px;height:8px;border-radius:50%;flex:none;background:' + l.color }),
+          tic(l.id === 'other' ? 'file' : l.id, 16, { decorative: true, style: l.id === 'other' ? 'opacity:.55' : '' }),
+          el('span', { style: 'font-size:13px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' + (l.id === 'other' ? ';color:var(--text-2)' : ''), text: l.name }),
+          el('span', { style: 'font-size:13px;font-weight:600;color:var(--text-2);font-variant-numeric:tabular-nums;flex:none', text: pctText(l.percent) }),
+          el('span', { style: 'font-size:12px;color:var(--text-3);font-variant-numeric:tabular-nums;flex:none;min-width:48px;text-align:right', text: l.bytes ? fmt(l.bytes) : '' }),
+        ]))));
+    }
+
+    if (fws.length) {
+      const groups = new Map();
+      fws.forEach((f) => {
+        const cat = CAT_KEYS.has(f.category) ? f.category : 'tool';
+        if (!groups.has(cat)) groups.set(cat, []);
+        groups.get(cat).push(f);
+      });
+      const gridKids = [];
+      CAT_ORDER.forEach(([key, label]) => {
+        const list = groups.get(key);
+        if (!list) return;
+        gridKids.push(el('div', { style: 'font-size:12.5px;color:var(--text-3);font-weight:600;line-height:30px', text: label }));
+        gridKids.push(el('div', { role: 'list', 'aria-label': label, style: 'display:flex;flex-wrap:wrap;gap:8px;min-width:0' }, list.map((f) => {
+          const name = String(f.name || f.id);
+          const why = typeof f.evidence === 'string' && f.evidence ? 'Detected from ' + f.evidence : '';
+          return el('span', {
+            role: 'listitem',
+            tabindex: '0',
+            class: 'sp-focus',
+            title: why || name,
+            'aria-description': why || null,
+            style: 'display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px 0 9px;border-radius:9px;background:var(--panel-2);border:1px solid var(--border);font-size:12.5px;font-weight:600;color:var(--text);max-width:100%;cursor:default',
+          }, [
+            tic(techId(f.id), 16, { decorative: true }),
+            el('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0', text: name }),
+          ]);
+        })));
+      });
+      card.appendChild(el('div', { style: 'display:grid;grid-template-columns:112px minmax(0,1fr);gap:10px 16px;align-items:start;margin-top:' + (langs && !langs.length ? 18 : 20) + 'px;padding-top:18px;border-top:1px solid var(--border)' }, gridKids));
+    }
+
+    if (an && Number(an.fileCount) >= 0 && an.fileCount != null) {
+      const n = Number(an.fileCount) || 0;
+      const parts = [n.toLocaleString() + ' file' + (n === 1 ? '' : 's') + ' analysed'];
+      if (an.source === 'git') parts.push('from git');
+      else if (an.source === 'walk') parts.push('from a folder walk');
+      if (an.truncated) parts.push('partial result');
+      if (an.analyzedAt) parts.push('updated ' + SP.ago(Number(an.analyzedAt)));
+      card.appendChild(el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:16px;line-height:1.5', text: parts.join(' · ') }));
+    }
+    return card;
+  }
+
   function rowDesc(p) {
     const items = p.items || [];
     const names = items.map((i) => i.name).slice(0, 3).join(', ');
@@ -563,14 +894,17 @@
 
   async function enrich(p) {
     if (!p || !p.path) return;
+    S.enrichPending.add(p.path);
+    S.enrichAsked[p.path] = Date.now();
     try {
       const r = await api.enrichProject(p.path);
       if (r) {
         S.enrich = S.enrich || {};
         S.enrich[p.path] = r;
-        if (S.route === 'project' && S.currentProject && S.currentProject.path === p.path) SP.go('project');
       }
     } catch (_) { /* ignore */ }
+    S.enrichPending.delete(p.path);
+    onEnriched(p.path);
   }
 
   // =====================================================================
@@ -596,10 +930,8 @@
 
     // ----- header -----
     const branch = git && git.branch ? git.branch : null;
-    const logo = projectLogo(p);
     const titleEls = [
-      p.name,
-      ic(logo, 19, { kind: 'logo', color: 'var(--text-3)' }),
+      el('span', { title: p.name, style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0', text: p.name }),
     ];
     if (branch) {
       titleEls.push(el('span', {
@@ -619,7 +951,7 @@
     }, [ic('folder-open', 15), 'Open']);
 
     host.appendChild(el('div', { style: 'display:flex;align-items:center;gap:18px;margin-bottom:22px' }, [
-      el('div', { style: 'width:58px;height:58px;border-radius:15px;background:var(--panel-2);display:grid;place-items:center;color:var(--text-2);flex:none;box-shadow:var(--shadow-sm)' }, [ic('folder-2', 31)]),
+      el('div', { style: 'width:58px;height:58px;border-radius:15px;background:var(--panel-2);display:grid;place-items:center;color:var(--text-2);flex:none;box-shadow:var(--shadow-sm)' }, [projectMark(p, 30)]),
       el('div', { style: 'flex:1;min-width:0' }, [
         el('div', { style: 'font-size:25px;font-weight:700;letter-spacing:-.7px;display:flex;align-items:center;gap:11px' }, titleEls),
         el('div', { class: 'mono', style: 'color:var(--text-3);font-size:12.5px;margin-top:5px', text: p.path }),
@@ -640,6 +972,9 @@
         ic(s.icon, 16, { color: 'var(--text-3)' }), s.label,
         el('b', { style: 'color:' + s.color + ';font-weight:700;letter-spacing:-.2px', text: s.value }),
       ]))));
+
+    // ----- tech stack card -----
+    host.appendChild(buildTechCard(p));
 
     // ----- version control card -----
     const gitFields = [];

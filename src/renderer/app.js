@@ -47,6 +47,16 @@ function ic(name, size, opt) {
   return el('spaci-icon', a);
 }
 const ring = (anim, size, color) => ic('spaci-ring', size, { anim, color });
+// <spaci-tech-icon> builder (Catppuccin language/framework marks, tech-icon.js).
+// opt.label names it for assistive tech; opt.decorative hides it when visible
+// text beside it already says the same thing.
+function tic(id, size, opt) {
+  opt = opt || {};
+  const a = { tech: id || 'file', style: `width:${size}px;height:${size}px` + (opt.style ? ';' + opt.style : '') };
+  if (opt.label) a.label = opt.label;
+  if (opt.decorative) a.decorative = '';
+  return el('spaci-tech-icon', a);
+}
 
 // ---------- formatting ----------
 function fmt(bytes) {
@@ -390,7 +400,7 @@ const NAV_BOTTOM = [
 
 SP_REGISTRY();
 function SP_REGISTRY() {
-  window.SP = { screens: {}, go, state: S, el, ic, ring, fmt, toast, setActionBar, confirm: confirmDialog, burst, beginScan, endScan, scanBanner, scanActive, scanCard, summariseClean, reportClean };
+  window.SP = { screens: {}, go, state: S, el, ic, tic, ring, fmt, ago, toast, setActionBar, confirm: confirmDialog, burst, beginScan, endScan, scanBanner, scanActive, scanCard, summariseClean, reportClean };
 }
 
 // ---------- shell (built once, then reused; only content swaps on nav) ----------
@@ -603,6 +613,9 @@ function screenPlaceholder(host) {
 // ---------- theme ----------
 function applyTheme() {
   root.classList.toggle('light', S.theme === 'light');
+  // Theme-aware pieces that are not pure CSS (the Catppuccin tech icons swap
+  // between the mocha and latte flavors) listen for this.
+  window.dispatchEvent(new CustomEvent('sp-themechange', { detail: { theme: S.theme } }));
 }
 async function toggleTheme() {
   S.theme = S.theme === 'light' ? 'dark' : 'light';
@@ -629,6 +642,10 @@ async function loadData() {
     S.projects = c.projects || [];
     S.sysTargets = c.system || [];
     if (c.scannedAt) S.lastScan = c.scannedAt;
+    // Persisted per-project enrichment (git, size, languages, frameworks), so
+    // the project list can show language strips without re-analysing anything.
+    // In-memory entries are at least as fresh, so they win.
+    if (c.enrich && typeof c.enrich === 'object') S.enrich = Object.assign({}, c.enrich, S.enrich || {});
   } catch (_) {}
   try {
     S.recs = (await api.recommendations({ projects: S.projects || [], sysTargets: S.sysTargets || [] })) || [];
