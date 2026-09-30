@@ -5,7 +5,7 @@ name: Linux smoke
 # install. A build passes only if the app is still running after 25 seconds.
 on:
   push:
-    branches: ['hotfix/**']
+    branches: ['hotfix/**', 'feature/**', 'main']
     paths: ['package.json', 'build/**', 'src/main.js', '.github/workflows/linux-smoke.yml']
   workflow_dispatch:
     inputs:
@@ -59,7 +59,10 @@ jobs:
         run: |
           npm install --no-audit --no-fund
           npx electron-builder --linux AppImage --publish never
+          cp release/latest-linux.yml "$RUNNER_TEMP/latest-linux.yml"
           npx electron-builder --linux deb --publish never
+          cp "$RUNNER_TEMP/latest-linux.yml" release/latest-linux.yml
+          grep -q 'AppImage' release/latest-linux.yml || { echo "FAIL feed-lost-appimage"; echo "FAIL feed-lost-appimage" >> "$RUNNER_TEMP/failures"; }
           ls -la release
           # The AppImage must not carry the deb marker, or it would update with a .deb.
           ( cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/release/*.AppImage --appimage-extract >/dev/null )
