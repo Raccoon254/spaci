@@ -55,6 +55,27 @@
     return t.reversible === false || (t.storyCategory === 'aitools' && !t.safe);
   }
   const isAiTools = (cat) => cat === 'AI tools';
+
+  // One three-tier risk scheme, shared in spirit with Recommendations, the
+  // action page and project items: Safe (green), Review (amber), Permanent
+  // (red). Permanent wins over Review.
+  function riskOf(t) {
+    if (isPermanent(t)) return { cls: 'sp-badge-warn', text: 'Permanent' };
+    if (!t.safe) return { cls: 'sp-badge-caution', text: 'Review' };
+    return { cls: 'sp-badge-safe', text: 'Safe' };
+  }
+
+  // Row mark: the app's own logo when we know it (AI tools, browsers), then a
+  // Catppuccin tech mark for developer caches, then the target's glyph.
+  function targetMark(t, size) {
+    const B = window.SpaciBrandIcon;
+    const brand = B && B.forTarget(t);
+    if (brand && SP.bic) return SP.bic(brand, size, { label: t.name, fallback: t.icon || 'database' });
+    const T = window.SpaciTechIcon;
+    const tech = T && T.forTarget(t);
+    if (tech && SP.tic) return SP.tic(tech, size, { label: t.name });
+    return ic(t.icon || 'database', size);
+  }
   function groupByCategory(targets) {
     const order = [];
     const map = new Map();
@@ -184,7 +205,7 @@
           style: 'height:44px;padding:0 20px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none' + (scanning ? ';opacity:.7;pointer-events:none' : ''),
           hov: 'background:var(--accent-hover)',
           onclick: () => { if (!scanning) runScan(); }
-        }, [scanning ? ring('elastic', 17) : ic('scanner', 17), scanning ? 'Scanning…' : 'Rescan caches'])
+        }, [scanning ? ring('elastic', 17) : ic('scanner', 17), scanning ? 'Scanning…' : 'Scan'])
       ]);
     }
 
@@ -200,10 +221,8 @@
     function row(t) {
       const sel = selSet();
       const on = sel.has(t.id);
-      const badgeSafe = t.safe;
       const permanent = isPermanent(t);
-      const badgeClass = badgeSafe && !permanent ? 'sp-badge-safe' : 'sp-badge-warn';
-      const badgeText = permanent ? 'Permanent' : (badgeSafe ? 'Safe' : 'Review');
+      const risk = riskOf(t);
       return el('div', {
         class: 'sp-hov',
         style: 'display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border);cursor:pointer;box-shadow:var(--shadow-sm)',
@@ -214,14 +233,14 @@
           class: 'sp-check' + (on ? ' sp-check-on' : ''),
           style: 'width:24px;height:24px;border-radius:50%;border:1.5px solid var(--border-2);flex:none;display:grid;place-items:center;color:transparent;transition:.14s'
         }, [ic('tick', 14)]),
-        el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [ic(t.icon || 'database', 22)]),
+        el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [targetMark(t, 22)]),
         el('div', { style: 'flex:1;min-width:0' }, [
           el('div', { style: 'font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px' }, [
             el('span', { text: t.name }),
             el('span', {
-              class: badgeClass,
+              class: risk.cls,
               style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700',
-              text: badgeText
+              text: risk.text
             })
           ]),
           el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px;line-height:1.5', text: t.description || '' }),
@@ -255,8 +274,11 @@
       paint();
       try {
         const res = await api.dockerPrune(kind);
+        // Freed space may not reach the host disk right away (Docker.raw,
+        // WSL2 VHDX): the note from main says so, after every prune.
+        const note = (res && res.note) || (S.docker && S.docker.diskNote) || null;
         S.dockerResult = res && res.ok
-          ? { ok: true, text: `Reclaimed ${fmt(res.freed || 0)} from ${label.toLowerCase()}.` }
+          ? { ok: true, text: `Reclaimed ${fmt(res.freed || 0)} from ${label.toLowerCase()}.`, note }
           : { ok: false, text: (res && res.error) || 'Docker cleanup failed.' };
       } catch (err) {
         S.dockerResult = { ok: false, text: (err && err.message) || 'Docker cleanup failed.' };
@@ -267,14 +289,209 @@
       }
     }
 
-    function dockerStat(label, cat) {
+    // ---- Docker volumes: reviewed and removed one at a time -------------
+    // Volumes hold databases and uploads, so there is no bulk action and no
+    // preselection. Each Remove names the volume and says it is permanent;
+    // main refuses anything unconfirmed or still mounted by a container.
+    const hasVolumesApi = () => typeof api.dockerVolumes === 'function';
+    function volSize(v) { return Number(v && (v.size != null ? v.size : v.sizeBytes)) || 0; }
+    function normaliseVolumes(res) {
+      const list = Array.isArray(res && res.volumes) ? res.volumes.filter((v) => v && typeof v.name === 'string') : [];
+      const byName = new Map(list.map((v) => [v.name, v]));
+      let groups = Array.isArray(res && res.groups) ? res.groups : null;
+      const out = [];
+      const seen = new Set();
+      if (groups) {
+        groups.forEach((g) => {
+          if (!g) return;
+          const vols = (Array.isArray(g.volumes) ? g.volumes : [])
+            .map((x) => (typeof x === 'string' ? byName.get(x) : x))
+            .filter((v) => v && typeof v.name === 'string' && !seen.has(v.name));
+          vols.forEach((v) => seen.add(v.name));
+          if (!vols.length) return;
+          out.push({ project: typeof g.project === 'string' && g.project ? g.project : null, volumes: vols });
+        });
+      }
+      // Volumes no group mentioned (or no groups at all): group by project here.
+      const rest = new Map();
+      list.forEach((v) => {
+        if (seen.has(v.name)) return;
+        const key = typeof v.project === 'string' && v.project ? v.project : '';
+        if (!rest.has(key)) rest.set(key, []);
+        rest.get(key).push(v);
+      });
+      rest.forEach((vols, key) => out.push({ project: key || null, volumes: vols }));
+      out.forEach((g) => {
+        g.volumes.sort((a, b) => volSize(b) - volSize(a));
+        g.size = g.volumes.reduce((a, v) => a + volSize(v), 0);
+      });
+      // Named projects first by size, the loose volumes last.
+      out.sort((a, b) => (a.project ? 0 : 1) - (b.project ? 0 : 1) || b.size - a.size);
+      return out;
+    }
+    async function loadVolumes() {
+      if (!hasVolumesApi() || S.dockerVolLoading) return;
+      S.dockerVolLoading = true;
+      S.dockerVolError = null;
+      paint();
+      try {
+        const res = await api.dockerVolumes();
+        if (res && res.ok !== false) S.dockerVols = { at: Date.now(), groups: normaliseVolumes(res) };
+        else S.dockerVolError = (res && res.error) || 'Spaci could not list Docker volumes.';
+      } catch (err) {
+        S.dockerVolError = (err && err.message) || 'Spaci could not list Docker volumes.';
+      } finally {
+        S.dockerVolLoading = false;
+        paint();
+      }
+    }
+    async function removeVolume(v) {
+      if (S.dockerVolBusy || v.inUse || typeof api.dockerRemoveVolume !== 'function') return;
+      const ok = await SP.confirm({
+        title: 'Remove volume ' + v.name + '?',
+        body: 'This deletes the Docker volume "' + v.name + '" (' + fmt(volSize(v)) + ') and everything stored in it, such as database files and uploads.\n\nThis cannot be undone. Nothing goes to the Trash.',
+        confirmLabel: 'Remove volume',
+        danger: true,
+        icon: 'trash',
+      });
+      if (!ok) return;
+      S.dockerVolBusy = v.name;
+      S.dockerVolResult = null;
+      paint();
+      try {
+        const res = await api.dockerRemoveVolume(v.name, { confirmed: true });
+        if (res && res.ok) {
+          S.dockerVolResult = { ok: true, text: 'Removed volume ' + v.name + (res.freed ? ', freed ' + fmt(res.freed) : '') + '.', note: (S.docker && S.docker.diskNote) || null };
+          if (S.dockerVols) {
+            S.dockerVols.groups.forEach((g) => { g.volumes = g.volumes.filter((x) => x.name !== v.name); g.size = g.volumes.reduce((a, x) => a + volSize(x), 0); });
+            S.dockerVols.groups = S.dockerVols.groups.filter((g) => g.volumes.length);
+          }
+        } else {
+          const err = res && res.error;
+          S.dockerVolResult = { ok: false, text: err === 'needs-confirmation' ? 'Spaci needs your confirmation to remove a volume. Nothing was removed.' : ((err || 'Docker did not remove the volume') + '. Nothing was removed.') };
+        }
+      } catch (err) {
+        S.dockerVolResult = { ok: false, text: ((err && err.message) || 'Docker did not remove the volume') + '. Nothing was removed.' };
+      } finally {
+        S.dockerVolBusy = null;
+        paint();
+        loadDocker(true);
+      }
+    }
+
+    // Restart Docker Desktop: only offered when its engine stopped answering.
+    async function restartDocker() {
+      if (S.dockerRestarting || typeof api.dockerRestart !== 'function') return;
+      const ok = await SP.confirm({
+        title: 'Restart Docker Desktop?',
+        body: 'Spaci quits Docker Desktop and opens it again, then waits for its engine to answer. Containers that were running stop, and start again only if they are set to restart.',
+        confirmLabel: 'Restart Docker',
+        icon: 'refresh',
+      });
+      if (!ok) return;
+      S.dockerRestarting = true;
+      S.dockerRestartResult = null;
+      paint();
+      try {
+        const res = await api.dockerRestart();
+        S.dockerRestartResult = res && res.ok
+          ? { ok: true, text: 'Docker Desktop restarted and its engine is answering.' }
+          : { ok: false, text: (res && (res.message || res.error)) || 'Docker Desktop did not come back. Open it yourself and check again.' };
+      } catch (err) {
+        S.dockerRestartResult = { ok: false, text: (err && err.message) || 'Docker Desktop did not come back.' };
+      } finally {
+        S.dockerRestarting = false;
+        S.dockerVols = null;
+        paint();
+        loadDocker(true);
+      }
+    }
+
+    function notice(r) {
+      return el('div', {
+        style: `display:flex;align-items:flex-start;gap:10px;padding:11px 14px;border-radius:11px;font-size:12.5px;font-weight:600;line-height:1.5;background:${r.ok ? 'var(--success-soft)' : 'var(--danger-soft)'};color:${r.ok ? 'var(--success-fg)' : 'var(--danger-fg)'}`,
+      }, [ic(r.ok ? 'check' : 'warning', 16), el('div', {}, [
+        el('div', { text: r.text }),
+        r.note ? el('div', { style: 'font-weight:500;color:var(--text-2);margin-top:3px', text: r.note }) : null,
+      ])]);
+    }
+
+    function volumeRow(v) {
+      const busy = S.dockerVolBusy === v.name;
+      const users = Array.isArray(v.containers) ? v.containers.filter((c) => typeof c === 'string') : [];
+      const sub = v.inUse
+        ? 'In use by ' + (users.length ? users.slice(0, 3).join(', ') + (users.length > 3 ? ' and ' + (users.length - 3) + ' more' : '') : 'a container')
+        : 'Not used by any container';
+      return el('div', { style: 'display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:11px;background:var(--panel-2);border:1px solid var(--border)' }, [
+        ic('database', 17, { color: 'var(--text-3)' }),
+        el('div', { style: 'flex:1;min-width:0' }, [
+          el('div', { class: 'mono', title: v.name, style: 'font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: v.name }),
+          el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: sub }),
+        ]),
+        el('span', {
+          class: v.inUse ? 'sp-badge-accent' : 'sp-badge-caution',
+          style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700;flex:none',
+          text: v.inUse ? 'In use' : 'Unused',
+        }),
+        el('div', { style: 'font-weight:700;font-size:13.5px;min-width:64px;text-align:right;flex:none;font-variant-numeric:tabular-nums', text: fmt(volSize(v)) }),
+        el('button', {
+          title: v.inUse ? 'A container uses this volume. Remove the container first.' : 'Remove this volume permanently',
+          'aria-label': 'Remove volume ' + v.name,
+          style: 'height:32px;padding:0 12px;border-radius:9px;border:1px solid var(--border-2);background:var(--panel);color:var(--danger-fg);font-weight:650;font-size:12.5px;display:flex;align-items:center;gap:6px;cursor:pointer;font-family:inherit;flex:none'
+            + ((v.inUse || S.dockerVolBusy) ? ';opacity:.45;pointer-events:none' : ''),
+          hov: 'border-color:var(--danger);background:var(--danger-soft)',
+          onclick: () => removeVolume(v),
+        }, [busy ? ring('elastic', 13) : ic('trash', 13), busy ? 'Removing…' : 'Remove']),
+      ]);
+    }
+
+    function volumesSection() {
+      if (!hasVolumesApi()) return null;
+      const open = !!S.dockerVolOpen;
+      const vc = (S.docker && S.docker.categories && S.docker.categories.volumes) || null;
+      const toggle = el('button', {
+        'aria-expanded': open ? 'true' : 'false',
+        style: 'height:38px;padding:0 14px;border-radius:10px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:650;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;align-self:flex-start',
+        hov: 'border-color:var(--accent);color:var(--accent-fg)',
+        onclick: () => {
+          S.dockerVolOpen = !open;
+          if (S.dockerVolOpen && !S.dockerVols) loadVolumes(); else paint();
+        },
+      }, [ic('database', 15), (open ? 'Hide volumes' : 'Review volumes') + (vc && vc.count ? ' (' + vc.count + ')' : ''), ic(open ? 'chevron-up' : 'chevron-down', 14)]);
+      const kids = [toggle];
+      if (open) {
+        kids.push(el('div', { style: 'color:var(--text-3);font-size:12px;line-height:1.5', text: 'Volumes hold databases and uploads. Removing one deletes its data for good, so Spaci never removes them in bulk or selects them for you.' }));
+        if (S.dockerVolResult) kids.push(notice(S.dockerVolResult));
+        if (S.dockerVolLoading && !S.dockerVols) {
+          kids.push(el('div', { style: 'display:flex;align-items:center;gap:10px;color:var(--text-3);font-size:12.5px' }, [ring('elastic', 16), 'Reading volumes…']));
+        } else if (S.dockerVolError) {
+          kids.push(notice({ ok: false, text: S.dockerVolError }));
+        } else if (S.dockerVols && !S.dockerVols.groups.length) {
+          kids.push(el('div', { style: 'color:var(--text-3);font-size:12.5px', text: 'No volumes found.' }));
+        } else if (S.dockerVols) {
+          S.dockerVols.groups.forEach((g) => {
+            const unused = g.volumes.filter((v) => !v.inUse).length;
+            kids.push(el('div', { style: 'display:flex;flex-direction:column;gap:7px' }, [
+              el('div', { style: 'display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-top:4px' }, [
+                el('div', { style: 'font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-3);font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', text: g.project ? 'Project ' + g.project : 'Not part of a Compose project' }),
+                el('div', { style: 'font-size:12px;color:var(--text-3);font-weight:600;flex:none', text: g.volumes.length + (g.volumes.length === 1 ? ' volume' : ' volumes') + (unused ? ', ' + unused + ' unused' : '') + ' · ' + fmt(g.size) }),
+              ]),
+              ...g.volumes.map(volumeRow),
+            ]));
+          });
+        }
+      }
+      return el('div', { style: 'display:flex;flex-direction:column;gap:10px;padding-top:14px;border-top:1px solid var(--border)' }, kids);
+    }
+
+    function dockerStat(label, cat, sub) {
       const free = cat ? cat.reclaimable || 0 : 0;
       return el('div', { style: 'flex:1;min-width:126px' }, [
         el('div', { style: 'font-size:11.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-3);font-weight:600', text: label }),
         el('div', { style: 'font-size:16px;font-weight:700;margin-top:4px', text: fmt(cat ? cat.size || 0 : 0) }),
         el('div', {
-          style: `font-size:12px;margin-top:2px;color:${free > 0 ? 'var(--accent-fg)' : 'var(--text-3)'}`,
-          text: free > 0 ? fmt(free) + ' unused' : 'all in use',
+          style: `font-size:12px;margin-top:2px;color:${!sub && free > 0 ? 'var(--accent-fg)' : 'var(--text-3)'}`,
+          text: sub || (free > 0 ? fmt(free) + ' unused' : 'all in use'),
         }),
       ]);
     }
@@ -289,7 +506,7 @@
       }, [busy ? ring('elastic', 15) : ic('broom', 15), busy ? 'Reclaiming…' : label]);
     }
 
-    // not-installed | stopped | engine-down | running. Older cached results
+    // not-installed | stopped | engine-down | unresponsive | running. Older cached results
     // carry no `state`, so derive it from what they do have.
     function dockerState(d) {
       const st = d.status || {};
@@ -340,6 +557,7 @@
         running: 'Images, volumes and build cache' + (d.projects ? ` · ${d.projects} scanned project${d.projects === 1 ? '' : 's'} using Docker` : ''),
         stopped: 'Docker Desktop is not running',
         'engine-down': 'Docker Desktop is open, but its engine is not responding',
+        unresponsive: 'Docker Desktop is open, but it stopped responding',
         'no-permission': 'Docker is running, but Spaci cannot talk to it',
         remote: 'Docker is pointed at a remote host',
         unreadable: 'Docker is running, but Spaci could not read its usage',
@@ -348,6 +566,7 @@
       const BADGE = {
         stopped: ['sp-badge-caution', 'Stopped'],
         'engine-down': ['sp-badge-warn', 'Not responding'],
+        unresponsive: ['sp-badge-warn', 'Not responding'],
         'no-permission': ['sp-badge-warn', 'No access'],
         remote: ['sp-badge-caution', 'Remote'],
         unreadable: ['sp-badge-caution', 'Unreadable'],
@@ -356,9 +575,15 @@
       const known = Object.prototype.hasOwnProperty.call(SUB, state);
       const badge = BADGE[state];
 
+      // The header total covers what Docker can clean: images and build cache.
+      // Volumes (data) and containers are reviewed separately, never summed in.
+      const cats = d.categories || {};
+      const cleanable = ['images', 'buildCache'].map((k) => cats[k] || {});
+      const headSize = cleanable.reduce((a, c) => a + (c.size || 0), 0);
+      const headFree = cleanable.reduce((a, c) => a + (c.reclaimable || 0), 0);
       const title = el('div', { style: 'display:flex;align-items:center;gap:13px' }, [
         el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' },
-          [ic('docker', 24, { kind: 'logo' })]),
+          [SP.bic ? SP.bic('docker', 26, { label: 'Docker', fallback: 'box' }) : ic('box', 24)]),
         el('div', { style: 'flex:1;min-width:0' }, [
           el('div', { style: 'font-weight:700;font-size:15px;display:flex;align-items:center;gap:9px' }, [
             el('span', { text: 'Docker' }),
@@ -367,8 +592,9 @@
           el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px', text: known ? SUB[state] : 'Docker status unavailable' }),
         ]),
         running ? el('div', { style: 'text-align:right;flex:none' }, [
-          el('div', { style: 'font-weight:700;font-size:15px', text: fmt(d.totals.size || 0) }),
-          el('div', { style: 'font-size:12px;color:var(--accent-fg);font-weight:600', text: fmt(d.totals.reclaimable || 0) + ' reclaimable' }),
+          el('div', { style: 'font-weight:700;font-size:15px', text: fmt(headSize) }),
+          el('div', { style: 'font-size:12px;color:var(--accent-fg);font-weight:600', text: fmt(headFree) + ' reclaimable' }),
+          el('div', { style: 'font-size:11px;color:var(--text-3);margin-top:1px', text: 'images and build cache' }),
         ]) : null,
       ]);
 
@@ -376,6 +602,7 @@
         const COPY = {
           stopped: 'Start Docker Desktop and check again to see how much space images, volumes and build cache are holding.',
           'engine-down': 'Restart Docker Desktop, then check again. Nothing inside Docker can be cleaned until its engine responds.',
+          unresponsive: 'Docker Desktop is running but not answering. Restart it, then check again. Nothing inside Docker can be cleaned until it responds.',
           'no-permission': 'Spaci does not have permission to use Docker. Add your user to the docker group or use rootless Docker, then check again.',
           unreadable: 'Docker may still be starting or busy. Check again in a moment.',
           remote: 'Spaci only manages Docker on this Mac, so it shows no cleanup for a remote host.',
@@ -390,8 +617,15 @@
           const note = diskImageNote(disk);
           if (note) kids.push(note);
         }
+        if (S.dockerRestartResult) kids.push(notice(S.dockerRestartResult));
         if (state !== 'not-installed') {
+          const canRestart = (state === 'unresponsive' || state === 'engine-down') && typeof api.dockerRestart === 'function';
           kids.push(el('div', { style: 'display:flex;gap:9px' }, [
+            canRestart ? el('button', {
+              style: 'height:38px;padding:0 16px;border-radius:10px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit' + (S.dockerRestarting ? ';opacity:.6;pointer-events:none' : ''),
+              hov: 'background:var(--accent-hover)',
+              onclick: () => restartDocker(),
+            }, [S.dockerRestarting ? ring('elastic', 15) : ic('refresh', 15), S.dockerRestarting ? 'Restarting Docker…' : 'Restart Docker']) : null,
             el('button', {
               style: 'height:38px;padding:0 16px;border-radius:10px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:650;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit' + (S.dockerLoading ? ';opacity:.55;pointer-events:none' : ''),
               hov: 'border-color:var(--accent);color:var(--accent-fg)',
@@ -403,11 +637,13 @@
       }
 
       const c = d.categories;
+      const vol = c.volumes || {};
+      const unusedVols = Math.max(0, (vol.count || 0) - (vol.active || 0));
       const stats = [
         dockerStat('Images', c.images),
         dockerStat('Build cache', c.buildCache),
-        dockerStat('Volumes', c.volumes),
-        dockerStat('Containers', c.containers),
+        dockerStat('Volumes', c.volumes, unusedVols ? unusedVols + ' not in use, review below' : 'all in use'),
+        dockerStat('Containers', c.containers, (c.containers && c.containers.count ? c.containers.count : 0) + ' total, not cleaned here'),
       ];
       if (disk) stats.push(diskImageStat(disk));
       const rows = [
@@ -417,11 +653,7 @@
       const gapNote = disk ? diskImageNote(disk) : null;
       if (gapNote) rows.push(gapNote);
 
-      if (S.dockerResult) {
-        rows.push(el('div', {
-          style: `display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:11px;font-size:12.5px;font-weight:600;background:${S.dockerResult.ok ? 'var(--success-soft)' : 'var(--danger-soft)'};color:${S.dockerResult.ok ? 'var(--success-fg)' : 'var(--danger-fg)'}`,
-        }, [ic(S.dockerResult.ok ? 'check' : 'warning', 16), S.dockerResult.text]));
-      }
+      if (S.dockerResult) rows.push(notice(S.dockerResult));
 
       const buttons = [];
       if ((c.buildCache.reclaimable || 0) > 0) buttons.push(dockerButton('Reclaim ' + fmt(c.buildCache.reclaimable) + ' build cache', 'build-cache'));
@@ -430,8 +662,10 @@
 
       rows.push(el('div', {
         style: 'color:var(--text-3);font-size:11.5px;line-height:1.5',
-        text: 'Volumes are never touched: they hold databases and uploads. Build cache and untagged image layers rebuild on your next build.',
+        text: 'Build cache and untagged image layers rebuild on your next build. Volumes are never cleaned in bulk: review them one at a time below.',
       }));
+      const vs = volumesSection();
+      if (vs) rows.push(vs);
       return shell(rows);
     }
 
@@ -523,7 +757,7 @@
       SP.setActionBar(null);
       if (loading) { host.appendChild(scanBlock()); return; }
       if (S.systemError) { host.appendChild(bigState('breathe', 'Could not scan caches', S.systemError, 'Try again', true)); return; }
-      host.appendChild(bigState('breathe', 'All clean', 'No reclaimable caches were found on this machine right now.', 'Scan again', false));
+      host.appendChild(bigState('breathe', 'All clean', 'No reclaimable caches were found on this machine right now.', 'Scan', false));
     }
 
     latestRender = render;
