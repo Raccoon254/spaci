@@ -433,6 +433,14 @@ function createNotices() {
 }
 
 // ---------- window ----------
+/** No new windows and no navigation away from Spaci's own page (ipc-guards.guardNavigation). */
+function hardenWindow(w) {
+  ipcGuards.guardNavigation(w && w.webContents, {
+    openExternal: (url) => shell.openExternal(url),
+    log: (msg) => crashLog.warn(msg),
+  });
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1180, height: 780, minWidth: 920, minHeight: 620,
@@ -447,6 +455,7 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  hardenWindow(win);
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   win.webContents.on('console-message', (_e, _lvl, message, line, src) => {
     console.log('[renderer]', message, src ? '(' + src.split('/').pop() + ':' + line + ')' : '');
@@ -502,6 +511,7 @@ function createTrayWindow() {
       nodeIntegration: false,
     },
   });
+  hardenWindow(trayWin);
   trayWin.loadFile(path.join(__dirname, 'renderer', 'tray.html'));
   trayWin.on('blur', () => { if (trayWin && !trayWin.isDestroyed()) trayWin.hide(); });
   // Hide instead of closing, except when quitting: a prevented close cancels

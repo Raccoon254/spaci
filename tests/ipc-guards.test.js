@@ -83,3 +83,27 @@ test('prefs:set scan roots: only inside home, already configured, or picked in t
   assert.deepEqual(g.acceptScanRoots('not an array', opts), ['/Volumes/Old']);
   assert.deepEqual(g.acceptScanRoots(['/Users/u/../../etc'], opts), []);
 });
+
+test('guardNavigation: deny every new window, open only https/mailto externally, block navigation and webviews', async () => {
+  const { guardNavigation } = require('../src/ipc-guards');
+  const { EventEmitter } = require('events');
+  const wc = Object.assign(new EventEmitter(), { setWindowOpenHandler(fn) { this.handler = fn; } });
+  const opened = [];
+  const logs = [];
+  guardNavigation(wc, { openExternal: async (u) => { opened.push(u); }, log: (m) => logs.push(m) });
+  for (const url of ['https://github.com/Raccoon254/spaci', ' mailto:hi@kentom.co.ke ', 'http://x.test', 'javascript:alert(1)', 'file:///etc/passwd', 'spaci://x', undefined]) {
+    assert.deepEqual(wc.handler({ url }), { action: 'deny' });
+  }
+  assert.deepEqual(opened, ['https://github.com/Raccoon254/spaci', 'mailto:hi@kentom.co.ke']);
+  let prevented = 0;
+  const ev = { preventDefault: () => { prevented++; } };
+  wc.emit('will-navigate', ev, 'https://example.com');
+  wc.emit('will-attach-webview', ev);
+  assert.equal(prevented, 2);
+  assert.equal(logs.length, 6, 'blocked attempts are logged');
+  // A failing openExternal is contained.
+  const wc2 = Object.assign(new EventEmitter(), { setWindowOpenHandler(fn) { this.handler = fn; } });
+  guardNavigation(wc2, { openExternal: () => { throw new Error('no browser'); } });
+  assert.deepEqual(wc2.handler({ url: 'https://x.test' }), { action: 'deny' });
+  guardNavigation(null);
+});

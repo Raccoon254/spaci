@@ -42,6 +42,7 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
         send: (ch, p) => sent.push([ch, p]),
         openDevTools() {},
         isDestroyed: () => false,
+        setWindowOpenHandler(fn) { this.openHandler = fn; },
       });
     }
     loadFile() {}
@@ -914,5 +915,29 @@ test('crash log: startup failures show a dialog and quit; crashes and rejections
     m.electron.shell.showItemInFolder = (p) => opened.push(p);
     assert.equal(await m.handlers['open:reveal']({}, logFile), '');
     assert.deepEqual(opened, [logFile]);
+  } finally { m.cleanup(); }
+});
+
+test('every window denies window.open (https goes to the browser) and blocks navigation', async () => {
+  const opened = [];
+  const m = loadMain(undefined, { shell: { openExternal: async (u) => { opened.push(u); } } });
+  try {
+    m.ready.resolve();
+    await flush();
+    assert.ok(m.windows.length >= 2, 'main window and tray popover');
+    for (const w of m.windows) {
+      const wc = w.webContents;
+      assert.equal(typeof wc.openHandler, 'function');
+      assert.deepEqual(wc.openHandler({ url: 'https://spaci.kentom.co.ke/docs' }), { action: 'deny' });
+      assert.deepEqual(wc.openHandler({ url: 'javascript:alert(1)' }), { action: 'deny' });
+      assert.deepEqual(wc.openHandler({ url: 'file:///etc/passwd' }), { action: 'deny' });
+      let prevented = 0;
+      wc.emit('will-navigate', { preventDefault: () => { prevented++; } }, 'https://evil.example');
+      wc.emit('will-navigate', { preventDefault: () => { prevented++; } }, 'file:///tmp/x.html');
+      assert.equal(prevented, 2);
+    }
+    await flush();
+    assert.deepEqual(opened, m.windows.map(() => 'https://spaci.kentom.co.ke/docs'));
+    m.appEvents.emit('before-quit');
   } finally { m.cleanup(); }
 });

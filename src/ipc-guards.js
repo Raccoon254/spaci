@@ -107,7 +107,40 @@ function acceptScanRoots(roots, { home, current = [], picked = new Set(), platfo
   return out;
 }
 
+/**
+ * Lock a window's web contents to the page Spaci loaded into it:
+ *   - window.open and target=_blank never create a window; an https: or
+ *     mailto: link is handed to `openExternal` (the same check as
+ *     open:external), anything else is dropped;
+ *   - every navigation away from the loaded page is blocked (in-page hash
+ *     changes do not fire will-navigate and keep working);
+ *   - <webview> is refused.
+ * `wc` is a webContents (or anything with setWindowOpenHandler and on).
+ */
+function guardNavigation(wc, { openExternal = () => {}, log = () => {} } = {}) {
+  if (!wc) return;
+  if (typeof wc.setWindowOpenHandler === 'function') {
+    wc.setWindowOpenHandler((details) => {
+      const url = details && details.url;
+      if (isSafeExternalUrl(url)) {
+        try { Promise.resolve(openExternal(url.trim())).catch(() => {}); } catch (_) { /* the link just does nothing */ }
+      } else {
+        log(`blocked window.open to ${String(url).slice(0, 200)}`);
+      }
+      return { action: 'deny' };
+    });
+  }
+  if (typeof wc.on === 'function') {
+    wc.on('will-navigate', (e, url) => {
+      e.preventDefault();
+      log(`blocked navigation to ${String(url).slice(0, 200)}`);
+    });
+    wc.on('will-attach-webview', (e) => { e.preventDefault(); });
+  }
+}
+
 module.exports = {
   MIN_LARGE_FILE_BYTES, DEFAULT_LARGE_FILE_BYTES,
   isSafeExternalUrl, clampMinBytes, resolveLargeFilesRoot, knownPathSet, isSameOrInside, keyOf, acceptScanRoots,
+  guardNavigation,
 };
