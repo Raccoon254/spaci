@@ -63,7 +63,9 @@ jobs:
 
       - name: deb installs icon, menu entry and AppArmor profile, and launches
         run: |
-          sudo apt-get install -y ./release/*.deb
+          sudo apt-get install -y ./release/*.deb 2>&1 | tee "$RUNNER_TEMP/deb-install.log"
+          if grep -q "AppArmor parser error" "$RUNNER_TEMP/deb-install.log"; then echo "FAIL deb-apparmor-parse" >> "$RUNNER_TEMP/failures"; fi
+          sudo aa-status 2>/dev/null | grep -w spaci || echo "spaci profile not loaded"
           ls /usr/share/icons/hicolor/*/apps/ | head -20
           test -n "$(ls /usr/share/icons/hicolor/*/apps/spaci.png 2>/dev/null)" || { echo "FAIL deb-icon" >> "$RUNNER_TEMP/failures"; echo "no spaci icon installed"; }
           grep -E '^(Name|Exec|Icon)=' /usr/share/applications/spaci.desktop

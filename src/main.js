@@ -7,6 +7,19 @@ const path = require('path');
 const { execFile } = require('child_process');
 const crypto = require('crypto');
 
+// Ubuntu 23.10+ blocks unprivileged user namespaces through AppArmor, and an
+// AppImage can neither ship an AppArmor profile nor a setuid sandbox helper, so
+// Chromium aborts at launch. Only in that exact case run without the Chromium
+// sandbox; the deb installs a profile and keeps it. Must run before app ready.
+if (process.platform === 'linux' && process.env.APPIMAGE) {
+  let restricted = false;
+  try { restricted = fs.readFileSync('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 'utf8').trim() === '1'; } catch { /* not restricted */ }
+  if (restricted) {
+    app.commandLine.appendSwitch('no-sandbox');
+    console.warn('Spaci: AppArmor blocks the Chromium sandbox for AppImages here; running without it. Install the .deb to keep the sandbox.');
+  }
+}
+
 const scanner = require('./scanner');
 const system = require('./system');
 const docker = require('./docker');

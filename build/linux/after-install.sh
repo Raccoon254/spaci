@@ -24,7 +24,7 @@ if [ -d /etc/apparmor.d ] && [ -e /etc/apparmor.d/abi/4.0 ] && hash apparmor_par
 abi <abi/4.0>,
 include <tunables/global>
 
-profile ${executable} '/opt/${sanitizedProductName}/${executable}' flags=(unconfined) {
+profile ${executable} "/opt/${sanitizedProductName}/${executable}" flags=(unconfined) {
   userns,
 
   include if exists <local/${executable}>
