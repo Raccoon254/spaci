@@ -289,7 +289,7 @@ function storyDef(key, dirs, pathsByStory) {
     // Application Support; count it in their own story, not twice.
     subtractDirs.push(...(pathsByStory.get('browsers') || []), ...(pathsByStory.get('aitools') || []));
   }
-  return { key, ...meta, dirs: uniq(dirs), subtractDirs: uniq(subtractDirs) };
+  return { key, ...meta, tier: CATEGORY_TIER[key] || 'C', dirs: uniq(dirs), subtractDirs: uniq(subtractDirs) };
 }
 
 /**
@@ -299,16 +299,74 @@ function storyDef(key, dirs, pathsByStory) {
  * already counts.
  */
 function systemCategory(bytes, { platform = process.platform, home = require('os').homedir() } = {}) {
-  const api = platform === 'win32' ? require('path').win32 : require('path').posix;
+  return { key: 'system', ...CATEGORY_META.system, tier: 'D', bytes, dirs: unclassifiedRoots({ platform, home }), drill: 'unclassified' };
+}
+
+/**
+ * Folders whose children no category claims: the home folder itself and the
+ * few containers next to category folders. Everything outside the home folder
+ * (/Library, /opt, /private/var, ProgramData, /usr, /var) is measured by the
+ * OS collectors in os-storage/ as named items instead.
+ */
+function unclassifiedRoots({ platform = process.platform, home = require('os').homedir() } = {}) {
+  const api = platform === 'win32' ? path.win32 : path.posix;
   const j = (...p) => api.join(home, ...p);
-  const dirs = platform === 'darwin'
-    // Not /private/var: most of it is Chrome code-sign clones du counts many
-    // times over, so listing it would overstate what could be freed.
-    ? [home, j('Library'), '/opt', '/usr/local', '/Library', '/Users/Shared']
-    : platform === 'win32'
-      ? [home, j('AppData', 'Local'), j('AppData', 'Roaming'), 'C:\\ProgramData']
-      : [home, j('.local', 'share'), '/opt', '/usr/local', '/var'];
-  return { key: 'system', ...CATEGORY_META.system, bytes, dirs, drill: 'unclassified' };
+  if (platform === 'darwin') return [home, j('Library')];
+  if (platform === 'win32') return [home, j('AppData')];
+  return [home, j('.local')];
+}
+
+// The cleaning tier of each story category as a whole (os-storage-spec.md):
+// A regenerable bulk, B confirm per category, C per item, D OS-managed. A
+// category mixing tiers takes its most careful one; drill-down items get their
+// own tier from tierForPath().
+const CATEGORY_TIER = Object.freeze({
+  developer: 'C', // project folders are your code; the caches inside are A
+  aitools: 'B',
+  applications: 'C',
+  appdata: 'C',
+  caches: 'B',
+  browsers: 'B',
+  xcode: 'B',
+  media: 'C',
+  documents: 'C',
+  downloads: 'C',
+  mail: 'C',
+  system: 'D',
+});
+
+/**
+ * Tier of one path in a drill-down: a known cleaning target decides it (safe
+ * and regenerable: A, regenerable but costly: B, irreversible: C); otherwise
+ * the category it sits in.
+ */
+function tierForPath(p, options = {}) {
+  const ctx = platformContext(options);
+  const api = ctx.pathApi;
+  const inside = (parent, child) => {
+    if (!parent || !child) return false;
+    if (parent === child) return true;
+    const rel = api.relative(parent, child);
+    return Boolean(rel) && !rel.startsWith('..') && !api.isAbsolute(rel);
+  };
+  let best = null;
+  for (const t of buildSystemTargets(ctx)) {
+    for (const tp of t.paths) {
+      // The target itself or anything inside it; a folder that merely contains
+      // a target (~/Library holds Caches) is not the target.
+      if (!inside(tp, p)) continue;
+      const tier = t.safe ? 'A' : t.reversible === false ? 'C' : 'B';
+      if (!best || tp.length > best.len) best = { tier, len: tp.length };
+    }
+  }
+  if (best) return best.tier;
+  for (const def of buildStoryCategories(ctx)) {
+    if (def.dirs.some((d) => inside(d, p))) {
+      if (def.key === 'developer' && buildProjectRoots(ctx.home).some((r) => inside(r, p))) return 'C';
+      return CATEGORY_TIER[def.key] || 'C';
+    }
+  }
+  return 'C';
 }
 
 module.exports = {
@@ -316,5 +374,9 @@ module.exports = {
   buildStoryCategories,
   buildSystemTargets,
   systemCategory,
+  unclassifiedRoots,
+  buildProjectRoots,
+  tierForPath,
+  CATEGORY_TIER,
   makeTarget,
 };

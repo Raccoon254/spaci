@@ -202,9 +202,10 @@ test('no target description claims nothing is lost for logs or saved state', () 
   for (const id of ['user-logs', 'saved-state']) assert.equal(mac.find((t) => t.id === id).reversible, false, id + ' cannot be restored');
 });
 
-test('the System remainder carries drill-down folders for each OS', () => {
+test('the System remainder drills into the home folders no category claims; outside home is measured by the OS collectors', () => {
   const { systemCategory } = require('../src/storage-classifier');
-  assert.deepEqual(systemCategory(5, { platform: 'darwin', home: '/Users/u' }).dirs, ['/Users/u', '/Users/u/Library', '/opt', '/usr/local', '/Library', '/Users/Shared']);
-  assert.ok(systemCategory(5, { platform: 'linux', home: '/home/u' }).dirs.includes('/opt'));
-  assert.ok(systemCategory(5, { platform: 'win32', home: 'C:\\Users\\u' }).dirs.includes('C:\\Users\\u\\AppData\\Local'));
+  assert.deepEqual(systemCategory(5, { platform: 'darwin', home: '/Users/u' }).dirs, ['/Users/u', '/Users/u/Library']);
+  assert.deepEqual(systemCategory(5, { platform: 'linux', home: '/home/u' }).dirs, ['/home/u', '/home/u/.local']);
+  assert.deepEqual(systemCategory(5, { platform: 'win32', home: 'C:\\Users\\u' }).dirs, ['C:\\Users\\u', 'C:\\Users\\u\\AppData']);
+  assert.equal(systemCategory(5, { platform: 'darwin', home: '/Users/u' }).tier, 'D');
 });
