@@ -17,34 +17,48 @@
     return S.settings;
   }
 
-  // 46x26 pill toggle. ON adds class "sp-tog-on" (CSS animates the knob).
+  // 46x26 pill switch: a real button with role="switch" and aria-checked. ON
+  // adds class "sp-tog-on" (CSS moves the knob and paints it white on accent).
   function toggle(on, onClick) {
     return el(
-      'div',
+      'button',
       {
+        type: 'button',
+        role: 'switch',
+        'aria-checked': on ? 'true' : 'false',
         onclick: onClick,
         class: on ? 'sp-tog-on' : '',
         style:
-          'width:46px;height:26px;border-radius:99px;position:relative;cursor:pointer;flex:none;border:1px solid var(--border);transition:background .2s',
+          'width:46px;height:26px;border-radius:99px;position:relative;cursor:pointer;flex:none;border:1px solid var(--border-2);background:var(--panel-3);transition:background .2s;padding:0',
       },
       [
         el('span', {
           class: 'sp-knob',
+          'aria-hidden': 'true',
           style:
-            'position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:var(--text-2);transition:transform .2s,background .2s',
+            'position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;transition:transform .2s,background .2s',
         }),
       ]
     );
   }
 
+  // A settings row. The control (switch, button group) is named by the row's
+  // label and described by its description.
+  let rowSeq = 0;
   function row(label, desc, control, last) {
+    const id = 'sp-set-' + (++rowSeq);
     const style =
       'display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 0' +
       (last ? '' : ';border-bottom:1px solid var(--border)');
+    if (control && control.getAttribute) {
+      control.setAttribute('data-focus-key', label);
+      if (!control.hasAttribute('aria-label')) control.setAttribute('aria-labelledby', id + '-l');
+      if (desc) control.setAttribute('aria-describedby', id + '-d');
+    }
     return el('div', { style }, [
       el('div', {}, [
-        el('div', { style: 'font-weight:600;font-size:14.5px', text: label }),
-        desc && el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:3px', text: desc }),
+        el('div', { id: id + '-l', style: 'font-weight:600;font-size:14.5px', text: label }),
+        desc && el('div', { id: id + '-d', style: 'color:var(--text-3);font-size:12.5px;margin-top:3px', text: desc }),
       ]),
       control,
     ]);
@@ -54,11 +68,22 @@
   // so a failing IPC call never throws into the render path.
   async function patchPrefs(store, patch, rerender) {
     Object.assign(store.prefs, patch);
-    if (rerender) SP.go('settings');
+    if (rerender) rerenderKeepFocus();
     try {
       const next = await api.setPrefs(patch);
       if (next) store.prefs = next;
     } catch (_) {}
+  }
+
+  // Re-render this screen and put keyboard focus back on the same control (the
+  // render replaces every node, so a switched switch would otherwise drop focus).
+  function rerenderKeepFocus() {
+    const a = document.activeElement;
+    const key = a && a.getAttribute ? a.getAttribute('data-focus-key') : null;
+    SP.go('settings');
+    if (!key) return;
+    const again = [...document.querySelectorAll('[data-focus-key]')].find((x) => x.getAttribute('data-focus-key') === key);
+    if (again) { try { again.focus({ preventScroll: true }); } catch (_) {} }
   }
 
   // ---- appearance font: persisted choice applied to the app root ----
@@ -116,7 +141,7 @@
     // header (always shown)
     host.appendChild(
       frag([
-        el('div', { style: 'font-size:31px;font-weight:700;letter-spacing:-1.1px;margin-bottom:7px', text: 'Settings' }),
+        el('h1', { style: 'font-size:31px;font-weight:700;letter-spacing:-1.1px;margin-bottom:7px', text: 'Settings' }),
         el('div', { style: 'color:var(--text-2);font-size:14.5px;margin-bottom:24px', text: 'Preferences & safety.' }),
       ])
     );
@@ -238,12 +263,24 @@
       )
     );
 
-    // Desktop notifications (notify pref, persisted via setPrefs)
+    // Desktop notifications. Stored as `notify`: on unless switched off (main
+    // shows a notification only when notify !== false), so unset counts as on.
     card.appendChild(
       row(
         'Desktop notifications',
-        'Get notified when a scan or clean finishes.',
-        toggle(!!p.notify, () => patchPrefs(store, { notify: !p.notify }, true))
+        'System notifications when a background scan finds space, and for important Spaci news.',
+        toggle(p.notify !== false, () => patchPrefs(store, { notify: p.notify === false }, true))
+      )
+    );
+
+    // News and release notes. Stored as `notices`: on unless switched off.
+    // Off stops fetching notices; critical ones still arrive while automatic
+    // update checks are on.
+    card.appendChild(
+      row(
+        'News and release notes',
+        "Show What's new after an update and occasional notices from Spaci. Only the app version and platform are sent.",
+        toggle(p.notices !== false, () => patchPrefs(store, { notices: p.notices === false }, true))
       )
     );
 
@@ -265,11 +302,14 @@
         toggle(isLight, () => {
           const light = !isLight;
           const theme = light ? 'light' : 'dark';
-          S.theme = theme;
-          const appRoot = document.getElementById('app');
-          if (appRoot) appRoot.classList.toggle('light', light);
+          if (SP.setTheme) SP.setTheme(theme);
+          else {
+            S.theme = theme;
+            const appRoot = document.getElementById('app');
+            if (appRoot) appRoot.classList.toggle('light', light);
+          }
           patchPrefs(store, { theme }, false);
-          SP.go('settings');
+          rerenderKeepFocus();
         })
       )
     );
@@ -278,14 +318,34 @@
     const fontSeg = el('div', {
       style:
         'display:flex;gap:6px;background:var(--panel-2);padding:4px;border-radius:11px;border:1px solid var(--border)',
+      role: 'radiogroup',
     }, ['System', 'Inter', 'Mono'].map((name) => {
       const on = name === activeFont;
-      return el('div', {
+      return el('button', {
+        type: 'button',
+        role: 'radio',
+        'aria-checked': on ? 'true' : 'false',
+        tabindex: on ? '0' : '-1',
         class: on ? 'sp-chip-on' : '',
         style: 'padding:7px 14px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;color:var(--text-2)',
         onclick: () => {
           applyFont(name);
           patchPrefs(store, { font: name }, true);
+        },
+        onkeydown: (e) => {
+          const names = ['System', 'Inter', 'Mono'];
+          const i = names.indexOf(name);
+          let next = null;
+          if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = names[(i + 1) % names.length];
+          if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = names[(i + names.length - 1) % names.length];
+          if (!next) return;
+          e.preventDefault();
+          applyFont(next);
+          patchPrefs(store, { font: next }, true);
+          setTimeout(() => {
+            const b = [...document.querySelectorAll('[role="radio"]')].find((x) => x.textContent === next);
+            if (b) b.focus();
+          }, 0);
         },
         text: name,
       });
@@ -303,7 +363,7 @@
 
     // Section label, matching the reference's uppercase "About" header.
     host.appendChild(
-      el('div', {
+      el('h2', {
         style:
           'font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin:30px 0 14px',
         text: 'About',
@@ -318,18 +378,8 @@
     // Brand header: animated breathing logo + wordmark + version + tagline.
     const versionLine = el('span', {
       style: 'color:var(--text-3);font-weight:600;font-size:14px',
-      text: store.version ? 'Version ' + store.version : 'Version 1.2.0',
+      text: store.version ? 'Version ' + store.version : '',
     });
-    // If the cached version is missing, fetch it async and fill in place.
-    if (!store.version) {
-      api
-        .appVersion()
-        .then((v) => {
-          store.version = v || '1.2.0';
-          versionLine.textContent = 'Version ' + store.version;
-        })
-        .catch(() => {});
-    }
 
     aboutCard.appendChild(
       el('div', { style: 'display:flex;align-items:center;gap:16px' }, [
@@ -354,12 +404,18 @@
         el('span', {}, [label + ' ', el('b', { style: 'font-weight:700;color:var(--text)', text: value })]),
       ]);
     }
-    const metaVersion = metaChip('box', 'Version', store.version || '1.2.0');
-    if (!store.version) {
-      api
-        .appVersion()
+    // No hardcoded fallback: the real version from main, or "unknown" when
+    // main could not answer (it is fetched once in bootSettings and retried
+    // here if that failed).
+    const metaVersion = metaChip('box', 'Version', store.version || 'unknown');
+    if (!store.version && !store.versionRetry) {
+      store.versionRetry = true;
+      Promise.resolve()
+        .then(() => api.appVersion())
         .then((v) => {
-          store.version = v || '1.2.0';
+          if (!v) return;
+          store.version = String(v);
+          versionLine.textContent = 'Version ' + store.version;
           const b = metaVersion.querySelector('b');
           if (b) b.textContent = store.version;
         })
@@ -432,6 +488,59 @@
     );
 
     host.appendChild(aboutCard);
+
+    // ---------- Diagnostics: where the log file lives ----------
+    host.appendChild(
+      el('h2', {
+        style:
+          'font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-3);font-weight:600;margin:30px 0 14px',
+        text: 'Diagnostics',
+      })
+    );
+    const diag = el('div', {
+      style: 'background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:6px 22px;box-shadow:var(--shadow-sm)',
+    });
+    const hasLog = typeof api.logPath === 'function';
+    const logText = el('div', {
+      class: 'mono',
+      style: 'color:var(--text-3);font-size:12px;margin-top:3px;overflow-wrap:anywhere',
+      text: !hasLog ? 'Not available in this build.' : store.logPath || 'Looking up the log file...',
+    });
+    if (hasLog && !store.logPath && !store.logLoading) {
+      store.logLoading = true;
+      Promise.resolve()
+        .then(() => api.logPath())
+        .then((lp) => {
+          store.logPath = typeof lp === 'string' && lp ? lp : '';
+          logText.textContent = store.logPath || 'Not available in this build.';
+          if (S.route === 'settings' && store.logPath) SP.go('settings');
+        })
+        .catch(() => { logText.textContent = 'Not available in this build.'; });
+    }
+    const logActions = store.logPath
+      ? el('div', { style: 'display:flex;gap:8px;flex:none' }, [
+          btn('Copy path', 'copy', async () => {
+            try { await navigator.clipboard.writeText(store.logPath); SP.toast('Log path copied', store.logPath); }
+            catch (_) { SP.toast('Could not copy', 'Select the path and copy it instead.'); }
+          }),
+          btn('Show in folder', 'folder-open', async () => {
+            let r = 'Not allowed';
+            try { r = await api.reveal(store.logPath); } catch (_) {}
+            if (r) SP.toast('Could not open the folder', 'Copy the path and open it from your file manager.');
+          }),
+        ])
+      : null;
+    diag.appendChild(
+      el('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 0' }, [
+        el('div', { style: 'min-width:0' }, [
+          el('div', { style: 'font-weight:600;font-size:14.5px', text: 'Log file' }),
+          el('div', { style: 'color:var(--text-2);font-size:12.5px;margin-top:3px', text: 'Errors and crashes are written here. Attach it when you report a problem.' }),
+          logText,
+        ]),
+        logActions,
+      ])
+    );
+    host.appendChild(diag);
 
     // ---------- safe-by-design banner ----------
     host.appendChild(
