@@ -366,7 +366,7 @@
       const badge = BADGE[state];
 
       const title = el('div', { style: 'display:flex;align-items:center;gap:13px' }, [
-        el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' },
+        el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:#1d63ed' },
           [ic('docker', 24, { kind: 'logo' })]),
         el('div', { style: 'flex:1;min-width:0' }, [
           el('div', { style: 'font-weight:700;font-size:15px;display:flex;align-items:center;gap:9px' }, [
