@@ -445,7 +445,7 @@ test('revalidateArtifact re-checks one path at clean time', async () => {
   git(proj, 'init', '-q'); git(proj, 'add', '-A'); git(proj, 'commit', '-qm', 'c');
   const build = path.join(proj, 'build');
 
-  assert.deepEqual(await scanner.revalidateArtifact(build), { ok: true });
+  assert.deepEqual(await scanner.revalidateArtifact(build), { ok: true, verified: true });
 
   write(proj, 'build/new-entitlements.plist', '<plist/>');
   git(proj, 'add', '-f', 'build/new-entitlements.plist');
@@ -459,9 +459,138 @@ test('revalidateArtifact re-checks one path at clean time', async () => {
   assert.equal(notRepo.ok, false);
   assert.ok(notRepo.reason);
 
-  const gone = await scanner.revalidateArtifact(path.join(proj, 'missing-build'));
+  const gone = await scanner.revalidateArtifact(path.join(proj, 'gone', 'dist'));
   assert.equal(gone.ok, false);
   assert.match(gone.reason, /no longer exists/i);
   fs.rmSync(build, { recursive: true, force: true });
   assert.equal((await scanner.revalidateArtifact(build)).ok, false);
+});
+
+// ---------------------------------------------------------------------------
+// Round two: nested clones, case mismatch, the rule itself at clean time,
+// non-git projects and personal global excludes.
+// ---------------------------------------------------------------------------
+
+/** A committed repo at `dir`, so it has history that deleting would lose. */
+function makeClone(dir) {
+  write(dir, 'src/lib.php', '<?php // unpushed work');
+  git(dir, 'init', '-q'); git(dir, 'add', '-A'); git(dir, 'commit', '-qm', 'unpushed');
+}
+
+test('an ignored vendor/ holding a git clone deeper down is not safe', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'J');
+  write(proj, 'composer.json', '{}');
+  write(proj, '.gitignore', '/vendor/\n');
+  write(proj, 'vendor/autoload.php', '<?php');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A'); git(proj, 'commit', '-qm', 'c');
+  makeClone(path.join(proj, 'vendor', 'acme', 'lib'));
+
+  const vendor = path.join(proj, 'vendor');
+  const item = (await itemsAt(root, proj)).find((i) => i.path === vendor);
+  assert.ok(item, 'listed for review');
+  assert.equal(item.safe, false);
+  assert.match(item.note, /git repository/);
+  const re = await scanner.revalidateArtifact(vendor);
+  assert.equal(re.ok, false);
+  assert.match(re.reason, /git repository/);
+});
+
+test('a hand-cloned repo (a .git file) inside an ignored node_modules/ is not safe', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, '.gitignore', 'node_modules/\n');
+  write(proj, 'node_modules/fork/index.js', 'x');
+  write(proj, 'node_modules/fork/.git', 'gitdir: /somewhere/else\n');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A'); git(proj, 'commit', '-qm', 'c');
+  const nm = path.join(proj, 'node_modules');
+  assert.equal((await itemsAt(root, proj)).find((i) => i.path === nm)?.safe, false);
+  assert.equal((await scanner.revalidateArtifact(nm)).ok, false);
+});
+
+test('a tracked Dist/ read back as dist/ on a case-insensitive disk is not offered', async (t) => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, 'Dist/keep.js', 'tracked source');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A'); git(proj, 'commit', '-qm', 'c');
+  if (!fs.existsSync(path.join(proj, 'DIST'))) { t.skip('this disk is case-sensitive'); return; }
+  fs.renameSync(path.join(proj, 'Dist'), path.join(proj, 'tmp-rename'));
+  fs.renameSync(path.join(proj, 'tmp-rename'), path.join(proj, 'dist'));
+  write(proj, '.gitignore', 'dist/\n');
+  assert.ok(fs.readdirSync(proj).includes('dist'), 'folder reads as lowercase');
+  assert.match(gitOut(proj, 'ls-files'), /^Dist\/keep\.js$/m, 'index still says Dist/');
+
+  const dist = path.join(proj, 'dist');
+  assert.equal((await itemsAt(root, proj)).find((i) => i.path === dist), undefined);
+  const re = await scanner.revalidateArtifact(dist);
+  assert.equal(re.ok, false);
+  assert.match(re.reason, /tracked/);
+});
+
+test('revalidateArtifact reapplies the rule, not just git', async () => {
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, '.gitignore', '.venv/\ntarget/\nnotes/\n');
+  write(proj, '.venv/bin/python', 'x');
+  write(proj, 'target/debug/app', 'x');
+  write(proj, 'notes/a.txt', 'x');
+  write(proj, 'rs/Cargo.toml', '[package]\nname = "x"\n');
+  write(proj, 'rs/target/debug/app', 'x');
+  git(proj, 'init', '-q'); git(proj, 'add', '-A'); git(proj, 'commit', '-qm', 'c');
+
+  const venv = await scanner.revalidateArtifact(path.join(proj, '.venv'));
+  assert.equal(venv.ok, false, 'a safe:false rule stays unsafe even when ignored');
+  const bare = await scanner.revalidateArtifact(path.join(proj, 'target'));
+  assert.equal(bare.ok, false);
+  assert.match(bare.reason, /Cargo\.toml/);
+  const unknown = await scanner.revalidateArtifact(path.join(proj, 'notes'));
+  assert.equal(unknown.ok, false, 'an ignored folder with an unknown name is not an artifact');
+  assert.deepEqual(await scanner.revalidateArtifact(path.join(proj, 'rs', 'target')), { ok: true, verified: true });
+});
+
+test('outside git, revalidateArtifact allows only unambiguous names, unverified', async () => {
+  const proj = path.join(tmpRoot(), 'plain');
+  write(proj, 'package.json', '{}');
+  for (const d of ['node_modules', '__pycache__', 'build', 'dist', 'out', 'vendor', 'coverage', 'obj', '.output']) {
+    write(proj, `${d}/f`, 'x');
+  }
+  write(proj, 'cloned/node_modules/dep/.git/HEAD', 'ref: refs/heads/main\n');
+
+  assert.deepEqual(await scanner.revalidateArtifact(path.join(proj, 'node_modules')), { ok: true, verified: false });
+  assert.deepEqual(await scanner.revalidateArtifact(path.join(proj, '__pycache__')), { ok: true, verified: false });
+  for (const d of ['build', 'dist', 'out', 'vendor', 'coverage', 'obj', '.output']) {
+    const r = await scanner.revalidateArtifact(path.join(proj, d));
+    assert.equal(r.ok, false, `${d} outside git must never be deletable`);
+  }
+  const clone = await scanner.revalidateArtifact(path.join(proj, 'cloned', 'node_modules'));
+  assert.equal(clone.ok, false, 'a repository inside still blocks it outside git');
+});
+
+test('personal global excludes are not proof of build output', async () => {
+  const home = tmpRoot();
+  write(home, '.config/git/ignore', 'build/\n');
+  write(home, 'excludes', 'build/\n');
+  write(home, '.gitconfig', `[core]\n\texcludesFile = ${path.join(home, 'excludes')}\n`);
+  const root = tmpRoot();
+  const proj = path.join(root, 'proj');
+  write(proj, 'package.json', '{}');
+  write(proj, 'build/entitlements.mac.plist', '<plist/>');
+  git(proj, 'init', '-q');
+
+  const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  process.env.HOME = home;
+  process.env.XDG_CONFIG_HOME = path.join(home, '.config');
+  try {
+    const seen = execFileSync('git', ['-C', proj, 'check-ignore', 'build/'], { encoding: 'utf8', env: { ...process.env } });
+    assert.match(seen, /build/, 'fixture: git itself would call build/ ignored');
+    const build = path.join(proj, 'build');
+    const item = (await itemsAt(root, proj)).find((i) => i.path === build);
+    assert.equal(item?.safe, false);
+    assert.equal((await scanner.revalidateArtifact(build)).ok, false);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
 });

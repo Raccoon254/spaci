@@ -386,7 +386,8 @@ async function dockerShellProject(dir, dockerFiles) {
 const GIT_TIMEOUT = 15000;
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 // Keep each ls-files argv well below ARG_MAX, however many candidates there are.
-const GIT_ARGV_BYTES = 96 * 1024;
+// Windows caps a whole command line at 32767 characters.
+const GIT_ARGV_BYTES = process.platform === 'win32' ? 24 * 1024 : 96 * 1024;
 
 const nfc = (s) => s.normalize('NFC');
 /** Both Unicode forms of a path: macOS can store NFD names while git prints NFC. */
@@ -429,8 +430,61 @@ function gitFailure(res, what) {
   if (/not a git repository/i.test(res.stderr)) return 'it is not inside a git repository';
   return `git could not ${what}`;
 }
+const isNotRepo = (res) => res.err && typeof res.err.code === 'number' && !res.err.killed
+  && /not a git repository/i.test(res.stderr);
 
 const exists = (p) => fsp.lstat(p).then(() => true, () => false);
+
+/** First `.git` entry (directory or file) below `dir`, walked in JS. */
+async function walkForGit(dir, signal) {
+  let found = false;
+  let unreadable = false;
+  await drain([dir], WALK_WORKERS, async (cur) => {
+    if (found || signal?.aborted) return null;
+    let ents;
+    try { ents = await fsp.readdir(cur, { withFileTypes: true }); }
+    catch { unreadable = true; return null; }
+    const subdirs = [];
+    for (const e of ents) {
+      if (e.name === '.git') { found = true; return null; }
+      if (e.isDirectory() && !e.isSymbolicLink()) subdirs.push(path.join(cur, e.name));
+    }
+    return subdirs;
+  }, signal);
+  if (found) return 'found';
+  return unreadable || signal?.aborted ? 'unknown' : 'none';
+}
+
+/**
+ * Is there a git repository anywhere inside `dir`? A clone under an ignored
+ * vendor/ or node_modules/ can hold unpushed commits. `find -quit` stops at the
+ * first hit and reads directories in C. Resolves 'found', 'none' or 'unknown'
+ * (unreadable folders or a failed search, which is doubt).
+ */
+// Its own ceiling, so the search runs beside sizing instead of queueing behind it.
+const withFindSlot = makeGate(SIZE_WORKERS);
+
+function findNestedGit(dir, signal) {
+  if (process.platform === 'win32') return withFindSlot(() => walkForGit(dir, signal));
+  return withFindSlot(() => new Promise((resolve) => {
+    execFile('find', [dir, '-mindepth', '1', '-name', '.git', '-print', '-quit'],
+      { timeout: 120000, signal, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+        if (String(stdout || '').trim()) return resolve('found');
+        if (err && err.code === 'ENOENT') return walkForGit(dir, signal).then(resolve);
+        resolve(err ? 'unknown' : 'none');
+      });
+  }));
+}
+
+async function nestedGitReason(c, signal) {
+  if (!c.isDir) return null;
+  // The scan hands over a search it already started right after sizing, while
+  // the folder's entries are still in the filesystem cache.
+  const res = await (c.nestedGit || findNestedGit(c.path, signal));
+  if (res === 'found') return 'it contains a git repository, which may hold unpushed work';
+  if (res === 'unknown') return 'Spaci could not look inside all of it for git repositories';
+  return null;
+}
 
 /**
  * Resolve the innermost git repository git itself sees from `dir`. Returns
@@ -439,7 +493,7 @@ const exists = (p) => fsp.lstat(p).then(() => true, () => false);
  */
 async function resolveRepo(dir, signal) {
   const res = await runGit(dir, ['rev-parse', '--show-toplevel', '--show-prefix'], { signal, timeout: 5000 });
-  if (res.err) return { error: gitFailure(res, 'read this folder') };
+  if (res.err) return { error: gitFailure(res, 'read this folder'), notRepo: isNotRepo(res) };
   const lines = res.stdout.split('\n');
   // Two lines plus the trailing newline. More means a newline in a path.
   if (lines.length !== 3 || !lines[0]) return { error: 'git gave an unexpected answer' };
@@ -453,9 +507,16 @@ async function resolveRepo(dir, signal) {
   return { top: lines[0], prefix };
 }
 
-/** Tracked files under the given repo-relative paths, as NFC paths. */
+/**
+ * Tracked files under the given repo-relative paths, as NFC paths. Matching is
+ * case-insensitive: on a case-insensitive disk the index can hold `Dist/keep.js`
+ * while the folder reads as `dist`. Over-matching on a case-sensitive disk only
+ * hides a folder, which is the safe direction.
+ */
 async function trackedFiles(top, rels, signal) {
-  const specs = [...new Set(rels.flatMap(bothForms))];
+  // Per-pathspec magic: `literal` keeps `*` or `[a]` literal, `icase` ignores
+  // case. Git refuses the global --literal-pathspecs together with icase.
+  const specs = [...new Set(rels.flatMap(bothForms))].map((r) => `:(literal,icase)${r}`);
   const chunks = [];
   let chunk = [];
   let bytes = 0;
@@ -468,8 +529,7 @@ async function trackedFiles(top, rels, signal) {
   if (chunk.length) chunks.push(chunk);
   const files = [];
   for (const c of chunks) {
-    // --literal-pathspecs keeps names like `*` or `[a]` literal, `--` keeps `-foo` a path.
-    const res = await runGit(top, ['--literal-pathspecs', 'ls-files', '-z', '--full-name', '--', ...c], { signal });
+    const res = await runGit(top, ['ls-files', '-z', '--full-name', '--', ...c], { signal });
     if (res.err) return { error: gitFailure(res, 'list tracked files') };
     for (const f of res.stdout.split('\0')) if (f) files.push(nfc(f));
   }
@@ -480,17 +540,18 @@ async function trackedFiles(top, rels, signal) {
  * Classify candidates that all share one innermost repository, resolved from
  * `keyDir`. One rev-parse, one check-ignore (paths on stdin) and one ls-files
  * (argv chunked by size) per repository. Returns Map(path -> verdict) where a
- * verdict is { state: 'safe' | 'tracked' | 'unverified', reason? }.
+ * verdict is { state, reason? } and state is 'safe', 'tracked', 'unverified'
+ * (doubt) or 'nogit' (git says it is outside any repo it can vouch for).
  */
 async function classifyInRepo(keyDir, cands, signal) {
   const out = new Map();
-  const failAll = (reason) => {
-    for (const c of cands) out.set(c.path, { state: 'unverified', reason });
+  const failAll = (reason, state = 'unverified') => {
+    for (const c of cands) out.set(c.path, { state, reason });
     return out;
   };
 
   const repo = await resolveRepo(keyDir, signal);
-  if (repo.error) return failAll(repo.error);
+  if (repo.error) return failAll(repo.error, repo.notRepo ? 'nogit' : 'unverified');
 
   const rels = cands.map((c) => nfc(repo.prefix + path.relative(keyDir, c.path).split(path.sep).join('/')));
   if (rels.some((r) => !r || r.startsWith('../') || r.includes('\n'))) return failAll('git gave an unexpected answer');
@@ -510,19 +571,29 @@ async function classifyInRepo(keyDir, cands, signal) {
 
   // The two questions are independent, so ask them at the same time.
   const [ci, ls] = await Promise.all([
-    runGit(repo.top, ['check-ignore', '--stdin', '-z'], { input: queries.join('\0') + '\0', signal }),
+    // Only the repo's own rules count as proof (.gitignore files and
+    // .git/info/exclude). An empty core.excludesFile turns off the personal
+    // global excludes, including the XDG default, on every platform.
+    runGit(repo.top, ['-c', 'core.excludesFile=', 'check-ignore', '--stdin', '-z'],
+      { input: queries.join('\0') + '\0', signal }),
     trackedFiles(repo.top, rels, signal),
   ]);
   // Exit 1 is git's "nothing is ignored", a valid answer.
   if (ci.err && !(ci.err.code === 1 && !ci.err.killed)) return failAll(gitFailure(ci, 'check ignore rules'));
   if (ls.error) return failAll(ls.error);
   const ignored = new Set(ci.stdout.split('\0').filter(Boolean).map((p) => nfc(p).replace(/\/+$/, '')));
-  const index = new Map(rels.map((r, i) => [r, i]));
+  const fold = (p) => p.toLowerCase();
+  const index = new Map();
+  rels.forEach((r, i) => {
+    const k = fold(r);
+    if (!index.has(k)) index.set(k, []);
+    index.get(k).push(i);
+  });
   const tracked = new Set();
   for (const f of ls.files) {
-    let p = f;
+    let p = fold(f);
     for (;;) {
-      if (index.has(p)) tracked.add(index.get(p));
+      if (index.has(p)) for (const i of index.get(p)) tracked.add(i);
       const k = p.lastIndexOf('/');
       if (k < 0) break;
       p = p.slice(0, k);
@@ -533,33 +604,65 @@ async function classifyInRepo(keyDir, cands, signal) {
     const rel = rels[i];
     let verdict;
     if (tracked.has(i)) verdict = { state: 'tracked', reason: 'it contains files tracked by git' };
-    else if (ancestorsOf(rel).some((a) => ignored.has(a))) verdict = { state: 'unverified', reason: 'it sits inside a folder git ignores, so git cannot vouch for it' };
+    else if (ancestorsOf(rel).some((a) => ignored.has(a))) verdict = { state: 'nogit', reason: 'it sits inside a folder git ignores, so git cannot vouch for it' };
     else if (!ignored.has(rel)) verdict = { state: 'unverified', reason: 'git does not ignore it' };
-    else if (c.isDir && await exists(path.join(c.path, '.git'))) verdict = { state: 'unverified', reason: 'it is a git repository of its own' };
-    else verdict = { state: 'safe' };
+    else {
+      const nested = await nestedGitReason(c, signal);
+      verdict = nested ? { state: 'unverified', reason: nested } : { state: 'safe' };
+    }
     out.set(c.path, verdict);
   }));
   return out;
 }
 
 /**
+ * Names that are only ever regenerable output, whatever project holds them.
+ * Outside git these may still be cleaned, unverified. Ambiguous names (build,
+ * dist, out, vendor, target, .output, coverage, obj) can be committed source,
+ * so outside git they are never deletable.
+ */
+const UNAMBIGUOUS_NAMES = new Set([
+  'node_modules', '.next', '.svelte-kit', '.nuxt', '.turbo', '.parcel-cache', '__pycache__',
+  '.mypy_cache', '.pytest_cache', '.ruff_cache', '.gradle', '.dart_tool', 'Pods',
+]);
+
+/**
  * Re-check one project artifact right before it is deleted. Scans are cached
  * for days, and a folder can gain tracked files or lose its ignore rule in the
- * meantime. Only an ignored folder with no tracked content passes; any doubt,
- * including a path outside git, fails.
+ * meantime. The rule is reapplied in full: a known artifact name, its manifest
+ * where the rule needs one, then git. In git, only an ignored folder with no
+ * tracked content and no repository inside passes ({ ok: true, verified: true }).
+ * Outside git, only unambiguous names pass, unverified ({ ok: true, verified:
+ * false }). Any doubt fails with a short reason.
  * @param {string} absPath
- * @returns {Promise<{ok: boolean, reason?: string}>}
+ * @returns {Promise<{ok: boolean, verified?: boolean, reason?: string}>}
  */
 async function revalidateArtifact(absPath) {
   const no = (reason) => ({ ok: false, reason: reason.charAt(0).toUpperCase() + reason.slice(1) + '.' });
   try {
     if (typeof absPath !== 'string' || !path.isAbsolute(absPath)) return no('not an absolute path');
+    const name = path.basename(absPath);
+    const rule = Object.prototype.hasOwnProperty.call(CLEAN_BY_NAME, name) ? CLEAN_BY_NAME[name] : null;
+    if (!rule) return no('it is not a folder Spaci knows as build output');
+    if (!rule.safe) return no('this kind of folder is never removed without review');
     let st;
     try { st = await fsp.lstat(absPath); } catch { return no('it no longer exists'); }
     if (st.isSymbolicLink()) return no('it is a symbolic link');
-    const verdicts = await classifyInRepo(path.dirname(absPath), [{ path: absPath, isDir: st.isDirectory() }]);
+    const parent = path.dirname(absPath);
+    if (rule.needsManifest
+      && !(await exists(path.join(parent, 'Cargo.toml')) || await exists(path.join(parent, 'pom.xml')))) {
+      return no('there is no Cargo.toml or pom.xml beside it');
+    }
+    const cand = { path: absPath, isDir: st.isDirectory() };
+    const verdicts = await classifyInRepo(parent, [cand]);
     const v = verdicts.get(absPath);
-    if (v && v.state === 'safe') return { ok: true };
+    if (v && v.state === 'safe') return { ok: true, verified: true };
+    if (v && v.state === 'nogit') {
+      if (!UNAMBIGUOUS_NAMES.has(name)) return no(`${v.reason}, and "${name}" can be source code`);
+      const nested = await nestedGitReason(cand);
+      if (nested) return no(nested);
+      return { ok: true, verified: false };
+    }
     return no(v ? v.reason : 'Spaci could not check it');
   } catch {
     return no('Spaci could not check it');
@@ -613,6 +716,15 @@ async function buildProject(dir, detected, signal, rootEntries) {
     return subdirs;
   }, signal);
 
+  // The search for a git repository inside each folder starts once its du is
+  // done (see below), so it reads directories that are already cached.
+  for (const f of found) {
+    if (!f.isDir) continue;
+    let start;
+    f.nestedGit = new Promise((resolve) => { start = resolve; });
+    f.startNestedGit = () => start(findNestedGit(f.path, signal));
+  }
+
   // Ask each innermost repo once about all of its candidates.
   const byRepo = new Map();
   for (const f of found) {
@@ -628,8 +740,11 @@ async function buildProject(dir, detected, signal, rootEntries) {
 
   // Size while git answers. Every verdict is in before anything is returned.
   const sized = await mapPool(found, SIZE_WORKERS, async (f) => {
-    try { return f.isDir ? await dirSize(f.path, signal) : (await fsp.stat(f.path)).size; }
-    catch { return 0; /* unreadable, count it as zero */ }
+    let size = 0;
+    try { size = f.isDir ? await dirSize(f.path, signal) : (await fsp.stat(f.path)).size; }
+    catch { /* unreadable, count it as zero */ }
+    finally { if (f.isDir) f.startNestedGit(); }
+    return size;
   });
   await checked;
 
