@@ -74,3 +74,12 @@ test('knownPathSet matches exact identities only, never a prefix or a relative p
   assert.equal(w.has('c:\\users\\me\\APP'), true);
   assert.equal(w.has('C:\\Users\\Me'), false);
 });
+
+test('prefs:set scan roots: only inside home, already configured, or picked in the dialog', () => {
+  const opts = { home: '/Users/u', current: ['/Volumes/Old'], picked: new Set(['/Volumes/Backup']), platform: 'darwin' };
+  assert.deepEqual(
+    g.acceptScanRoots(['/Users/u', '/Users/u/code', '/Volumes/Old', '/Volumes/Backup', '/', '/Applications', 'relative', 42, null], opts),
+    ['/Users/u', '/Users/u/code', '/Volumes/Old', '/Volumes/Backup']);
+  assert.deepEqual(g.acceptScanRoots('not an array', opts), ['/Volumes/Old']);
+  assert.deepEqual(g.acceptScanRoots(['/Users/u/../../etc'], opts), []);
+});

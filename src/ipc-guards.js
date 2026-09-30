@@ -91,7 +91,23 @@ function resolveLargeFilesRoot(root, { home, scanRoots = [], realpath = defaultR
   return { ok: true, root: pathApiFor(candidate).resolve(candidate) };
 }
 
+/**
+ * Scan roots from prefs:set. Keeps a root only when it is an absolute path the
+ * user could legitimately have chosen: inside home, already configured, or
+ * picked in the native folder dialog. Anything else is dropped silently.
+ */
+function acceptScanRoots(roots, { home, current = [], picked = new Set(), platform = process.platform } = {}) {
+  if (!Array.isArray(roots)) return Array.isArray(current) ? current : [];
+  const known = knownPathSet([...(Array.isArray(current) ? current : []), ...picked], platform);
+  const out = [];
+  for (const r of roots) {
+    if (typeof r !== 'string' || !isAbsoluteAny(r)) continue;
+    if (isSameOrInside(home, r, platform) || known.has(r)) out.push(r);
+  }
+  return out;
+}
+
 module.exports = {
   MIN_LARGE_FILE_BYTES, DEFAULT_LARGE_FILE_BYTES,
-  isSafeExternalUrl, clampMinBytes, resolveLargeFilesRoot, knownPathSet, isSameOrInside, keyOf,
+  isSafeExternalUrl, clampMinBytes, resolveLargeFilesRoot, knownPathSet, isSameOrInside, keyOf, acceptScanRoots,
 };

@@ -22,7 +22,7 @@ for (const name of ['setTimeout', 'setInterval']) {
   global[name] = (...args) => { const h = real(...args); if (h && h.unref) h.unref(); return h; };
 }
 
-function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-')), { lock = true, shell = {}, scanner = {}, system = {}, docker = {}, notification = null, updater = null } = {}) {
+function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-')), { lock = true, shell = {}, dialog = {}, scanner = {}, system = {}, docker = {}, notification = null, updater = null } = {}) {
   const counts = { windows: 0, trays: 0, quits: 0, shows: 0, focuses: 0, restores: 0 };
   const windows = [];
   const handlers = {};
@@ -64,7 +64,7 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
     }),
     BrowserWindow: FakeWin,
     ipcMain: { handle: (ch, fn) => { handlers[ch] = fn; } },
-    dialog: {},
+    dialog,
     shell,
     Tray: class extends EventEmitter { constructor() { super(); counts.trays++; } setToolTip(t) { sent.push(['tooltip', t]); } getBounds() { return {}; } },
     Menu: { buildFromTemplate: (t) => t },
@@ -360,9 +360,15 @@ test('large files: need confirmation, go to the Trash, and a failed trashItem ne
   const shell = {
     trashItem: async (p) => { if (trashFails) throw Object.assign(new Error('Trash unavailable'), { code: 'EPERM' }); trashed.push(p); fs.renameSync(p, p + '.trashed'); },
   };
-  const m = loadMain(undefined, { shell });
+  const dialog = { showOpenDialog: async () => ({ canceled: false, filePaths: [dir] }) };
+  const m = loadMain(undefined, { shell, dialog });
   try {
+    // A folder outside home is only accepted after the user picks it.
     await m.handlers['prefs:set']({}, { scanRoots: [dir] });
+    assert.deepEqual(m.handlers['prefs:get']().scanRoots, [], 'an unpicked folder outside home is refused');
+    assert.equal(await m.handlers['dialog:pick-folder'](), dir);
+    await m.handlers['prefs:set']({}, { scanRoots: [dir] });
+    assert.deepEqual(m.handlers['prefs:get']().scanRoots, [dir]);
     const sender = { send() {}, isDestroyed: () => false };
     const scan = await m.handlers['scan:largefiles']({ sender }, dir, 1);
     assert.equal(scan.ok, true);
@@ -386,7 +392,8 @@ test('large files: need confirmation, go to the Trash, and a failed trashItem ne
     const ok = await m.handlers.clean(cleanEvent, [{ path: big }], { scope: 'largefiles', confirmed: true });
     assert.deepEqual(ok.trashed, [big]);
     assert.deepEqual(trashed, [big]);
-    assert.ok(ok.totalFreed >= 11 * 1024 * 1024);
+    assert.equal(ok.totalFreed, 0, 'trashed files are not freed space until the Trash is emptied');
+    assert.ok(ok.trashedBytes >= 11 * 1024 * 1024);
     [entry] = readHistoryFile(m);
     assert.equal(entry.count, 1);
     assert.deepEqual([entry.items[0].outcome, entry.items[0].kind, entry.items[0].reversible], ['trashed', 'file', 'trash']);

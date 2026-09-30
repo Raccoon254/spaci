@@ -577,7 +577,13 @@ function fmt(b) {
 // ---------- IPC ----------
 ipcMain.handle('prefs:get', () => loadPrefs());
 ipcMain.handle('prefs:set', (_e, patch) => {
-  const p = { ...loadPrefs(), ...(patch && typeof patch === 'object' ? patch : {}) };
+  const current = loadPrefs();
+  const p = { ...current, ...(patch && typeof patch === 'object' ? patch : {}) };
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'scanRoots')) {
+    p.scanRoots = ipcGuards.acceptScanRoots(patch.scanRoots, {
+      home: os.homedir(), current: current.scanRoots, picked: pickedFolders,
+    });
+  }
   savePrefs(p);
   // Debounced and idempotent: a theme toggle never triggers a scan by itself.
   if (bgScheduler) bgScheduler.reschedule();
@@ -608,16 +614,23 @@ ipcMain.handle('fs:top-children', async (_e, dirs) => {
   const items = await diskbreakdown.topChildren(list, 25);
   const categoryDirs = ipcGuards.knownPathSet(((cache.diskBreakdown && cache.diskBreakdown.categories) || []).flatMap((c) => (c && c.dirs) || []));
   const parents = ipcGuards.knownPathSet(list.filter((d) => categoryDirs.has(d)));
-  lastTopChildren = new Set((items || []).filter((it) => it && parents.has(path.dirname(it.path))).map((it) => it.path));
+  // Accumulate rather than replace: the renderer keeps each category's list, so
+  // going back to an earlier category must not break its Open buttons.
+  for (const it of items || []) if (it && parents.has(path.dirname(it.path))) lastTopChildren.add(it.path);
   return items;
 });
 ipcMain.handle('cache:get', () => cache);
 // Explicit request: bypasses the battery/load gate, joins a run in flight.
 ipcMain.handle('scan:now', () => { if (bgScheduler) bgScheduler.runNow(); return true; });
 
+// Folders the user chose in the native picker. Only these (or folders inside
+// home) may become scan roots, so a renderer cannot widen its own reach.
+const pickedFolders = new Set();
 ipcMain.handle('dialog:pick-folder', async () => {
   const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
-  return r.canceled ? null : r.filePaths[0];
+  if (r.canceled) return null;
+  pickedFolders.add(r.filePaths[0]);
+  return r.filePaths[0];
 });
 
 // A progress sender that survives the window closing mid-scan.
@@ -819,7 +832,9 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
 
     const errors = [...del.errors, ...tr.errors].map((er) => ({ ...er }));
     const trashed = (tr.results || []).filter((r) => r.ok).map((r) => r.path);
-    return { ok: true, totalFreed: del.totalFreed + tr.totalFreed, errors, refused, trashed, historyId };
+    // Trashed files are not freed space yet: they come back only when the Trash
+    // is emptied, so they are reported apart from totalFreed.
+    return { ok: true, totalFreed: del.totalFreed, trashedBytes: tr.totalFreed, errors, refused, trashed, historyId };
   } catch (err) {
     // The clean broke part way: record it as interrupted, never as done.
     if (started) {
@@ -868,7 +883,8 @@ ipcMain.handle('open:external', async (_e, url) => {
 
 ipcMain.handle('scan:largefiles', async (e, root, minBytes) => {
   const prefs = loadPrefs();
-  const where = ipcGuards.resolveLargeFilesRoot(root, { home: os.homedir(), scanRoots: prefs.scanRoots });
+  const roots = [...(Array.isArray(prefs.scanRoots) ? prefs.scanRoots : []), ...pickedFolders];
+  const where = ipcGuards.resolveLargeFilesRoot(root, { home: os.homedir(), scanRoots: roots });
   if (!where.ok) return { ok: false, error: where.error };
   aborts.largefiles?.abort(); aborts.largefiles = new AbortController();
   const onProgress = progressTo(e.sender, 'largefiles:progress');

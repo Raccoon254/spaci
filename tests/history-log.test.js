@@ -21,7 +21,8 @@ test('count is what was really removed or trashed, not how many jobs were allowe
   assert.equal(e.count, 2);
   assert.equal(e.failedCount, 2);
   assert.equal(e.refusedCount, 1);
-  assert.equal(e.freed, 157, 'partial frees from a failed job are real space');
+  assert.equal(e.freed, 107, 'partial frees from a failed job are real space; trashed bytes are not freed');
+  assert.equal(e.trashedBytes, 50);
   assert.equal(e.items[2].code, 'EACCES');
   assert.equal(e.items[3].restoreHint, undefined, 'a refused item was never touched: no hint');
   assert.equal(e.itemsTruncated, undefined);
@@ -93,4 +94,18 @@ test('docker entries are v2 with main-decided reversibility', () => {
   const s = log.dockerEntry({ id: 2, at: 5, spec: { name: 'Stopped containers', safe: false }, freed: 0 });
   assert.equal(s.reversible, 'none');
   assert.equal('restoreHint' in s, false);
+});
+
+test('trashed bytes are tallied apart and never counted as freed', () => {
+  const e = log.finishedEntry({
+    id: 't', at: 1, finishedAt: 2, scope: 'largefiles', label: '2 large files', requested: 3,
+    items: [
+      { path: '/big.mov', kind: 'file', outcome: 'trashed', bytes: 4000, reversible: 'trash' },
+      { path: '/big.iso', kind: 'file', outcome: 'trashed', bytes: 1000, reversible: 'trash' },
+      { path: '/x', kind: 'artifact', outcome: 'removed', bytes: 7, reversible: 'rebuild' },
+    ],
+  });
+  assert.equal(e.freed, 7);
+  assert.equal(e.trashedBytes, 5000);
+  assert.equal(e.count, 3);
 });

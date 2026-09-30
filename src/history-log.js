@@ -48,15 +48,18 @@ function buildItem(src = {}) {
  * number of jobs it was allowed to try.
  */
 function tally(items) {
-  let count = 0, failedCount = 0, refusedCount = 0, freed = 0;
+  let count = 0, failedCount = 0, refusedCount = 0, freed = 0, trashedBytes = 0;
   for (const it of items) {
     if (it.outcome === 'removed' || it.outcome === 'trashed') count++;
     else if (it.outcome === 'failed') failedCount++;
     else if (it.outcome === 'refused') refusedCount++;
+    // Trashed files still occupy the disk until the Trash is emptied, so they
+    // are tallied apart and never counted as freed.
+    if (it.outcome === 'trashed') { trashedBytes += it.bytes || 0; continue; }
     // A failed job may still have freed part of its tree; that space is real.
     freed += it.bytes || 0;
   }
-  return { count, failedCount, refusedCount, freed };
+  return { count, failedCount, refusedCount, freed, trashedBytes };
 }
 
 function capItems(items) {
