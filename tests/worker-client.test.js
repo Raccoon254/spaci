@@ -284,8 +284,19 @@ test('real fork of src/scan-worker.js: a project scan runs in the worker and car
 });
 
 test('the worker entry resolves from app.getAppPath(), inside app.asar when packaged, and is packaged', () => {
-  const asar = '/Applications/Spaci.app/Contents/Resources/app.asar';
-  assert.equal(workerEntryPath(asar), '/Applications/Spaci.app/Contents/Resources/app.asar/src/scan-worker.js');
+  // app.getAppPath() in the packaged app, in this host's own path form (the
+  // entry is joined with the host's separator, which is what Electron's asar
+  // fs expects on each OS).
+  if (process.platform === 'win32') {
+    const asar = 'C:\\Users\\me\\AppData\\Local\\Programs\\Spaci\\resources\\app.asar';
+    assert.equal(workerEntryPath(asar), 'C:\\Users\\me\\AppData\\Local\\Programs\\Spaci\\resources\\app.asar\\src\\scan-worker.js');
+  } else if (process.platform === 'linux') {
+    const asar = '/opt/Spaci/resources/app.asar';
+    assert.equal(workerEntryPath(asar), '/opt/Spaci/resources/app.asar/src/scan-worker.js');
+  } else {
+    const asar = '/Applications/Spaci.app/Contents/Resources/app.asar';
+    assert.equal(workerEntryPath(asar), '/Applications/Spaci.app/Contents/Resources/app.asar/src/scan-worker.js');
+  }
   assert.ok(fs.existsSync(workerEntryPath(ROOT)), 'entry exists at the dev app path');
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   assert.ok(pkg.build.files.includes('src/**/*'), 'electron-builder packages src/**');
