@@ -25,6 +25,30 @@ function buildTargetIndex(targets) {
   return index;
 }
 
+/**
+ * A path's identity for lookups. If a job's path differs from its target's
+ * path only in separators, a trailing slash, Unicode form or letter case, an
+ * exact string lookup would miss and the job would silently lose its protect
+ * list and exclusions. Resolve, Unicode-normalise, and case-fold where the
+ * filesystem ignores case (macOS, Windows); over-matching is the safe side.
+ */
+function keyOf(p) {
+  const key = pathApiFor(p).resolve(String(p)).normalize('NFC');
+  return process.platform === 'linux' ? key : key.toLowerCase();
+}
+
+function keyedMap(index) {
+  const m = new Map();
+  for (const [p, t] of index) m.set(keyOf(p), t);
+  return m;
+}
+
+function keyedSet(set) {
+  const s = new Set();
+  for (const p of set) if (typeof p === 'string' && p) s.add(keyOf(p));
+  return s;
+}
+
 function pathApiFor(p) {
   return /^[a-zA-Z]:[\\/]/.test(String(p || '')) || String(p || '').includes('\\') ? path.win32 : path.posix;
 }
@@ -79,15 +103,16 @@ function nestedTargetPaths(jobPath, index, realpath = defaultRealpath) {
  */
 async function enforceTargetRules(jobs, options = {}) {
   const index = options.index || new Map();
+  const byKey = keyedMap(index);
   const toolStatus = options.toolStatus || (async () => ({ ok: false, running: [] }));
   // options.known: when given, a Set of every path Spaci itself produced (scan
   // results). Anything else is refused: the renderer can never name an
   // arbitrary path for deletion.
-  const known = options.known instanceof Set ? options.known : null;
+  const known = options.known instanceof Set ? keyedSet(options.known) : null;
   // options.projectPaths + options.revalidate: project artifacts come from a
   // cached scan that may be days old, so each is re-checked right now before
   // it is deleted. A folder that has since become tracked or un-ignored stays.
-  const projectPaths = options.projectPaths instanceof Set ? options.projectPaths : new Set();
+  const projectPaths = options.projectPaths instanceof Set ? keyedSet(options.projectPaths) : new Set();
   const revalidate = typeof options.revalidate === 'function' ? options.revalidate : null;
   const allowed = [];
   const refused = [];
@@ -95,13 +120,14 @@ async function enforceTargetRules(jobs, options = {}) {
 
   for (const job of Array.isArray(jobs) ? jobs : []) {
     if (!job || typeof job.path !== 'string' || job.path.length === 0) continue;
-    const t = index.get(job.path);
+    const key = keyOf(job.path);
+    const t = byKey.get(key);
     if (!t) {
-      if (known && !known.has(job.path)) {
+      if (known && !known.has(key)) {
         refused.push({ path: job.path, reason: 'Spaci did not find this in a scan, so it left it alone. Scan again and retry.' });
         continue;
       }
-      if (revalidate && projectPaths.has(job.path)) {
+      if (revalidate && projectPaths.has(key)) {
         let verdict;
         try { verdict = await revalidate(job.path); } catch { verdict = null; }
         if (!verdict || verdict.ok !== true) {
@@ -154,7 +180,8 @@ async function enforceTargetRules(jobs, options = {}) {
 
   // AI tool data goes first, so it is deleted as soon as possible after the
   // running-tool check, keeping the window for a tool to start in between short.
-  allowed.sort((a, b) => Number(Boolean((index.get(b.path) || {}).tool)) - Number(Boolean((index.get(a.path) || {}).tool)));
+  const isAi = (j) => Number(Boolean((byKey.get(keyOf(j.path)) || {}).tool));
+  allowed.sort((a, b) => isAi(b) - isAi(a));
 
   return { allowed, refused };
 }

@@ -265,3 +265,17 @@ test('end to end: a model store reached through a symlinked home survives (Silve
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a job path spelled differently from its target still gets the target\'s rules', async () => {
+  const index = buildTargetIndex(fixtureTargets());
+  const variants = ['/h/.claude/projects/', '/h/./.claude/projects'];
+  if (process.platform !== 'linux') variants.push('/H/.Claude/Projects');
+  for (const v of variants) {
+    const { allowed } = await enforceTargetRules([{ path: v, mode: 'path' }], { index, toolStatus: notRunning });
+    assert.deepEqual(allowed[0].protect, ['memory'], `${v} must keep protect`);
+    assert.equal(allowed[0].mode, 'contents', `${v} must take the target's mode`);
+  }
+  const known = new Set(['/h/projects/a/node_modules']);
+  const { refused } = await enforceTargetRules([{ path: '/h/projects/a/node_modules/' }], { index, toolStatus: notRunning, known });
+  assert.equal(refused.length, 0, 'a trailing slash is still a known path');
+});
