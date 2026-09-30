@@ -64,9 +64,18 @@
     },
     "linux": {
       "target": [
-        "AppImage"
+        "AppImage",
+        "deb"
       ],
-      "category": "Development"
+      "category": "Development",
+      "icon": "assets/branding/icon.png",
+      "executableName": "spaci",
+      "synopsis": "Reclaim disk space from build artifacts and developer caches",
+      "maintainer": "Raccoon254 <Raccoon254@users.noreply.github.com>"
+    },
+    "deb": {
+      "afterInstall": "build/linux/after-install.sh",
+      "afterRemove": "build/linux/after-remove.sh"
     }
   }
 }

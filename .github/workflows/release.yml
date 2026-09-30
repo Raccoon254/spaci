@@ -79,6 +79,7 @@ jobs:
             release/*.zip
             release/*.exe
             release/*.AppImage
+            release/*.deb
             release/*.blockmap
             release/latest*.yml
           fail_on_unmatched_files: false
