@@ -130,3 +130,23 @@ test('generic docker routing: allowlisted names only, onProgress injected into t
     'composeServices', 'desktopDisk', 'inventory', 'listVolumes', 'prune', 'removeVolume', 'resetCache', 'restartDesktop', 'status',
   ]);
 });
+
+test('scanProjects seeds the language cache from main and hands the snapshot back', async () => {
+  const seeded = [];
+  const scanner = {
+    scanProjects: async () => ({ projects: [{ path: '/r/a' }] }),
+    analyzeTech: async () => ({ languages: [], primary: null }),
+    importTechCache: (snap) => { seeded.push(snap); return snap.length; },
+    exportTechCache: () => [['/r/a', { head: null }]],
+  };
+  const h = harness({ scanner });
+  h.d.handle({ id: 1, op: 'scanProjects', args: ['/r', { languages: true, techSeed: [['/r/a', { head: null }]] }] });
+  const r = await h.reply(1);
+  assert.equal(r.ok, true);
+  assert.deepEqual(seeded, [[['/r/a', { head: null }]]]);
+  assert.deepEqual(r.result.techCache, [['/r/a', { head: null }]]);
+  // A seed that throws never fails the scan.
+  scanner.importTechCache = () => { throw new Error('bad seed'); };
+  h.d.handle({ id: 2, op: 'scanProjects', args: ['/r', { techSeed: [1] }] });
+  assert.equal((await h.reply(2)).ok, true);
+});

@@ -841,3 +841,29 @@ test('a cache from an older version gets the current safety flags (the Trash is 
     assert.match(c.system[0].description, /permanently/);
   } finally { m.cleanup(); }
 });
+
+test('the language cache survives worker restarts: main seeds each scan from tech-cache.json and never sends it to the renderer', async () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-tech-'));
+  const prior = [['/home/u/a', { head: null, rootMtime: 1, manifests: [], result: { languages: [], frameworks: [] } }]];
+  fs.writeFileSync(path.join(userData, 'tech-cache.json'), JSON.stringify(prior));
+  const seeds = [];
+  const m = loadMain(userData, {
+    scanner: {
+      importTechCache: (snap) => { seeds.push(snap); return snap.length; },
+      exportTechCache: () => [...prior, ['/home/u/b', prior[0][1]]],
+    },
+  });
+  try {
+    const sender = { send() {}, isDestroyed: () => false };
+    const scan = m.handlers['scan:projects']({ sender }, '/home/u');
+    await flush();
+    m.jobs.projects[0].finish({ projects: [{ path: '/home/u/a', items: [{ path: '/home/u/a/node_modules', size: 1, safe: true }] }] });
+    const res = await scan;
+    assert.deepEqual(seeds, [prior], 'seeded with the snapshot on disk');
+    assert.equal(res.techCache, undefined, 'the snapshot is not part of the scan result');
+    assert.equal((await m.handlers['cache:get']()).techCache, undefined, 'nor of the cache sent to the renderer');
+    const saved = JSON.parse(fs.readFileSync(path.join(userData, 'tech-cache.json'), 'utf8'));
+    assert.deepEqual(saved.map(([k]) => k), ['/home/u/a', '/home/u/b']);
+    m.appEvents.emit('before-quit');
+  } finally { m.cleanup(); }
+});

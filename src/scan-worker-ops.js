@@ -132,9 +132,19 @@ function buildOps(mod) {
     ping: async () => ({ pid: process.pid, at: Date.now() }),
 
     scanProjects: async (ctx, root, opts = {}) => {
-      const res = await mod('scanner').scanProjects(root, ctx.progress, ctx.signal);
+      const scanner = mod('scanner');
+      // A new worker starts with an empty analysis cache; main hands back the
+      // snapshot it kept from the last scan so unchanged projects are not
+      // analysed again.
+      if (opts && Array.isArray(opts.techSeed) && typeof scanner.importTechCache === 'function') {
+        try { scanner.importTechCache(opts.techSeed); } catch (_) { /* a bad seed only costs a re-analysis */ }
+      }
+      const res = await scanner.scanProjects(root, ctx.progress, ctx.signal);
       if (res && opts && opts.languages !== false && !ctx.signal.aborted) {
-        await attachLanguages(mod('scanner'), res.projects, ctx.signal);
+        await attachLanguages(scanner, res.projects, ctx.signal);
+      }
+      if (res && typeof scanner.exportTechCache === 'function') {
+        try { res.techCache = scanner.exportTechCache(); } catch (_) { /* optional */ }
       }
       return res;
     },

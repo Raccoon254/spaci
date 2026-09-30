@@ -14,6 +14,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 const docker = require('./docker');
 const languages = require('./languages');
+const techCache = require('./tech-cache');
 
 // Scanning is IO bound, not CPU bound: the win comes from keeping many reads in
 // flight rather than from cores. These caps keep a scan responsive without
@@ -891,10 +892,11 @@ async function findIosIcon(dir) {
 
 // Language and framework analysis per project, reused while nothing it depends
 // on changed: the git HEAD (or its absence), the manifests it read and the
-// project folder's own mtime.
-const TECH_CACHE = new Map();
-const TECH_CACHE_MAX = 300;
+// project folder's own mtime. A bounded LRU keyed by the resolved path; see
+// tech-cache.js, which also lets main carry it across worker restarts.
+const TECH_CACHE = techCache.createLru(techCache.TECH_CACHE_MAX);
 const EMPTY_TECH = { languages: [], frameworks: [], primary: null, analysis: null };
+const techStats = { hits: 0, misses: 0 };
 
 async function techKey(dir, signal) {
   const [res, rootMtime] = await Promise.all([
@@ -913,24 +915,33 @@ async function stampsUnchanged(dir, stamps) {
 
 async function analyzeTech(dir, signal, opts = {}) {
   try {
+    const ck = techCache.techCacheKey(dir);
     const key = await techKey(dir, signal);
-    const hit = TECH_CACHE.get(dir);
-    if (hit && hit.head === key.head && (key.head || hit.rootMtime === key.rootMtime)
-      && await stampsUnchanged(dir, hit.manifests)) {
+    const hit = ck ? TECH_CACHE.get(ck) : undefined;
+    if (hit && techCache.stampMatches(hit, key) && await stampsUnchanged(dir, hit.manifests)) {
+      techStats.hits++;
       return hit.result;
     }
+    techStats.misses++;
     const { result, manifests } = await languages.analyzeProjectDetailed(dir, { signal, ...opts });
     // A partial answer (budget or abort) is returned but never cached.
-    if (!result.analysis.truncated && !signal?.aborted) {
-      TECH_CACHE.delete(dir);
-      TECH_CACHE.set(dir, { ...key, manifests, result });
-      if (TECH_CACHE.size > TECH_CACHE_MAX) TECH_CACHE.delete(TECH_CACHE.keys().next().value);
+    if (ck && !result.analysis.truncated && !signal?.aborted) {
+      TECH_CACHE.set(ck, { ...key, manifests, result });
+    } else if (ck && hit) {
+      TECH_CACHE.delete(ck); // stale, and no complete answer to replace it
     }
     return result;
   } catch {
     return EMPTY_TECH;
   }
 }
+
+/** Snapshot of the analysis cache (for main to keep between worker lifetimes). */
+function exportTechCache() { return techCache.exportEntries(TECH_CACHE); }
+/** Seed the analysis cache from a snapshot; entries already in memory win. */
+function importTechCache(snapshot) { return techCache.importEntries(TECH_CACHE, snapshot); }
+/** Hit and miss counts, and the current size (tests, diagnostics). */
+function techCacheStats() { return { ...techStats, size: TECH_CACHE.size, max: TECH_CACHE.max }; }
 
 /** Compute total size, git and languages/frameworks for one project (called on selection / details). */
 async function enrichProject(dir, signal) {
@@ -944,5 +955,6 @@ async function enrichProject(dir, signal) {
 module.exports = {
   PROJECT_TYPES, CLEAN_RULES, SKIP_DELETE,
   scanProjects, dirSize, enrichProject, analyzeTech, gitStatus, detectType, detectTypes,
+  exportTechCache, importTechCache, techCacheStats,
   attachDockerUsage, walkSize, drain, mapPool, revalidateArtifact,
 };

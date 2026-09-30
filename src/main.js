@@ -125,6 +125,23 @@ function applyCurrentTargetFlags(list) {
   }
 }
 applyCurrentTargetFlags(cache.system);
+// Language analysis cache snapshot (see tech-cache.js). Kept out of cache.json,
+// which is sent to the renderer whole; the worker validates every entry.
+const TECH_CACHE_PATH = path.join(app.getPath('userData'), 'tech-cache.json');
+let techSnapshot = null;
+function readTechSnapshot() {
+  if (techSnapshot === null) {
+    try { const v = JSON.parse(fs.readFileSync(TECH_CACHE_PATH, 'utf8')); techSnapshot = Array.isArray(v) ? v : []; }
+    catch { techSnapshot = []; }
+  }
+  return techSnapshot;
+}
+function saveTechSnapshot(list) {
+  techSnapshot = list;
+  if (isQuitting) return; // nothing is written once quitting
+  try { writeFileAtomic(TECH_CACHE_PATH, JSON.stringify(list)); }
+  catch (e) { console.warn('[tech-cache] not saved:', e && e.message); }
+}
 const scanCoordinator = createScanCoordinator();
 let scanService = null; // created below, once refreshDocker/refreshBreakdown exist
 let bgScheduler = null; // started in app.whenReady (powerMonitor needs a ready app)
@@ -258,7 +275,16 @@ scanService = createScanService({
   store: cacheStore,
   // Project scans also attach `languages` and `primary` to every project (in
   // the worker), so the project list shows language strips for every row.
-  scanProjects: (root, onProgress, signal) => work('scanProjects', [root, { languages: true }], { onProgress, signal }),
+  // The worker's language cache dies with the worker (it stops when idle), so
+  // main keeps a snapshot in tech-cache.json and seeds each scan with it.
+  scanProjects: async (root, onProgress, signal) => {
+    const res = await work('scanProjects', [root, { languages: true, techSeed: readTechSnapshot() }], { onProgress, signal });
+    if (res && Array.isArray(res.techCache)) {
+      saveTechSnapshot(res.techCache);
+      delete res.techCache;
+    }
+    return res;
+  },
   scanSystem: (onProgress, signal) => work('scanSystem', [], { onProgress, signal }),
   computeDocker: (projects) => computeDocker(projects),
   enrichProject: (dir, signal) => work('enrichProject', [dir], { signal }),
