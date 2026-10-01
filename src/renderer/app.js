@@ -310,13 +310,14 @@ function renderDialogSlot(slotEl) {
 }
 function buildConfirm(slotEl, cm) {
   const close = (val) => { if (S.confirmCfg !== cm) return; S.confirmCfg = null; renderOverlays(); if (cm.resolve) cm.resolve(val); };
-  const f = dialogFrame({ width: 440, describe: true, onClose: () => close(false) });
+  const f = dialogFrame({ width: cm.width || 440, describe: true, onClose: () => close(false) });
   const cancel = el('button', { 'data-autofocus': '', style: 'height:42px;padding:0 18px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:600;font-size:14px;cursor:pointer', hov: 'background:var(--panel-3)', onclick: () => close(false) }, ['Cancel']);
   f.panel.appendChild(el('div', { style: 'display:flex;align-items:center;gap:13px;margin-bottom:14px' }, [
     el('div', { class: cm.danger ? 'sp-cm-danger' : 'sp-cm-accent', style: 'width:44px;height:44px;border-radius:12px;display:grid;place-items:center;flex:none' }, [ic(cm.icon || (cm.danger ? 'trash' : 'broom'), 23)]),
     el('h2', { id: f.titleId, style: 'font-size:18px;font-weight:700;letter-spacing:-.3px', text: cm.title })
   ]));
-  f.panel.appendChild(el('div', { id: f.descId, style: 'color:var(--text-2);font-size:13.5px;line-height:1.6;margin-bottom:22px;white-space:pre-line', text: cm.body }));
+  // scrollBody: a long list (worktrees to remove) scrolls inside the dialog.
+  f.panel.appendChild(el('div', { id: f.descId, style: 'color:var(--text-2);font-size:13.5px;line-height:1.6;margin-bottom:22px;white-space:pre-line' + (cm.scrollBody ? ';max-height:46vh;overflow:auto;padding-right:6px' : ''), text: cm.body }));
   f.panel.appendChild(el('div', { style: 'display:flex;gap:10px;justify-content:flex-end' }, [
     cancel,
     el('button', { class: cm.danger ? 'sp-ab-danger' : 'sp-ab-accent', style: 'height:42px;padding:0 20px;border-radius:11px;border:none;color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer', onclick: () => close(true) }, [ic(cm.icon || (cm.danger ? 'trash' : 'broom'), 15), cm.confirmLabel || 'Confirm'])

@@ -61,8 +61,138 @@
   // A project earns a row when it has artifacts on disk OR storage held inside
   // Docker. Mirrors keepProject() in the main process.
   function hasReclaimable(p) {
-    return Boolean((p.items && p.items.length) || (p.docker && p.docker.usage));
+    return Boolean((p.items && p.items.length) || (p.docker && p.docker.usage) || wtList(p).length);
   }
+
+  // ----- repositories: packages and linked git worktrees -----
+  // A scan record is one git repository (src/repo-group.js): its monorepo
+  // packages and linked worktrees ride along in p.repo. Older cached records
+  // have no repo field and render as before.
+  function repoOf(p) { return p && p.repo && typeof p.repo === 'object' ? p.repo : null; }
+  function wtList(p) { const r = repoOf(p); return r && Array.isArray(r.worktrees) ? r.worktrees.filter(Boolean) : []; }
+  function pkgList(p) { const r = repoOf(p); return r && Array.isArray(r.packages) ? r.packages.filter(Boolean) : []; }
+  function removableOf(p) { return wtList(p).filter((w) => w.exists && w.eligibility && w.eligibility.ok === true); }
+  function missingOf(p) { return wtList(p).filter((w) => !w.exists); }
+  // On disk: main checkout plus worktrees that live outside it (nested ones,
+  // such as .claude/worktrees, are already inside the main folder's size).
+  function totalOnDisk(p) {
+    const r = repoOf(p);
+    if (r && typeof r.totalBytes === 'number') return r.totalBytes;
+    const en = enrichOf(p);
+    if (en && typeof en.totalSize === 'number' && en.totalSize > 0) return en.totalSize + ((r && r.externalWorktreeBytes) || 0);
+    return 0;
+  }
+  function plural(n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')); }
+  function shortHead(h) { return h ? String(h).slice(0, 7) : ''; }
+  function wtName(w) { return w.branch ? w.branch : 'detached at ' + (shortHead(w.head) || 'unknown commit'); }
+  // A nested worktree shows its path inside the repository; others use ~.
+  // A sibling (repo-worktrees/name) shows its path from the folder that holds
+  // the repository. Anything else uses ~.
+  function wtWhere(p, w) {
+    const main = repoOf(p) && repoOf(p).main;
+    const wp = String(w.path || '');
+    if (w.nested && main && wp.indexOf(main) === 0) return wp.slice(main.length).replace(/^[\\/]+/, '');
+    const parent = main ? main.replace(/[\\/][^\\/]+[\\/]*$/, '') : '';
+    if (parent && parent.length > 1 && wp.indexOf(parent) === 0 && /^[\\/]/.test(wp.slice(parent.length))) return wp.slice(parent.length + 1);
+    return abbrevRoot(wp);
+  }
+  function creatorMark(w, size) {
+    const c = w.creator || {};
+    if (c.brand && SP.bic) return SP.bic(c.brand, size, { label: c.label, fallback: 'hierarchy' });
+    return ic('hierarchy', size);
+  }
+  function chip(icon, text, title) {
+    return el('span', {
+      title: title || text,
+      style: 'display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:7px;font-size:11px;font-weight:650;background:var(--panel-2);color:var(--text-2);border:1px solid var(--border);flex:none;white-space:nowrap',
+    }, [ic(icon, 12), text]);
+  }
+  function repoChips(p) {
+    const out = [];
+    const wts = wtList(p);
+    const pk = pkgList(p);
+    if (wts.length) out.push(chip('hierarchy', plural(wts.length, 'worktree'), removableOf(p).length ? removableOf(p).length + ' can be removed' : ''));
+    if (pk.length) out.push(chip('layer', plural(pk.length, 'package')));
+    const total = totalOnDisk(p);
+    if (total > 0) out.push(chip('hard-drive', fmt(total) + ' on disk'));
+    return out;
+  }
+
+  // Put a repository record the main process sent back in place of the old one.
+  function applyRepoUpdates(list) {
+    (Array.isArray(list) ? list : []).forEach((rec) => {
+      if (!rec || !rec.path) return;
+      if (Array.isArray(S.projects)) {
+        const i = S.projects.findIndex((x) => x.path === rec.path);
+        if (i >= 0) S.projects[i] = rec;
+      }
+      if (S.currentProject && S.currentProject.path === rec.path) S.currentProject = rec;
+    });
+    S.recsLoaded = false;
+    if (SP.tiers && SP.tiers.invalidate) SP.tiers.invalidate();
+  }
+
+  // Remove linked worktrees, confirmed once with each one named (branch and
+  // size). Main re-checks every worktree right before git removes it.
+  // targets: [{ p: repo record, w: worktree }].
+  SP.removeWorktreesFlow = async function removeWorktreesFlow(targets) {
+    const list = (Array.isArray(targets) ? targets : []).filter((t) => t && t.w && t.w.exists && t.w.eligibility && t.w.eligibility.ok === true);
+    if (!list.length || S.wtBusy || !api.removeWorktrees) return;
+    const bytes = list.reduce((a, t) => a + (t.w.size || 0), 0);
+    const repos = new Set(list.map((t) => t.p.path));
+    const lines = list.map((t) => '• ' + (repos.size > 1 ? t.p.name + ': ' : '') + wtName(t.w) + ' (' + fmt(t.w.size || 0) + ')\n   ' + abbrevRoot(t.w.path));
+    const n = list.length;
+    const ok = await SP.confirm({
+      title: 'Remove ' + plural(n, 'worktree') + ' (' + fmt(bytes) + ')?',
+      body: lines.join('\n') + '\n\nSpaci runs git worktree remove for each one, after checking again that it is still clean and merged or pushed. Branches are kept, so git worktree add brings a worktree back. Build output inside them goes too.',
+      confirmLabel: 'Remove ' + n,
+      icon: 'trash',
+      width: 540,
+      scrollBody: n > 6,
+    });
+    if (!ok) return;
+    S.wtBusy = true;
+    if (S.route === 'project' || S.route === 'projects') SP.go(S.route);
+    let res;
+    try {
+      res = await api.removeWorktrees(list.map((t) => ({ path: t.w.path })), { confirmed: true, label: repos.size === 1 ? list[0].p.name + ' worktrees' : plural(n, 'git worktree') });
+    } catch (err) {
+      res = { ok: false, error: (err && err.message) || 'Removal failed' };
+    }
+    S.wtBusy = false;
+    if (res && res.ok) {
+      applyRepoUpdates(res.projects);
+      const done = (res.removed || []).length;
+      if (done) SP.toast('Removed ' + plural(done, 'worktree'), fmt(res.freed || 0) + ' freed. Branches are kept.');
+      const left = (res.refused || []).concat((res.failed || []).map((f) => ({ path: f.path, reason: f.error })));
+      if (left.length) SP.toast(plural(left.length, 'worktree') + ' left alone', String(left[0].reason || '').slice(0, 140));
+    } else {
+      SP.toast('Nothing was removed', (res && res.error) || 'Spaci could not remove the worktrees.');
+    }
+    SP.go(S.route);
+  };
+
+  SP.pruneWorktreesFlow = async function pruneWorktreesFlow(p) {
+    if (!p || S.wtBusy || !api.pruneWorktrees) return;
+    S.wtBusy = true;
+    let res;
+    try { res = await api.pruneWorktrees(p.path); } catch (err) { res = { ok: false, error: err && err.message }; }
+    S.wtBusy = false;
+    if (res && res.ok) {
+      applyRepoUpdates(res.projects);
+      SP.toast(res.pruned ? 'Cleared ' + plural(res.pruned, 'missing worktree') : 'Nothing to clear', 'Only git\'s records were removed. Branches are kept.');
+    } else {
+      SP.toast('Nothing was pruned', (res && res.error) || 'git could not prune.');
+    }
+    SP.go(S.route);
+  };
+
+  /** Every removable worktree across the scan, for the bulk action. */
+  SP.removableWorktrees = function removableWorktrees() {
+    const out = [];
+    (S.projects || []).forEach((p) => removableOf(p).forEach((w) => out.push({ p, w })));
+    return out;
+  };
   function dockerBytes(p) {
     return (p.docker && p.docker.usage && p.docker.usage.totalBytes) || 0;
   }
@@ -576,12 +706,14 @@
       const langSlot = el('div', { style: 'width:120px;flex:none;margin-right:6px' });
       fillLangStrip(langSlot, languagesOf(p));
 
-      const titleLine = el('div', { style: 'font-weight:600;font-size:14.5px;display:flex;align-items:center;gap:9px' }, [
-        el('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap', text: p.name }),
+      const chipsSlot = el('span', { style: 'display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden' }, repoChips(p));
+      const titleLine = el('div', { style: 'font-weight:600;font-size:14.5px;display:flex;align-items:center;gap:9px;min-width:0' }, [
+        el('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:none;max-width:60%', text: p.name }),
         gitMark(p, en, 15),
         // Docker mark: dimmed when the project merely declares Docker, full
         // colour when the engine is actually holding storage for it.
         p.docker ? dockerMark(15, dockerBytes(p) > 0) : null,
+        chipsSlot,
       ]);
 
       const node = el('div', {
@@ -606,6 +738,7 @@
           update() {
             folderTile.replaceChildren(projectMark(p, 24));
             fillLangStrip(langSlot, languagesOf(p));
+            chipsSlot.replaceChildren(...repoChips(p));
           },
         });
       }
@@ -997,18 +1130,24 @@
     ]));
 
     // ----- stat strip -----
-    const totalSize = en.totalSize != null ? en.totalSize : (p.totalSize || 0);
+    const totalSize = totalOnDisk(p) || (en.totalSize != null ? en.totalSize : (p.totalSize || 0));
+    const wts = wtList(p);
     const stats = [
       { icon: 'broom', label: 'Reclaimable', value: fmt(p.cleanableSize || 0), color: 'var(--accent-fg)' },
       { icon: 'hard-drive', label: 'On disk', value: totalSize ? fmt(totalSize) : '…', color: 'var(--text)' },
       { icon: 'folder-2', label: 'Items', value: String(items.length), color: 'var(--text)' },
+      wts.length ? { icon: 'hierarchy', label: 'Worktrees', value: String(wts.length), color: 'var(--text)' } : null,
       { icon: 'clock', label: 'Modified', value: p.mtime ? new Date(p.mtime).toLocaleDateString() : 'n/a', color: 'var(--text)' },
-    ];
+    ].filter(Boolean);
     host.appendChild(el('div', { style: 'display:flex;flex-wrap:wrap;gap:10px 32px;padding:16px 2px;border-top:1px solid var(--border);border-bottom:1px solid var(--border)' },
       stats.map((s) => el('div', { style: 'display:flex;align-items:center;gap:9px;font-size:13.5px;color:var(--text-2)' }, [
         ic(s.icon, 16, { color: 'var(--text-3)' }), s.label,
         el('b', { style: 'color:' + s.color + ';font-weight:700;letter-spacing:-.2px', text: s.value }),
       ]))));
+
+    // ----- recommendation: merged, clean worktrees -----
+    const recCard = buildWorktreeRecCard(p);
+    if (recCard) host.appendChild(recCard);
 
     // ----- tech stack card -----
     host.appendChild(buildTechCard(p));
@@ -1033,6 +1172,12 @@
     // ----- docker card -----
     const dockerCard = buildDockerCard(p);
     if (dockerCard) host.appendChild(dockerCard);
+
+    // ----- worktrees and packages -----
+    const wtSection = buildWorktreesSection(p);
+    if (wtSection) host.appendChild(wtSection);
+    const pkgSection = buildPackagesSection(p);
+    if (pkgSection) host.appendChild(pkgSection);
 
     // ----- cleanable items header + select all -----
     const selectAllBtn = el('button', {
@@ -1139,6 +1284,139 @@
 
   function safeItems(p) { return (p.items || []).filter((it) => it.safe === true); }
 
+  // Where an item lives inside a repository: a worktree, a package, or both.
+  function itemWhere(it, p) {
+    const parts = [];
+    if (it.worktree && it.checkout) {
+      const w = wtList(p).find((x) => x.path === it.checkout);
+      parts.push('In worktree ' + (w ? wtName(w) : String(it.checkout).split(/[\\/]/).pop()));
+    }
+    if (it.pkg) parts.push((parts.length ? 'package ' : 'In package ') + it.pkg);
+    return parts.join(', ');
+  }
+
+  const SECTION_LABEL = 'font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);font-weight:600';
+  function smallBtn(icon, label, onclick, opts) {
+    opts = opts || {};
+    return el('button', {
+      class: 'sp-focus',
+      disabled: opts.disabled ? '' : null,
+      title: opts.title || '',
+      style: 'height:34px;padding:0 13px;border-radius:9px;border:' + (opts.primary ? 'none;background:var(--accent);color:var(--on-accent)' : '1px solid var(--border);background:var(--panel);color:var(--text)') + ';font-weight:650;font-size:12.5px;display:flex;align-items:center;gap:7px;cursor:pointer;font-family:inherit;flex:none' + (opts.disabled ? ';opacity:.55;pointer-events:none' : ''),
+      hov: opts.primary ? 'background:var(--accent-hover)' : 'background:var(--panel-2)',
+      onclick,
+    }, [ic(icon, 14), label]);
+  }
+
+  function buildWorktreeRecCard(p) {
+    const rem = removableOf(p);
+    if (!rem.length) return null;
+    const bytes = rem.reduce((a, w) => a + (w.size || 0), 0);
+    return el('div', { 'data-wt-rec': '', style: 'display:flex;align-items:center;gap:16px;padding:16px 18px;border-radius:16px;background:var(--panel);border:1px solid var(--border-2);box-shadow:var(--shadow-sm);margin-top:16px' }, [
+      el('div', { style: 'width:44px;height:44px;border-radius:12px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--accent-fg)' }, [ic('hierarchy', 23)]),
+      el('div', { style: 'flex:1;min-width:0' }, [
+        el('div', { style: 'font-weight:700;font-size:14.5px;display:flex;align-items:center;gap:9px' }, [
+          el('span', { text: plural(rem.length, 'worktree') + (rem.length === 1 ? ' is' : ' are') + ' merged and clean' }),
+          SP.tiers ? SP.tiers.pill('B') : null,
+        ]),
+        el('div', { style: 'color:var(--text-2);font-size:12.5px;margin-top:3px;line-height:1.5', text: 'Their branches are merged or pushed and nothing is uncommitted. Removing them frees ' + fmt(bytes) + ' and keeps every branch.' }),
+      ]),
+      smallBtn('trash', 'Remove ' + rem.length + ' (' + fmt(bytes) + ')', () => SP.removeWorktreesFlow(rem.map((w) => ({ p, w }))), { primary: true, disabled: S.wtBusy }),
+    ]);
+  }
+
+  function wtBadge(cls, text, title) {
+    return el('span', { class: cls, title: title || '', style: 'display:inline-flex;padding:2px 8px;border-radius:7px;font-size:10.5px;font-weight:700;flex:none;white-space:nowrap', text });
+  }
+
+  function buildWorktreeRow(p, w) {
+    const badges = [];
+    if (!w.exists) badges.push(wtBadge('sp-badge-warn', 'Missing', 'The folder is gone. git still keeps a record of it.'));
+    else {
+      if (w.merged === true) badges.push(wtBadge('sp-badge-safe', 'Merged', 'Its commits are in ' + ((repoOf(p) && repoOf(p).defaultBranch) || 'the default branch') + '.'));
+      else if (w.pushed) badges.push(wtBadge('sp-badge-safe', 'Pushed', 'Every commit is on ' + w.upstream + '.'));
+      const dirty = (w.changes || 0) + (w.untracked || 0);
+      if (dirty) badges.push(wtBadge('sp-badge-caution', 'Uncommitted ' + dirty));
+      if (w.ahead > 0) badges.push(wtBadge('sp-badge-caution', 'Ahead ' + w.ahead, 'Commits not on ' + (w.upstream || 'its upstream') + ' yet.'));
+      if (w.locked) badges.push(wtBadge('sp-badge-warn', 'Locked', w.lockReason || 'Locked with git worktree lock.'));
+    }
+    const c = w.creator || {};
+    const meta = [];
+    if (w.lastActivity) meta.push('Active ' + SP.ago(w.lastActivity));
+    if (c.id && c.id !== 'manual') meta.push('Likely made by ' + c.label);
+    if (w.exists === false) meta.push('Folder gone');
+    const eligible = w.exists && w.eligibility && w.eligibility.ok === true;
+    const why = !eligible && w.exists && w.eligibility && w.eligibility.reasons && w.eligibility.reasons.length ? w.eligibility.reasons.join(' ') : '';
+    return el('div', {
+      'data-worktree': w.path,
+      style: 'display:flex;align-items:center;gap:14px;padding:13px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--border)' + (w.exists ? '' : ';opacity:.8'),
+    }, [
+      el('div', { title: c.label ? 'Likely made by ' + c.label : '', style: 'width:40px;height:40px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [creatorMark(w, 21)]),
+      el('div', { style: 'flex:1;min-width:0' }, [
+        el('div', { style: 'font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap' }, [
+          el('span', { class: w.branch ? '' : 'mono', style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;max-width:100%', text: wtName(w) }),
+          ...badges,
+        ]),
+        el('div', { class: 'mono', style: 'color:var(--text-3);font-size:11.5px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', title: w.path, text: wtWhere(p, w) }),
+        el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:3px', text: meta.join(' · ') }),
+        why ? el('div', { style: 'color:var(--text-2);font-size:12px;margin-top:4px;line-height:1.5', text: 'Not offered: ' + why }) : null,
+      ]),
+      el('div', { style: 'font-weight:700;font-size:14px;flex:none;font-variant-numeric:tabular-nums;min-width:58px;text-align:right', text: w.exists && w.size != null ? fmt(w.size) : '' }),
+      w.exists ? el('button', {
+        style: 'width:34px;height:34px;border-radius:9px;border:1px solid var(--border);background:var(--panel-2);color:var(--text-3);display:grid;place-items:center;flex:none;cursor:pointer',
+        hov: 'border-color:var(--border-2);color:var(--text)',
+        title: 'Reveal in file manager',
+        'aria-label': 'Reveal ' + wtName(w),
+        onclick: () => { try { api.reveal(w.path); } catch (_) {} },
+      }, [ic('folder-open', 16)]) : null,
+      eligible ? smallBtn('trash', 'Remove', () => SP.removeWorktreesFlow([{ p, w }]), { disabled: S.wtBusy, title: 'git worktree remove, after checking it again' }) : null,
+    ]);
+  }
+
+  function buildWorktreesSection(p) {
+    const wts = wtList(p);
+    if (!wts.length) return null;
+    const r = repoOf(p);
+    const rem = removableOf(p);
+    const missing = missingOf(p);
+    const actions = [];
+    if (rem.length > 1) actions.push(smallBtn('trash', 'Remove ' + rem.length + ' merged, clean (' + fmt(rem.reduce((a, w) => a + (w.size || 0), 0)) + ')', () => SP.removeWorktreesFlow(rem.map((w) => ({ p, w }))), { disabled: S.wtBusy }));
+    if (missing.length) actions.push(smallBtn('broom', 'Prune ' + missing.length + ' missing', () => SP.pruneWorktreesFlow(p), { disabled: S.wtBusy, title: 'git worktree prune: clears git\'s records of worktrees whose folder is gone' }));
+    const sub = [];
+    sub.push(fmt(r.worktreeBytes || 0) + ' on disk');
+    if (r.defaultBranch) sub.push('merged means in ' + r.defaultBranch);
+    if (!r.mainInScan) sub.push('main checkout is outside the scanned folder');
+    const sorted = wts.slice().sort((a, b) => (Number(b.exists) - Number(a.exists)) || (Number(!!(b.eligibility && b.eligibility.ok)) - Number(!!(a.eligibility && a.eligibility.ok))) || ((b.size || 0) - (a.size || 0)));
+    return el('div', { 'data-worktrees': '' }, [
+      el('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:12px;margin:26px 0 6px' }, [
+        el('div', { style: SECTION_LABEL, text: 'Worktrees (' + wts.length + ')' }),
+        el('div', { style: 'display:flex;gap:8px' }, actions),
+      ]),
+      el('div', { style: 'color:var(--text-3);font-size:12px;margin-bottom:12px', text: sub.join(' · ') + '. Spaci only offers to remove a worktree that is clean, unlocked, and merged or pushed.' }),
+      el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, sorted.map((w) => buildWorktreeRow(p, w))),
+    ]);
+  }
+
+  function buildPackagesSection(p) {
+    const pk = pkgList(p);
+    if (!pk.length) return null;
+    return el('div', { 'data-packages': '' }, [
+      el('div', { style: SECTION_LABEL + ';margin:26px 0 12px', text: 'Packages (' + pk.length + ')' }),
+      el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px' }, pk.map((k) => {
+        const t = k.type || {};
+        const tech = TYPE_TECH[t.id];
+        return el('div', { style: 'display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:12px;background:var(--panel);border:1px solid var(--border);min-width:0' }, [
+          el('div', { style: 'width:32px;height:32px;border-radius:9px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [tech ? tic(tech, 18, { label: t.name || tech }) : ic('layer', 17)]),
+          el('div', { style: 'flex:1;min-width:0' }, [
+            el('div', { style: 'font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: k.name }),
+            el('div', { class: 'mono', style: 'color:var(--text-3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', text: k.rel }),
+          ]),
+          el('div', { style: 'font-weight:700;font-size:12.5px;color:' + (k.cleanableSize ? 'var(--accent-fg)' : 'var(--text-3)') + ';flex:none', text: k.cleanableSize ? fmt(k.cleanableSize) : '' }),
+        ]);
+      })),
+    ]);
+  }
+
   function buildItemRow(it, chosen, onToggle, p) {
     // Three tiers, as everywhere: Safe (green), Review (amber), Permanent (red),
     // decided by main (src/clean-tiers.js) via SP.tiers.
@@ -1166,6 +1444,7 @@
           }),
         ]),
         el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px;line-height:1.5', text: it.note || it.path }),
+        itemWhere(it, p) ? el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:2px;display:flex;align-items:center;gap:5px' }, [ic(it.worktree ? 'hierarchy' : 'layer', 12), itemWhere(it, p)]) : null,
         locked ? el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:3px', text: 'Spaci will not clean this. Reveal it and delete it yourself if you are sure.' }) : null,
       ]),
       el('div', { style: 'font-weight:700;font-size:14.5px;flex:none', text: fmt(it.size || 0) }),

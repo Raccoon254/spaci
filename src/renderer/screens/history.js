@@ -26,7 +26,8 @@
     storage: 'database',
     duplicates: 'copy',
     developer: 'code',
-    'auto-clean': 'clock'
+    'auto-clean': 'clock',
+    worktrees: 'hierarchy'
   };
   function scopeIcon(e) {
     return SCOPE_ICON[(e.scope || '').toLowerCase()] || 'box';
@@ -79,6 +80,7 @@
     if (scope === 'largefiles' || scope === 'large-files') return 'Large files';
     if (scope === 'storage') return 'Storage cleanup';
     if (scope === 'duplicates') return 'Duplicate files';
+    if (scope === 'worktrees') return 'Git worktrees';
     return e.scope ? e.scope.charAt(0).toUpperCase() + e.scope.slice(1) : 'Cleanup';
   }
 
@@ -87,6 +89,7 @@
     const scope = (e.scope || '').toLowerCase();
     if (scope === 'system') return count === 1 ? 'cache' : 'caches';
     if (scope === 'largefiles' || scope === 'large-files') return count === 1 ? 'file' : 'files';
+    if (scope === 'worktrees') return count === 1 ? 'worktree' : 'worktrees';
     return count === 1 ? 'item' : 'items';
   }
 

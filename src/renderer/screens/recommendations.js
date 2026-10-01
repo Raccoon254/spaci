@@ -50,6 +50,8 @@
   function recRisk(r) {
     if (!r) return TIER.safe;
     const act = r.action || {};
+    // Removing a worktree takes its folder: always Review, never Safe.
+    if (r.kind === 'worktrees' || act.type === 'remove-worktrees') return TIER.review;
     if (SP.tiers && !(r.action && r.action.type === 'none')) {
       if (act.type === 'docker-prune' && act.kind) return BY_TIER[SP.tiers.docker(act.kind)] || TIER.review;
       const tt = targetOf(r);
@@ -194,6 +196,12 @@
   }
 
   function openAction(rec) {
+    // Worktree removal is not a path clean: it runs git worktree remove, after
+    // one confirm that names every worktree (projects.js).
+    if (rec && rec.action && rec.action.type === 'remove-worktrees') {
+      if (SP.removeWorktreesFlow && SP.removableWorktrees) SP.removeWorktreesFlow(SP.removableWorktrees());
+      return;
+    }
     S.currentAction = resolveAction(rec);
     S.actionResult = null;
     S.actionCleaning = false;
@@ -315,7 +323,7 @@
         style: 'height:42px;padding:0 18px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:8px;cursor:pointer;flex:none',
         hov: 'background:var(--accent-hover)',
         onclick: (e) => { e.stopPropagation(); openAction(r); },
-      }, [ic('trash', 15), 'Clean']);
+      }, [ic('trash', 15), r.kind === 'worktrees' ? 'Remove' : 'Clean']);
 
       return el('div', {
         class: 'sp-hov',
