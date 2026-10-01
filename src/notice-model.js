@@ -339,6 +339,8 @@ function validateReleaseNotes(json, expectedVersion) {
   if (json.body !== undefined && !Array.isArray(json.body)) return null;
   return {
     version: json.version,
+    // Release day only, as YYYY-MM-DD; anything else is dropped, never shown raw.
+    date: typeof json.date === 'string' && /^\d{4}-\d{2}-\d{2}/.test(json.date) ? json.date.slice(0, 10) : null,
     highlight,
     body: sanitizeBlocks(json.body || []),
     media: sanitizeMedia(json.media),

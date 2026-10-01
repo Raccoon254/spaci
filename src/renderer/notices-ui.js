@@ -324,47 +324,132 @@
   }
 
   // ---------- What's new ----------
+  // A full page in the main content area (route 'whatsnew'), not a pop-up:
+  // a hero with the version, date, highlight and links, then the notes as
+  // section cards. It opens by itself once after an update and anytime from
+  // the sidebar.
+  const CHANGELOG_URL = 'https://spaci.kentom.co.ke/changelog';
   async function maybeShowWhatsNew() {
-    if (N.whatsNewOpen || !api.whatsNewGet) return;
+    if (!api.whatsNewGet) return;
     if (SP.state.route === 'welcome') return;
     let notes = null;
     try { notes = await api.whatsNewGet(); } catch (_) { notes = null; }
     if (!notes || typeof notes.version !== 'string') return;
-    showWhatsNew(notes);
+    SP.state.whatsNew = notes;
+    SP.go('whatsnew');
   }
-  function showWhatsNew(notes) {
-    N.whatsNewOpen = true;
-    const host = modalHost();
-    let release = null;
-    const close = () => {
-      if (!N.whatsNewOpen) return;
-      N.whatsNewOpen = false;
-      frame.backdrop.remove();
-      if (release) release();
+  function versionParts(v) {
+    const m = /^(\d+\.\d+\.\d+)(?:-rc\.(\d+))?/.exec(String(v || ''));
+    return m ? { base: m[1], rc: m[2] ? Number(m[2]) : null, short: m[1].replace(/\.0$/, '') } : { base: String(v || ''), rc: null, short: String(v || '') };
+  }
+  function blockText(b) {
+    const out = [];
+    const walk = (list) => (Array.isArray(list) ? list : []).forEach((n) => { if (!n) return; if (typeof n.v === 'string') out.push(n.v); if (n.c) walk(n.c); });
+    walk(b && b.c);
+    return out.join('').trim();
+  }
+  // Split the notes into sections at each heading; text before the first
+  // heading becomes the introduction. A leading "Spaci 2.3" title is dropped:
+  // the hero already says it.
+  function sections(blocks) {
+    const list = Array.isArray(blocks) ? blocks.slice(0, 200) : [];
+    if (list[0] && list[0].t === 'h' && /^spaci\b/i.test(blockText(list[0]))) list.shift();
+    const out = [];
+    let cur = { title: null, blocks: [] };
+    list.forEach((b) => {
+      if (!b || typeof b !== 'object') return;
+      if (b.t === 'h') { if (cur.title || cur.blocks.length) out.push(cur); cur = { title: blockText(b), blocks: [] }; return; }
+      cur.blocks.push(b);
+    });
+    if (cur.title || cur.blocks.length) out.push(cur);
+    return out;
+  }
+  function wnButton(label, iconName, onClick, primary) {
+    return el('button', {
+      class: 'sp-wn-btn' + (primary ? ' sp-wn-btn-primary' : ''),
+      onclick: onClick
+    }, [iconName ? ic(iconName, 16) : null, label]);
+  }
+  SP.screens = SP.screens || {};
+  SP.screens.whatsnew = function (host) {
+    host.innerHTML = '';
+    const S = SP.state;
+    const page = el('div', { class: 'sp-wn' });
+    host.appendChild(page);
+
+    function render(notes) {
+      page.replaceChildren();
+      if (!notes) {
+        page.appendChild(el('div', { class: 'sp-wn-empty' }, [
+          el('div', { class: 'sp-wn-hero-icon' }, [ic('gift', 28)]),
+          el('h1', { class: 'sp-wn-title', style: 'font-size:24px', text: "What's new" }),
+          el('p', { class: 'sp-wn-lead', text: 'The notes for this version could not be loaded. Check your connection, or read them on the website.' }),
+          el('div', { class: 'sp-wn-actions' }, [wnButton('Open the changelog', 'external-link', () => openLink(CHANGELOG_URL), true)])
+        ]));
+        return;
+      }
+      const v = versionParts(notes.version);
+      // Inside the app a "download" link points at what is already installed.
+      const links = (Array.isArray(notes.links) ? notes.links : [])
+        .filter((l) => l && /^https:/.test(String(l.url || '')) && safeHref(l.url) && !/\/download\/?$/.test(String(l.url)))
+        .slice(0, 3);
+      const date = dateText(notes.date);
+
+      // Hero
+      page.appendChild(el('section', { class: 'sp-wn-hero', 'aria-labelledby': 'sp-wn-title' }, [
+        el('div', { class: 'sp-wn-hero-top' }, [
+          el('div', { class: 'sp-wn-hero-icon' }, [ic('gift', 28)]),
+          el('div', { class: 'sp-wn-eyebrow' }, [
+            el('span', { text: "What's new" }),
+            el('span', { class: 'sp-wn-pill', text: 'Version ' + v.base }),
+            v.rc ? el('span', { class: 'sp-wn-pill sp-wn-pill-rc', text: 'Release candidate ' + v.rc }) : null,
+            date ? el('span', { class: 'sp-wn-date', text: date }) : null
+          ])
+        ]),
+        el('h1', { id: 'sp-wn-title', class: 'sp-wn-title', text: 'Spaci ' + v.short }),
+        notes.highlight ? el('p', { class: 'sp-wn-lead', text: str(notes.highlight) }) : null,
+        el('div', { class: 'sp-wn-actions' }, [
+          ...links.map((l, i) => wnButton(String(l.label || 'Link').slice(0, 40), 'external-link', () => openLink(l.url), i === 0)),
+          wnButton('Full changelog', 'document-text', () => openLink(CHANGELOG_URL), !links.length)
+        ])
+      ]));
+
+      // Sections
+      // The hero already carries the highlight; an introduction that only
+      // restates it in one paragraph is left out.
+      let secs = sections(notes.body);
+      if (notes.highlight && secs[0] && !secs[0].title && secs[0].blocks.length === 1 && secs[0].blocks[0].t === 'p') secs = secs.slice(1);
+      const grid = el('div', { class: 'sp-wn-sections' });
+      secs.forEach((sec) => {
+        grid.appendChild(el('section', { class: 'sp-wn-card' + (sec.title ? '' : ' sp-wn-card-intro') }, [
+          sec.title ? el('h2', { class: 'sp-wn-card-title' }, [el('span', { class: 'sp-wn-dot', 'aria-hidden': 'true' }), sec.title]) : null,
+          el('div', { class: 'sp-notice-body sp-wn-body' }, [renderBlocks(sec.blocks)])
+        ]));
+      });
+      page.appendChild(grid);
+
+      // Media
+      const figs = (Array.isArray(notes.media) ? notes.media : []).map((m) => m && figure(m.url, m.alt, m.caption)).filter(Boolean);
+      if (figs.length) page.appendChild(el('div', { class: 'sp-wn-media' }, figs));
+
+      // Footer
+      page.appendChild(el('div', { class: 'sp-wn-foot' }, [
+        el('span', { text: 'You are running Spaci ' + str(notes.version) + '.' }),
+        el('span', { style: 'flex:1' }),
+        wnButton('Back to Smart Scan', 'chevron-left', () => SP.go('dashboard'))
+      ]));
+
+      // Seeing the page counts as seen.
       try { api.whatsNewSeen(notes.version); } catch (_) {}
-    };
-    const frame = SP.dialogFrame({ width: 580, maxHeight: '88%', z: 83, onClose: close });
-    const links = (Array.isArray(notes.links) ? notes.links : []).filter((l) => l && safeHref(l.url) && /^https:/.test(l.url)).slice(0, 4);
-    const done = button('Got it', null, close, { primary: true, autofocus: true });
-    frame.panel.appendChild(el('div', { style: 'display:flex;align-items:center;gap:14px;margin-bottom:12px' }, [
-      el('div', { class: 'sp-cm-accent', style: 'width:44px;height:44px;border-radius:12px;display:grid;place-items:center;flex:none' }, [ic('sparkles', 23)]),
-      el('h2', { id: frame.titleId, style: 'flex:1;min-width:0;font-size:20px;font-weight:700;letter-spacing:-.4px', text: "What's new in " + notes.version }),
-      closeButton(close)
-    ]));
-    const body = el('div', { class: 'sp-scroll', style: 'overflow-y:auto;min-height:0;margin:0 -6px;padding:0 6px' }, [
-      notes.highlight ? el('p', { class: 'sp-nb-p', style: 'font-size:15px;font-weight:600;color:var(--text)', text: str(notes.highlight) }) : null,
-      el('div', { class: 'sp-notice-body' }, [renderBlocks(notes.body)]),
-      mediaGallery(notes.media)
-    ]);
-    frame.panel.appendChild(body);
-    frame.panel.appendChild(el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:18px' }, [
-      ...links.map((l) => button(String(l.label || 'Link').slice(0, 40), 'external-link', () => openLink(l.url))),
-      el('span', { style: 'flex:1' }),
-      done
-    ]));
-    release = SP.trapModal(frame.panel, { onEscape: close, initial: done });
-    host.appendChild(frame.backdrop);
-  }
+    }
+
+    if (S.whatsNew) { render(S.whatsNew); return; }
+    page.appendChild(el('div', { class: 'sp-wn-loading', 'aria-live': 'polite' }, [SP.ring ? SP.ring('elastic', 34) : null, el('span', { text: 'Loading the release notes' })]));
+    Promise.resolve(api.whatsNewGet ? api.whatsNewGet({ always: true }) : null).catch(() => null).then((notes) => {
+      if (notes && typeof notes.version === 'string') S.whatsNew = notes;
+      if (S.route === 'whatsnew') render(S.whatsNew || null);
+    });
+  };
 
   // ---------- start ----------
   function start() {
@@ -379,7 +464,7 @@
         });
       });
     }
-    // Let the first screen paint before the sheet appears.
+    // Let the first screen paint before switching to What's new.
     setTimeout(maybeShowWhatsNew, 700);
   }
 

@@ -397,7 +397,7 @@ test('notices: stored list served, dismissals persisted atomically, junk refused
     };
     const w = await m.handlers['whatsnew:get']();
     assert.deepEqual(urls, ['https://spaci.kentom.co.ke/api/releases/2.1.0/notes']);
-    assert.deepEqual(w, { version: '2.1.0', highlight: 'Hi', body: [{ t: 'hr' }], media: [], links: [] });
+    assert.deepEqual(w, { version: '2.1.0', date: null, highlight: 'Hi', body: [{ t: 'hr' }], media: [], links: [] });
     assert.equal(await m.handlers['whatsnew:seen']({}, '../../x'), false);
     assert.equal(await m.handlers['whatsnew:seen']({}, '2.1.0'), true);
     assert.equal(JSON.parse(fs.readFileSync(prefsFile, 'utf8')).lastSeenVersion, '2.1.0');

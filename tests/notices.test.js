@@ -217,12 +217,16 @@ test('what\'s new after an upgrade: fetched from the site, shown until seen', as
   assert.deepEqual(h.saved, [], 'an upgrade does not touch lastSeenVersion at launch');
   const w = await h.svc.whatsNew();
   assert.equal(fetchImpl.calls[0], 'https://spaci.kentom.co.ke/api/releases/2.3.0/notes');
-  assert.deepEqual(w, { version: '2.3.0', highlight: 'Spaci speaks your language', body: NOTES.body, media: [], links: NOTES.links });
+  assert.deepEqual(w, { version: '2.3.0', date: '2026-10-01', highlight: 'Spaci speaks your language', body: NOTES.body, media: [], links: NOTES.links });
   assert.equal(h.svc.whatsNewSeen('2.2.0'), false, 'only the running version');
   assert.equal(h.svc.whatsNewSeen(123), false);
   assert.equal(h.svc.whatsNewSeen('2.3.0'), true);
   assert.equal(h.prefs.lastSeenVersion, '2.3.0');
   assert.equal(await h.svc.whatsNew(), null, 'once');
+  // Opened from the sidebar, it shows whenever asked, without changing what was seen.
+  assert.equal((await h.svc.whatsNew({ always: true })).version, '2.3.0');
+  assert.equal((await h.svc.whatsNew({ always: 'yes' })), null, 'only a real true bypasses');
+  assert.equal(h.prefs.lastSeenVersion, '2.3.0');
   h.svc.stop();
 });
 

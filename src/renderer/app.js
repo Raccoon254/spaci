@@ -633,6 +633,7 @@ const NAV_SOON = [
   { label: 'Spaci Guard', icon: 'shield', route: 'guard', preview: true }
 ];
 const NAV_BOTTOM = [
+  { key: 'whatsnew', label: "What's new", icon: 'gift' },
   { key: 'history', label: 'History', icon: 'log' },
   { key: 'settings', label: 'Settings', icon: 'settings' }
 ];

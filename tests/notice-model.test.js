@@ -174,11 +174,12 @@ test('validateReleaseNotes checks the version and sanitises everything', () => {
     links: [{ label: 'Docs', url: 'https://spaci.kentom.co.ke/docs' }, { label: 'Bad', url: 'javascript:x' }],
   }, '2.3.0');
   assert.deepEqual(r, {
-    version: '2.3.0', highlight: 'Now in 12 languages',
+    version: '2.3.0', date: '2026-10-01', highlight: 'Now in 12 languages',
     body: [{ t: 'p', c: [{ t: 'text', v: 'x' }] }], media: [],
     links: [{ label: 'Docs', url: 'https://spaci.kentom.co.ke/docs' }],
   });
   assert.equal(m.validateReleaseNotes({ version: '2.2.0', body: [] }, '2.3.0'), null, 'wrong version');
   assert.equal(m.validateReleaseNotes({ version: '2.3.0', highlight: 'x'.repeat(161) }, '2.3.0'), null);
   assert.equal(m.validateReleaseNotes('nope', '2.3.0'), null);
+  assert.equal(m.validateReleaseNotes({ version: '2.3.0', date: '<img onerror=x>' }, '2.3.0').date, null, 'a date that is not a date is dropped');
 });

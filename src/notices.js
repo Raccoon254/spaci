@@ -123,7 +123,8 @@ function whatsNewFromChangelog(entry, asVersion = null) {
     media.push(item);
   }
   const highlight = typeof entry.highlight === 'string' && entry.highlight && entry.highlight.length <= LIMITS.highlight ? entry.highlight : null;
-  return { version, highlight, body: sanitizeBlocks(body), media, links: sanitizeLinks(entry.links) };
+  const date = typeof entry.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry.date) ? entry.date : null;
+  return { version, date, highlight, body: sanitizeBlocks(body), media, links: sanitizeLinks(entry.links) };
 }
 
 /**
@@ -305,13 +306,18 @@ function createNoticesService({
     /** Is `id` currently visible? (A notification click checks before navigating.) */
     has(id) { const key = cleanId(id); return Boolean(key && visible().some((n) => n.id === key)); },
 
-    /** whatsnew:get -> {version, highlight, body, media, links} | null */
-    async whatsNew() {
-      if (!shouldShowWhatsNew(prefs(), version)) return null;
+    /**
+     * whatsnew:get -> {version, date, highlight, body, media, links} | null.
+     * Without options: only once per version (the first launch after an
+     * update). { always: true }: whenever the user opens What's new.
+     */
+    async whatsNew(opts = {}) {
+      if (!(opts && opts.always === true) && !shouldShowWhatsNew(prefs(), version)) return null;
       const notes = await loadNotes();
       if (!notes) return null;
       const h = await hydrateMedia(notes, media.resolve);
-      return { version: notes.version, highlight: notes.highlight, body: h.body, media: h.media, links: notes.links };
+      const date = typeof notes.date === 'string' && /^\d{4}-\d{2}-\d{2}/.test(notes.date) ? notes.date.slice(0, 10) : null;
+      return { version: notes.version, date, highlight: notes.highlight, body: h.body, media: h.media, links: notes.links };
     },
     /** whatsnew:seen(version): only the running version can be marked seen. */
     whatsNewSeen(v) {

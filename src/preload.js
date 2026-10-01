@@ -70,7 +70,7 @@ contextBridge.exposeInMainWorld('api', {
   noticesList: () => ipcRenderer.invoke('notices:list'),
   noticesDismiss: (id) => ipcRenderer.invoke('notices:dismiss', id),
   noticesOpen: (id) => ipcRenderer.invoke('notices:open', id),
-  whatsNewGet: () => ipcRenderer.invoke('whatsnew:get'),
+  whatsNewGet: (opts) => ipcRenderer.invoke('whatsnew:get', opts),
   whatsNewSeen: (version) => ipcRenderer.invoke('whatsnew:seen', version),
   onNoticesUpdated: (cb) => sub('notices:updated', cb),
 

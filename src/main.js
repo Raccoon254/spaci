@@ -1302,7 +1302,7 @@ ipcMain.handle('history:clear', () => { try { writeFileAtomic(HISTORY_PATH, '[]'
 ipcMain.handle('notices:list', () => (noticesService ? noticesService.list() : []));
 ipcMain.handle('notices:dismiss', (_e, id) => (noticesService ? noticesService.dismiss(id) : false));
 ipcMain.handle('notices:open', (_e, id) => (noticesService ? noticesService.open(id) : null));
-ipcMain.handle('whatsnew:get', () => (noticesService ? noticesService.whatsNew() : null));
+ipcMain.handle('whatsnew:get', (_e, opts) => (noticesService ? noticesService.whatsNew({ always: Boolean(opts && opts.always === true) }) : null));
 ipcMain.handle('whatsnew:seen', (_e, version) => (noticesService ? noticesService.whatsNewSeen(version) : false));
 
 // ---- clean tiers and auto-clean ----
