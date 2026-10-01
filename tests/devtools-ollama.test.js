@@ -313,7 +313,7 @@ function twoStores() {
 test('r1: a copy in a store the running Ollama does not use is blocked and never deleted through the API', async () => {
   const t = twoStores();
   const s = stubs({ running: true, ps: [], tags: [tagFor('llama3:latest', t.liveFile)] });
-  const ctx = { platform: 'darwin', home: t.home, env: { OLLAMA_MODELS: t.live }, procs: s.procs, httpJson: s.httpJson };
+  const ctx = { platform: process.platform === 'win32' ? 'win32' : 'darwin', home: t.home, env: { OLLAMA_MODELS: t.live, USERPROFILE: t.home }, procs: s.procs, httpJson: s.httpJson };
   const [g] = await ollama.inventory(ctx);
   const staleItem = g.items.find((i) => i.removal.store === t.stale);
   const liveItem = g.items.find((i) => i.removal.store === t.live);
@@ -335,7 +335,7 @@ test('r1: a copy in a store the running Ollama does not use is blocked and never
 test('r1: with Ollama stopped, the stale copy is deleted on disk and the live store is untouched', async () => {
   const t = twoStores();
   const s = stubs({ running: false });
-  const ctx = { platform: 'darwin', home: t.home, env: { OLLAMA_MODELS: t.live }, procs: s.procs, httpJson: s.httpJson };
+  const ctx = { platform: process.platform === 'win32' ? 'win32' : 'darwin', home: t.home, env: { OLLAMA_MODELS: t.live, USERPROFILE: t.home }, procs: s.procs, httpJson: s.httpJson };
   const [g] = await ollama.inventory(ctx);
   const staleItem = g.items.find((i) => i.removal.store === t.stale);
   assert.equal(staleItem.blocked, null);
@@ -353,7 +353,7 @@ test('a store whose blobs folder is another store\'s keeps every blob the other 
   fs.symlinkSync(path.join(t.live, 'blobs'), path.join(t.stale, 'blobs'));
   fs.writeFileSync(t.staleFile, fs.readFileSync(t.liveFile));
   const s = stubs({ running: false });
-  const ctx = { platform: 'darwin', home: t.home, env: { OLLAMA_MODELS: t.live }, procs: s.procs, httpJson: s.httpJson };
+  const ctx = { platform: process.platform === 'win32' ? 'win32' : 'darwin', home: t.home, env: { OLLAMA_MODELS: t.live, USERPROFILE: t.home }, procs: s.procs, httpJson: s.httpJson };
   const manifests = await ollama.readManifests(t.stale);
   const res = await ollama.removeOnDisk(t.stale, manifests[0], manifests, new Map(), ollama.storeDirs(ctx));
   assert.equal(res.ok, true, res.error);

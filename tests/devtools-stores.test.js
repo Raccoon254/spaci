@@ -154,7 +154,8 @@ test('nvm: pinned, default and running versions are protected; an unused one is 
   write(path.join(nvmDir, 'alias', 'default'), '22\n');
   const proj = tmp('proj');
   write(path.join(proj, '.nvmrc'), '20\n');
-  const procs = { ok: true, list: [{ pid: 9, args: path.join(nvmDir, 'versions', 'node', 'v20.11.1', 'bin', 'node') + ' server.js' }] };
+  // posix join: the listing runs as platform linux, so the path it compares is joined the same way.
+  const procs = { ok: true, list: [{ pid: 9, args: path.posix.join(nvmDir, 'versions', 'node', 'v20.11.1', 'bin', 'node') + ' server.js' }] };
   const opts = { platform: 'linux', home: tmp('h'), env: { NVM_DIR: nvmDir }, projects: [proj], procs };
   const inv = await devtools.inventory({ ...opts, only: ['toolchains'] });
   const g = inv.groups.find((x) => x.id === 'nvm');
@@ -407,7 +408,8 @@ test('inventory: a detector that throws becomes an error group, the rest still r
 
 // ---- toolchain defaults resolve like the tools do, and fail closed -------------------
 
-test('r2: nvm default lts/* -> lts/jod -> v22.11.0 protects v22.11.0', async () => {
+// nvm does not run on Windows, which also cannot name a file "*".
+test('r2: nvm default lts/* -> lts/jod -> v22.11.0 protects v22.11.0', { skip: process.platform === 'win32' }, async () => {
   const nvmDir = tmp('nvm');
   for (const v of ['v20.10.0', 'v22.11.0']) write(path.join(nvmDir, 'versions', 'node', v, 'bin', 'node'), 'x');
   write(path.join(nvmDir, 'alias', 'default'), 'lts/*\n');
@@ -663,7 +665,8 @@ test('JetBrains: an old, uninstalled, unused version offers caches, logs and plu
   assert.equal(g.items.length, 1);
   const it = g.items[0];
   assert.equal(it.blocked, null);
-  assert.deepEqual(it.paths.sort(), [j.lib('Application Support', 'JetBrains', j.old, 'plugins'), j.lib('Caches', 'JetBrains', j.old), j.lib('Logs', 'JetBrains', j.old)].sort());
+  const slash = (x) => x.replace(/\\/g, '/');
+  assert.deepEqual(it.paths.map(slash).sort(), [j.lib('Application Support', 'JetBrains', j.old, 'plugins'), j.lib('Caches', 'JetBrains', j.old), j.lib('Logs', 'JetBrains', j.old)].map(slash).sort());
   for (const pth of it.paths) assert.ok(!/scratches|consoles|options/.test(pth));
   const del = async (pth) => { fs.rmSync(pth, { recursive: true, force: true }); return 1; };
   const res = await devtools.removePaths(it.removal, del);
