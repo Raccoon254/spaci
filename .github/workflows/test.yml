@@ -8,6 +8,7 @@ on:
       - v2-redesign
       - 'codex/**'
       - 'fix/**'
+      - 'feature/**'
     # Release tags too: the release workflow builds and publishes straight to
     # users, so the tests have to run on exactly what ships.
     tags:
