@@ -404,3 +404,82 @@ test('inventory: a detector that throws becomes an error group, the rest still r
     devtools.DETECTORS.find((d) => d.id === 'jan').run = original;
   }
 });
+
+// ---- toolchain defaults resolve like the tools do, and fail closed -------------------
+
+test('r2: nvm default lts/* -> lts/jod -> v22.11.0 protects v22.11.0', async () => {
+  const nvmDir = tmp('nvm');
+  for (const v of ['v20.10.0', 'v22.11.0']) write(path.join(nvmDir, 'versions', 'node', v, 'bin', 'node'), 'x');
+  write(path.join(nvmDir, 'alias', 'default'), 'lts/*\n');
+  write(path.join(nvmDir, 'alias', 'lts', '*'), 'lts/jod\n');
+  write(path.join(nvmDir, 'alias', 'lts', 'jod'), 'v22.11.0\n');
+  const inv = await devtools.inventory({ only: ['toolchains'], platform: 'linux', home: tmp('h'), env: { NVM_DIR: nvmDir }, projects: [], projectsScanned: true, procs: quietProcs });
+  const g = inv.groups.find((x) => x.id === 'nvm');
+  const by = (v) => g.items.find((i) => i.version === v);
+  assert.match(by('v22.11.0').blocked, /nvm default/);
+  assert.equal(by('v20.10.0').blocked, null);
+});
+
+test('nvm default: alias chains, node and stable, system, and unresolvable defaults', async () => {
+  const p = path.posix;
+  const nvmDir = tmp('nvm');
+  const versions = ['v18.20.0', 'v20.10.0', 'v22.11.0'];
+  const set = (name, body) => write(path.join(nvmDir, 'alias', ...name.split('/')), body + '\n');
+  set('default', 'work'); set('work', 'lts/iron'); set('lts/iron', 'v20.10.0');
+  assert.deepEqual(await toolchains.nvmDefault(nvmDir, versions, p), { version: 'v20.10.0' });
+  set('default', 'node');
+  assert.deepEqual(await toolchains.nvmDefault(nvmDir, versions, p), { version: 'v22.11.0' });
+  set('default', 'stable');
+  assert.deepEqual(await toolchains.nvmDefault(nvmDir, versions, p), { version: 'v22.11.0' });
+  set('default', '18');
+  assert.deepEqual(await toolchains.nvmDefault(nvmDir, versions, p), { version: 'v18.20.0' });
+  set('default', 'system');
+  assert.deepEqual(await toolchains.nvmDefault(nvmDir, versions, p), { none: true });
+  // Unresolvable: an lts codename nvm never wrote, a loop, a version not installed.
+  set('default', 'lts/krypton');
+  assert.match((await toolchains.nvmDefault(nvmDir, versions, p)).error, /could not work out/);
+  set('default', 'a'); set('a', 'b'); set('b', 'a');
+  assert.ok((await toolchains.nvmDefault(nvmDir, versions, p)).error);
+  set('default', '16');
+  assert.ok((await toolchains.nvmDefault(nvmDir, versions, p)).error);
+  // In the listing an unresolvable default blocks every version.
+  for (const v of versions) write(path.join(nvmDir, 'versions', 'node', v, 'bin', 'node'), 'x');
+  set('default', 'lts/*');
+  const inv = await devtools.inventory({ only: ['toolchains'], platform: 'linux', home: tmp('h'), env: { NVM_DIR: nvmDir }, projectsScanned: true, procs: quietProcs });
+  const g = inv.groups.find((x) => x.id === 'nvm');
+  assert.equal(g.items.length, 3);
+  for (const it of g.items) assert.match(it.blocked, /could not work out which version nvm uses/);
+  // No default at all is not a reason to block.
+  fs.rmSync(path.join(nvmDir, 'alias'), { recursive: true });
+  assert.deepEqual(await toolchains.nvmDefault(nvmDir, versions, p), { none: true });
+});
+
+test('fnm, Volta and rustup defaults that do not resolve block every version', { skip: !canSymlink }, async () => {
+  const home = tmp('h');
+  // fnm: default points at a version that is not installed.
+  const fnmDir = tmp('fnm');
+  write(path.join(fnmDir, 'node-versions', 'v20.10.0', 'installation', 'bin', 'node'), 'x');
+  fs.mkdirSync(path.join(fnmDir, 'aliases'), { recursive: true });
+  fs.symlinkSync(path.join(fnmDir, 'node-versions', 'v21.0.0', 'installation'), path.join(fnmDir, 'aliases', 'default'));
+  // Volta: default runtime not installed.
+  const volta = tmp('volta');
+  write(path.join(volta, 'tools', 'image', 'node', '18.20.4', 'bin', 'node'), 'x');
+  write(path.join(volta, 'tools', 'user', 'platform.json'), JSON.stringify({ node: { runtime: '22.1.0', npm: null } }));
+  // rustup: default names a linked toolchain that is not a folder here.
+  const rh = tmp('rustup');
+  write(path.join(rh, 'toolchains', '1.75.0-aarch64-apple-darwin', 'bin', 'rustc'), 'r');
+  write(path.join(rh, 'settings.toml'), 'default_toolchain = "my-linked"\n');
+  const inv = await devtools.inventory({ only: ['toolchains'], platform: 'darwin', home, env: { FNM_DIR: fnmDir, VOLTA_HOME: volta, RUSTUP_HOME: rh, NVM_DIR: '/nonexistent', PYENV_ROOT: '/nonexistent' }, projectsScanned: true, procs: quietProcs });
+  for (const id of ['fnm', 'volta', 'rustup']) {
+    const g = inv.groups.find((x) => x.id === id);
+    assert.ok(g, id);
+    for (const it of g.items) assert.match(it.blocked, /could not work out/, id);
+  }
+  // Fixed defaults: only the default is protected.
+  fs.unlinkSync(path.join(fnmDir, 'aliases', 'default'));
+  fs.symlinkSync(path.join(fnmDir, 'node-versions', 'v20.10.0', 'installation'), path.join(fnmDir, 'aliases', 'default'));
+  write(path.join(volta, 'tools', 'user', 'platform.json'), JSON.stringify({ node: { runtime: '18.20.4' } }));
+  write(path.join(rh, 'settings.toml'), 'default_toolchain = "1.75.0-aarch64-apple-darwin"\n');
+  const inv2 = await devtools.inventory({ only: ['toolchains'], platform: 'darwin', home, env: { FNM_DIR: fnmDir, VOLTA_HOME: volta, RUSTUP_HOME: rh, NVM_DIR: '/nonexistent', PYENV_ROOT: '/nonexistent' }, projectsScanned: true, procs: quietProcs });
+  for (const id of ['fnm', 'volta', 'rustup']) for (const it of inv2.groups.find((x) => x.id === id).items) assert.match(it.blocked, /default/, id);
+});

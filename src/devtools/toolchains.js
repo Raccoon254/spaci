@@ -7,7 +7,10 @@
  *   - a scanned project pins it (.nvmrc, .node-version, .python-version,
  *     rust-toolchain(.toml), .tool-versions, package.json engines or volta);
  *   - it is the tool's default (nvm alias default, pyenv global, rustup
- *     default, fnm default, Volta's default platform);
+ *     default, fnm default, Volta's default platform), resolved the way the
+ *     tool resolves it (nvm: alias chains, lts/<codename>, lts/*, node and
+ *     stable). A default Spaci cannot resolve to an installed version blocks
+ *     every version of that tool: it fails closed;
  *   - a running process uses it.
  * Pins are matched the way the tools resolve them: "20" means the newest
  * installed 20.x, an exact version means that version.
@@ -134,7 +137,7 @@ async function versionGroup(ctx, spec) {
   const prot = protections(versions, { pins: spec.pins || [], defaults: spec.defaults || [], running: running || [] });
   const items = await pool(versions, 4, async (v) => {
     const dir = p.join(spec.root, v);
-    const why = prot.get(v) || (running === null ? 'Spaci could not check whether a running program uses this version.' : null);
+    const why = prot.get(v) || spec.blockAll || (running === null ? 'Spaci could not check whether a running program uses this version.' : null);
     const pinned = Boolean(prot.get(v)) && /^Pinned|default/i.test(prot.get(v) || '');
     const size = (await dirSize(dir)).bytes;
     const badges = [];
@@ -165,17 +168,63 @@ async function versionGroup(ctx, spec) {
   })];
 }
 
+/** Why every version stays when a tool's default cannot be resolved. */
+function unresolvedDefault(tool, value) {
+  return 'Spaci could not work out which version ' + tool + ' uses by default' + (value ? ' (' + String(value).slice(0, 60) + ')' : '') + ', so it keeps every version.';
+}
+
+/** Installed version folder names under a root, filtered. */
+async function installedNames(root, match) {
+  return (await listDir(root)).filter((e) => e.isDirectory() && match(e.name)).map((e) => e.name);
+}
+
+function newestOf(versions) {
+  return versions.slice().sort((a, b) => compareVersions(String(b).replace(/^v/i, ''), String(a).replace(/^v/i, '')))[0] || null;
+}
+
+/**
+ * nvm's default, resolved the way nvm_resolve_alias does:
+ *   alias/<name> files chain to other aliases or versions; lts/* and
+ *   lts/<codename> are files under alias/lts/; "node" and "stable" mean the
+ *   newest installed version; "system" means no nvm version at all.
+ * -> { version } | { none: true } | { error: reason }
+ */
+async function nvmDefault(dir, versions, p) {
+  const raw = await readText(p.join(dir, 'alias', 'default'), 1024);
+  if (raw == null) return (await lstatSafe(p.join(dir, 'alias', 'default'))) ? { error: unresolvedDefault('nvm') } : { none: true };
+  const first = raw.trim();
+  let name = first;
+  const seen = new Set();
+  for (let i = 0; i < 16; i++) {
+    if (!name) break;
+    if (name === 'system') return { none: true };
+    if (name === 'node' || name === 'stable') { const v = newestOf(versions); return v ? { version: v } : { error: unresolvedDefault('nvm', first) }; }
+    if (/^v?\d+(\.\d+){0,2}$/i.test(name)) {
+      const v = resolveSpec(name, versions);
+      return v ? { version: v } : { error: unresolvedDefault('nvm', first) };
+    }
+    if (seen.has(name) || !/^[A-Za-z0-9_.*/-]+$/.test(name) || name.split('/').some((x) => !x || x === '..' || x === '.')) break;
+    seen.add(name);
+    const next = await readText(p.join(dir, 'alias', ...name.split('/')), 1024);
+    if (next == null) break;
+    name = next.trim();
+  }
+  return { error: unresolvedDefault('nvm', first) };
+}
+
 // ---- Node ----------------------------------------------------------------------
 
 async function nvm(ctx, pins) {
   const p = api(ctx);
   const dir = absEnv(ctx.env, 'NVM_DIR') || (absEnv(ctx.env, 'XDG_CONFIG_HOME') && ctx.platform !== 'win32' ? p.join(ctx.env.XDG_CONFIG_HOME, 'nvm') : null) || p.join(ctx.home, '.nvm');
   if (ctx.platform === 'win32') return []; // nvm-windows keeps versions elsewhere and has its own uninstall
-  const def = (await readText(p.join(dir, 'alias', 'default'), 1024) || '').trim();
+  const match = (n) => /^v\d+\.\d+\.\d+/.test(n);
+  const def = await nvmDefault(dir, await installedNames(p.join(dir, 'versions', 'node'), match), p);
   return versionGroup(ctx, {
     id: 'nvm', title: 'Node versions (nvm)', tech: 'node', root: p.join(dir, 'versions', 'node'),
-    match: (n) => /^v\d+\.\d+\.\d+/.test(n),
-    pins: pins.node, defaults: def ? [{ spec: cleanSpec(def) || def, why: 'nvm default version' }] : [],
+    match,
+    pins: pins.node, defaults: def.version ? [{ spec: def.version, why: 'nvm default version' }] : [],
+    blockAll: def.error || null,
     label: (v) => 'Node ' + v,
     restore: (v) => 'nvm install ' + v,
     removal: (v, d) => ({ type: 'paths', root: p.join(dir, 'versions', 'node'), paths: [d] }),
@@ -194,13 +243,22 @@ async function fnm(ctx, pins) {
   let base = null;
   for (const c of candidates) { const st = await lstatSafe(p.join(c, 'node-versions')); if (st && st.isDirectory()) { base = c; break; } }
   if (!base) return [];
+  // aliases/default is a symlink (a junction on Windows) to
+  // node-versions/<version>/installation.
+  const match = (n) => /^v\d+\.\d+\.\d+/.test(n);
+  const installed = await installedNames(p.join(base, 'node-versions'), match);
   let def = null;
-  try { def = require('fs').readlinkSync(p.join(base, 'aliases', 'default')); } catch { def = null; }
+  let blockAll = null;
+  try { def = await require('fs').promises.readlink(p.join(base, 'aliases', 'default')); } catch (e) {
+    if (e.code !== 'ENOENT') blockAll = unresolvedDefault('fnm');
+  }
   const defVer = def ? (/(v\d+\.\d+\.\d+)/.exec(def) || [])[1] : null;
+  if (def && (!defVer || !installed.includes(defVer))) blockAll = unresolvedDefault('fnm', def);
   return versionGroup(ctx, {
     id: 'fnm', title: 'Node versions (fnm)', tech: 'node', root: p.join(base, 'node-versions'),
-    match: (n) => /^v\d+\.\d+\.\d+/.test(n),
-    pins: pins.node, defaults: defVer ? [{ spec: defVer, why: 'fnm default version' }] : [],
+    match,
+    pins: pins.node, defaults: defVer && !blockAll ? [{ spec: defVer, why: 'fnm default version' }] : [],
+    blockAll,
     label: (v) => 'Node ' + v,
     restore: (v) => 'fnm install ' + v,
     removal: (v, d) => ({ type: 'command', cmd: 'fnm', args: ['uninstall', v], env: { FNM_DIR: base }, expectGone: [d], fallback: { type: 'paths', root: p.join(base, 'node-versions'), paths: [d] } }),
@@ -212,12 +270,19 @@ async function volta(ctx, pins) {
   const env = ctx.env || {};
   const home = absEnv(env, 'VOLTA_HOME') || (ctx.platform === 'win32' ? (env.LOCALAPPDATA ? p.join(env.LOCALAPPDATA, 'Volta') : null) : p.join(ctx.home, '.volta'));
   if (!home) return [];
-  const platform = await readJson(p.join(home, 'tools', 'user', 'platform.json'));
+  const platformFile = p.join(home, 'tools', 'user', 'platform.json');
+  const platform = await readJson(platformFile);
   const def = platform && platform.node && (platform.node.runtime || platform.node);
+  const match = (n) => /^\d+\.\d+\.\d+/.test(n);
+  const installed = await installedNames(p.join(home, 'tools', 'image', 'node'), match);
+  let blockAll = null;
+  if (!platform && (await lstatSafe(platformFile))) blockAll = unresolvedDefault('Volta');
+  else if (platform && platform.node && (typeof def !== 'string' || !resolveSpec(def, installed))) blockAll = unresolvedDefault('Volta', typeof def === 'string' ? def : null);
   return versionGroup(ctx, {
     id: 'volta', title: 'Node versions (Volta)', tech: 'node', root: p.join(home, 'tools', 'image', 'node'),
-    match: (n) => /^\d+\.\d+\.\d+/.test(n),
-    pins: pins.node, defaults: typeof def === 'string' ? [{ spec: def, why: 'Volta default version' }] : [],
+    match,
+    pins: pins.node, defaults: typeof def === 'string' && !blockAll ? [{ spec: def, why: 'Volta default version' }] : [],
+    blockAll,
     label: (v) => 'Node ' + v,
     restore: (v) => 'volta install node@' + v,
     removal: (v, d) => ({ type: 'paths', root: p.join(home, 'tools', 'image', 'node'), paths: [d] }),
@@ -319,7 +384,9 @@ async function conda(ctx) {
 async function rustup(ctx, pins) {
   const p = api(ctx);
   const root = absEnv(ctx.env, 'RUSTUP_HOME') || p.join(homeOf(ctx), '.rustup');
-  const settings = await readText(p.join(root, 'settings.toml'), 256 * 1024) || '';
+  const settingsRaw = await readText(p.join(root, 'settings.toml'), 256 * 1024);
+  const settingsUnreadable = settingsRaw == null && Boolean(await lstatSafe(p.join(root, 'settings.toml')));
+  const settings = settingsRaw || '';
   const def = (/^\s*default_toolchain\s*=\s*"([^"]+)"/m.exec(settings) || [])[1];
   const overrides = [];
   const ov = /\[overrides\]([\s\S]*?)(\n\[|$)/.exec(settings);
@@ -335,7 +402,10 @@ async function rustup(ctx, pins) {
     id: 'rustup', title: 'Rust toolchains (rustup)', tech: 'rust', root: root2,
     match: () => true,
     pins: rustPins.map((pin) => ({ ...pin, spec: forChannel(pin.spec) || '__none__' })),
-    defaults: def ? [{ spec: forChannel(def) || def, why: 'rustup default toolchain' }] : [],
+    defaults: def && forChannel(def) ? [{ spec: forChannel(def), why: 'rustup default toolchain' }] : [],
+    // A default that names no installed toolchain (a linked one, a typo):
+    // Spaci cannot tell which one rustup runs, so it keeps them all.
+    blockAll: settingsUnreadable || (def && !forChannel(def)) ? unresolvedDefault('rustup', def) : null,
     label: (v) => 'Rust ' + v,
     restore: (v) => 'rustup toolchain install ' + v,
     removal: (v, d) => ({ type: 'command', cmd: rustupBin, args: ['toolchain', 'uninstall', v], env: { RUSTUP_HOME: root }, expectGone: [d], fallback: { type: 'paths', root: root2, paths: [d] } }),
@@ -348,4 +418,4 @@ async function inventory(ctx) {
   return parts.flat();
 }
 
-module.exports = { cleanSpec, pinsFromFiles, projectPins, resolveSpec, protections, uvPythonDir, inventory, nvm, fnm, volta, pyenv, uvPython, conda, rustup, run };
+module.exports = { nvmDefault, cleanSpec, pinsFromFiles, projectPins, resolveSpec, protections, uvPythonDir, inventory, nvm, fnm, volta, pyenv, uvPython, conda, rustup, run };
