@@ -633,7 +633,6 @@ const NAV_SOON = [
   { label: 'Spaci Guard', icon: 'shield', route: 'guard', preview: true }
 ];
 const NAV_BOTTOM = [
-  { key: 'whatsnew', label: "What's new", icon: 'gift' },
   { key: 'history', label: 'History', icon: 'log' },
   { key: 'settings', label: 'Settings', icon: 'settings' }
 ];
@@ -734,8 +733,10 @@ function navItem(item) {
     class: isActive(item) ? 'sp-nav-on sp-hov' : 'sp-hov',
     style: 'display:flex;align-items:center;gap:13px;padding:10px 12px;border-radius:11px;cursor:pointer;font-weight:500;font-size:14px;color:var(--text-2);user-select:none',
     onclick: () => { if (item.key) go(item.key); else { if (item.soon) S.activeSoon = item.soon; go(item.route); } }
-  }, [ic(item.icon, 19), el('span', { style: 'flex:1' }, [item.label]),
-    item.preview ? el('span', { class: 'sp-badge-accent', style: 'font-size:10px;font-weight:700;padding:2px 8px;border-radius:99px;letter-spacing:.3px', text: 'Soon' }) : null,
+  }, [ic(item.icon, 19),
+    // One line per item: long labels ("Duplicate Finder") truncate instead of wrapping under their pill.
+    el('span', { title: item.label, style: 'flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis' }, [item.label]),
+    item.preview ? el('span', { class: 'sp-badge-accent', style: 'flex:none;font-size:10px;font-weight:700;padding:2px 7px;border-radius:99px;letter-spacing:.3px', text: 'Soon' }) : null,
     countEl]);
   // Hover background, but never on the active row (its bg comes from .sp-nav-on).
   row.addEventListener('mouseenter', () => { if (!row.classList.contains('sp-nav-on')) row.style.background = 'var(--panel)'; });

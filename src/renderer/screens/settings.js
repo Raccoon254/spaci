@@ -623,6 +623,19 @@
         action,
       ])
     );
+    // What's new opens by itself once after an update; this brings it back.
+    aboutCard.appendChild(
+      el('div', {
+        style:
+          'display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 0 0;margin-top:18px;border-top:1px solid var(--border)',
+      }, [
+        el('div', { style: 'flex:1;min-width:0' }, [
+          el('div', { style: 'font-weight:600;font-size:14.5px', text: "What's new" }),
+          el('div', { style: 'font-size:12.5px;margin-top:3px;color:var(--text-3)', text: 'Release notes for the version you are running.' }),
+        ]),
+        btn("What's new", 'gift', () => { S.whatsNewFrom = 'settings'; SP.go('whatsnew'); }),
+      ])
+    );
 
     host.appendChild(aboutCard);
 

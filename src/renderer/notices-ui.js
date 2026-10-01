@@ -452,7 +452,8 @@
       figs.forEach((f) => page.appendChild(rise(el('div', { class: 'sp-wn-figure' }, [f]), n++)));
 
       page.appendChild(rise(el('div', { class: 'sp-wn-actions' }, [
-        primary('Continue', () => SP.go('dashboard')),
+        // Back to where it was opened from: Settings, or the app after an update.
+        primary('Continue', () => { const to = S.whatsNewFrom || 'dashboard'; S.whatsNewFrom = null; SP.go(to); }),
         el('div', { class: 'sp-wn-links' }, [
           ...links.map((l) => textLink(String(l.label || 'Link').slice(0, 40), l.url)),
           textLink('Full changelog', CHANGELOG_URL)
