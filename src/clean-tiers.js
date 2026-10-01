@@ -114,6 +114,11 @@ const A_TARGETS = Object.freeze({
   'gradle-wrapper': { group: 'Gradle caches', hint: 'Re-downloads on the next build' },
   'dart-server': { group: 'Editor analysis caches', hint: 'Rebuilds the next time your editor analyses code' },
   'xcode-derived': { group: 'Xcode DerivedData', hint: 'Rebuilds on the next Xcode build' },
+  // ---- ai models and dev tools ----
+  'uv-cache': { group: 'Package caches', hint: 'Refills on the next uv install' },
+  'electron-downloads': { group: 'Package caches', hint: 'Downloaded again on the next install' },
+  'homebrew-cache': { group: 'Package caches', hint: 'Downloaded again on the next brew install' },
+  // ---- end ai models and dev tools ----
 });
 
 /** Why a known safe target is still B. Anything else safe falls to the generic reason. */
@@ -124,6 +129,9 @@ const B_REASONS = Object.freeze({
   'xcode-devicesupport': 'Simulator and device data. Re-copied when a device on that version connects.',
   'simulator-caches': 'Simulator data. Rebuilt when a simulator boots, which takes a while.',
   huggingface: 'Downloaded AI models. Re-downloading can take hours.',
+  playwright: 'Test browsers, a few hundred MB each to download again.',
+  puppeteer: 'Test browsers, large to download again.',
+  cypress: 'Cypress app binaries, large to download again.',
   // `mvn install` puts your own builds here, and they exist nowhere else.
   maven: 'Maven repository. Also holds artifacts you installed locally with mvn install, which nothing re-downloads.',
   thumbnails: 'App cache. Regenerated on demand.',
