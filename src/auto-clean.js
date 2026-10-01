@@ -652,7 +652,8 @@ function run(exec, cmd, args, timeout) {
  * @returns {Promise<{ok:boolean, list:{pid:number,names:string[],cwd:string|null,args:string|null}[]}>}
  */
 async function snapshotProcesses({ platform = process.platform, exec = execFile, fs = nodeFs, timeout = 8000, selfPid = process.pid,
-  uid = typeof process.getuid === 'function' ? process.getuid() : null } = {}) {
+  uid = typeof process.getuid === 'function' ? process.getuid() : null, names = DEV_PROCESS_NAMES } = {}) {
+  const wanted = (p) => p.names.some((n) => names.has(n));
   try {
     if (platform === 'win32') {
       const r = await run(exec, 'tasklist', ['/fo', 'csv', '/nh'], timeout);
@@ -663,14 +664,14 @@ async function snapshotProcesses({ platform = process.platform, exec = execFile,
         if (m) list.push({ pid: Number(m[2]), names: namesOf(m[1]), cwd: null });
       }
       // Windows gives no cwd without admin: a dev process makes projects inconclusive.
-      return { ok: true, list: list.filter((p) => p.names.some((n) => DEV_PROCESS_NAMES.has(n))) };
+      return { ok: true, list: list.filter(wanted) };
     }
     const [r, ra] = await Promise.all([
       run(exec, 'ps', ['-axo', 'pid=,uid=,comm='], timeout),
       run(exec, 'ps', ['-axo', 'pid=,args='], timeout),
     ]);
     if (r.err || ra.err) return { ok: false, list: [] };
-    const dev = parsePs(r.stdout, uid, ra.stdout).filter((p) => p.pid !== selfPid && p.names.some((n) => DEV_PROCESS_NAMES.has(n)));
+    const dev = parsePs(r.stdout, uid, ra.stdout).filter((p) => p.pid !== selfPid && wanted(p));
     if (!dev.length) return { ok: true, list: [] };
     if (platform === 'linux') {
       await Promise.all(dev.map(async (p) => { p.cwd = await fs.promises.readlink(`/proc/${p.pid}/cwd`).catch(() => null); }));
@@ -1203,7 +1204,7 @@ async function runAutoClean(deps) {
 }
 
 module.exports = {
-  DEFAULT_SETTINGS, STAGING_TTL_MS, KEEP_MARKER, AUTO_ARTIFACTS, TOOL_FAMILIES, TARGET_FAMILY, DEV_PROCESS_NAMES,
+  DEFAULT_SETTINGS, STAGING_TTL_MS, KEEP_MARKER, AUTO_ARTIFACTS, TOOL_FAMILIES, TARGET_FAMILY, DEV_PROCESS_NAMES, AI_CODING_TOOLS,
   sanitizeSettings, rulesFingerprint, isApproved, approvalCheck, autoCleanGate, selectCandidates,
   projectEvidence, itemEvidence, gitActivityTimes, snapshotProcesses, parsePs, parseLsofCwd, namesOf, namesFrom,
   projectBusy, familyRunning, argsMention, cloudOrExternal, cloudReason, cloudReasons, envCloudRoots, holdsProtected,
