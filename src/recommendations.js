@@ -97,6 +97,28 @@ function buildRecommendations(projects, sysTargets, prefs, dockerInfo, docker = 
       action: { type: 'open-project', path: p.path },
     });
   }
+  // Linked git worktrees that are merged or pushed and clean (AI coding tools
+  // leave many behind). Savings count only what removal frees beyond the
+  // build output inside them, which the project cards and Clean all already
+  // count, so the totals never add the same bytes twice.
+  const wt = worktreeSummary(projects);
+  if (wt.count > 0) {
+    recs.push({
+      id: 'worktrees:removable',
+      kind: 'worktrees',
+      savings: wt.extraBytes,
+      totalBytes: wt.bytes,
+      itemCount: wt.count,
+      repos: wt.repos,
+      severity: wt.bytes > HIGH_SYSTEM_BYTES ? 'high' : 'normal',
+      icon: 'hierarchy',
+      safe: false,
+      title: `${wt.count} merged, clean git worktree${wt.count === 1 ? '' : 's'} · ${fmt(wt.bytes)} on disk`,
+      body: `In ${wt.repos} ${wt.repos === 1 ? 'repository' : 'repositories'}. Their branches are merged or pushed and nothing is uncommitted. Removing them keeps every branch.`
+        + (wt.bytes > wt.extraBytes ? ` ${fmt(wt.bytes - wt.extraBytes)} of it is build output already counted under Clean all, so this card adds ${fmt(wt.extraBytes)}.` : ''),
+      action: { type: 'remove-worktrees' },
+    });
+  }
   // Big system caches
   const bigSys = (Array.isArray(sysTargets) ? sysTargets : []).filter((t) => t && t.safe === true && t.size > MIN_SYSTEM_BYTES).sort((a, b) => b.size - a.size);
   for (const t of bigSys.slice(0, MAX_SYSTEM_RECS)) {
@@ -115,4 +137,18 @@ function buildRecommendations(projects, sysTargets, prefs, dockerInfo, docker = 
   return recs.sort((a, b) => (b.savings || 0) - (a.savings || 0));
 }
 
-module.exports = { buildRecommendations, dockerRecommendations, fmt };
+/** Removable worktrees across every repository record. */
+function worktreeSummary(projects) {
+  let count = 0; let bytes = 0; let extraBytes = 0; let repos = 0;
+  for (const p of Array.isArray(projects) ? projects : []) {
+    const r = p && p.repo && p.repo.removable;
+    if (!r || !(r.count > 0)) continue;
+    repos++;
+    count += r.count;
+    bytes += Number(r.bytes) || 0;
+    extraBytes += Number(r.extraBytes) || 0;
+  }
+  return { count, bytes, extraBytes, repos };
+}
+
+module.exports = { buildRecommendations, dockerRecommendations, worktreeSummary, fmt };

@@ -59,9 +59,12 @@
     const d = S.docker;
     const dc = d && d.ok && d.categories ? d.categories : null;
     const docker = dc ? ['images', 'buildCache'].reduce((a, k) => a + (Number(dc[k] && dc[k].reclaimable) || 0), 0) : 0;
+    // Merged, clean git worktrees: only what removing them frees beyond their
+    // build output, which `projects` already counts.
+    const worktrees = (S.projects || []).reduce((a, p) => a + (Number(p && p.repo && p.repo.removable && p.repo.removable.extraBytes) || 0), 0);
     // The grand total can never read lower than the headline it contains.
-    const grand = Math.max(top, projects + system + docker);
-    return { top, grand, unverified, count: recs.length, parts: { projects, system, docker } };
+    const grand = Math.max(top, projects + system + docker + worktrees);
+    return { top, grand, unverified, count: recs.length, parts: { projects, system, docker, worktrees } };
   }
   SP.reclaimTotals = reclaimTotals;
 

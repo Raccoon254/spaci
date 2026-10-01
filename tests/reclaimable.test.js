@@ -132,3 +132,24 @@ test('grand total: safe project items, safe system targets and the Docker headli
   assert.equal(r.grandTotal({ projects, system, docker: { ok: false, cleanable: { bytes: 30 } } }), 12);
   assert.equal(r.systemReclaimable(system), 7);
 });
+
+test('worktree card: counts removable worktrees, and its savings never repeat their build output', () => {
+  const repo = (name, removable) => ({ ...project(name, [item('node_modules', 1 * GB, true)]), repo: { worktrees: [], removable } });
+  const projects = [
+    repo('mail', { count: 3, bytes: 2 * GB, extraBytes: 0.5 * GB }),
+    repo('site', { count: 1, bytes: 300 * MB, extraBytes: 300 * MB }),
+    repo('quiet', { count: 0, bytes: 0, extraBytes: 0 }),
+  ];
+  const recs = buildRecommendations(projects, [], { staleDays: 60 }, null, {});
+  const card = recs.find((x) => x.kind === 'worktrees');
+  assert.ok(card);
+  assert.equal(card.itemCount, 4);
+  assert.equal(card.repos, 2);
+  assert.equal(card.totalBytes, 2 * GB + 300 * MB);
+  assert.equal(card.savings, 0.5 * GB + 300 * MB, 'only the bytes beyond build output already counted');
+  assert.equal(card.action.type, 'remove-worktrees');
+  assert.equal(card.safe, false, 'never presented as Safe');
+  assert.doesNotMatch(card.title + card.body, /—/);
+  const none = buildRecommendations([repo('quiet', { count: 0, bytes: 0, extraBytes: 0 })], [], {}, null, {});
+  assert.equal(none.some((x) => x.kind === 'worktrees'), false);
+});
