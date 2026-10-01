@@ -782,3 +782,49 @@ test('VS Code profiles: a version any profile uses stays; only versions older th
   const json = [{ identifier: { id: 'a.b' }, relativeLocation: 'a.b-1.0.0' }];
   assert.deepEqual(ide.staleExtensions(['a.b-1.0.0', 'a.b-0.9.0'], [json, [{ identifier: { id: 'a.b' }, relativeLocation: 'a.b-0.9.0' }]], { 'a.b-0.9.0': true, 'a.b-1.0.0': true }), []);
 });
+
+// ---- simulator runtimes and NDK pins -------------------------------------------------------
+
+test('simulators: a runtime that shut-down simulators use is kept, saying how many would stop booting', async () => {
+  const rt = 'com.apple.CoreSimulator.SimRuntime.iOS-17-5';
+  const devicesJson = JSON.stringify({ devices: { [rt]: [
+    { udid: 'AAAAAAAA-2222-3333-4444-555555555555', name: 'iPhone 15', state: 'Shutdown', isAvailable: true, dataPath: '/x/a/data' },
+    { udid: 'BBBBBBBB-2222-3333-4444-555555555555', name: 'iPad Air', state: 'Shutdown', isAvailable: true, dataPath: '/x/b/data' },
+  ] } });
+  const runtimes = JSON.stringify({
+    'R1': { identifier: 'R1', runtimeIdentifier: rt, version: '17.5', build: '21F79', sizeBytes: 7e9, deletable: true, platformIdentifier: 'com.apple.platform.iphonesimulator' },
+    'R2': { identifier: 'R2', runtimeIdentifier: 'com.apple.CoreSimulator.SimRuntime.iOS-16-4', version: '16.4', build: '20E247', sizeBytes: 6e9, deletable: true, platformIdentifier: 'com.apple.platform.iphonesimulator' },
+  });
+  const exec = execStub({ 'xcrun simctl list -j devices': devicesJson, 'xcrun simctl runtime list -j': runtimes });
+  const [g] = await simulators.inventory({ platform: 'darwin', home: tmp('home'), env: {}, exec, procs: quietProcs });
+  const by = (label) => g.items.find((i) => i.label === label);
+  assert.match(by('iOS 17.5 runtime').blocked, /^2 simulators use this runtime \(iPhone 15, iPad Air\) and would stop booting/);
+  assert.equal(by('iOS 16.4 runtime').blocked, null);
+});
+
+test('Android NDK: ndkVersion, ndk.dir and the AGP default NDK pin an older NDK; no scan keeps them all', async () => {
+  const sdk = tmp('sdk');
+  for (const v of ['23.1.7779620', '25.1.8937393', '25.2.9519653', '26.3.11579264', '27.1.12297006']) write(path.join(sdk, 'ndk', v, 'source.properties'), 'x');
+  const p1 = tmp('app1');
+  write(path.join(p1, 'settings.gradle.kts'), 'include(":app", ":native")\n');
+  write(path.join(p1, 'native', 'build.gradle.kts'), 'android {\n  ndkVersion = "25.2.9519653"\n  externalNativeBuild { cmake { path = file("CMakeLists.txt") } }\n}\n');
+  write(path.join(p1, 'build.gradle.kts'), 'plugins {\n  id("com.android.application") version "8.2.2" apply false\n}\n');
+  const p2 = tmp('app2');
+  write(path.join(p2, 'local.properties'), 'sdk.dir=/x\nndk.dir=' + path.join(sdk, 'ndk', '23.1.7779620').replace(/\\/g, '\\\\').replace(/:/g, '\\:') + '\n');
+  const opts = { platform: 'linux', home: tmp('h'), env: { ANDROID_HOME: sdk, ANDROID_AVD_HOME: tmp('avd') }, procs: quietProcs };
+  const [g] = await android.inventory({ ...opts, projects: [p1, p2], projectsScanned: true });
+  const by = (v) => g.items.find((i) => i.id === 'ndk:' + v);
+  assert.match(by('25.2.9519653').blocked, /Pinned by .* \(native\/build\.gradle\.kts\)/);
+  assert.match(by('25.1.8937393').blocked, /default NDK of Android Gradle Plugin 8\.2/);
+  assert.match(by('23.1.7779620').blocked, /local\.properties/);
+  assert.equal(by('26.3.11579264').blocked, null);
+  // Before any project scan, no NDK can be deleted.
+  const [g2] = await android.inventory({ ...opts, projects: [], projectsScanned: false });
+  assert.equal(g2.items.find((i) => i.id === 'ndk:26.3.11579264').blocked, toolchains.NO_SCAN);
+  // Native code with an AGP Spaci has no default for keeps every NDK.
+  const p3 = tmp('app3');
+  write(path.join(p3, 'app', 'build.gradle'), 'plugins { id "com.android.application" version "99.1.0" }\nandroid { externalNativeBuild { cmake { path "CMakeLists.txt" } } }\n');
+  const [g3] = await android.inventory({ ...opts, projects: [p3], projectsScanned: true });
+  assert.match(g3.items.find((i) => i.id === 'ndk:26.3.11579264').blocked, /cannot determine/);
+  assert.deepEqual(android.gradleModules("include ':app', ':core:net'\n"), ['app', path.join('core', 'net')]);
+});

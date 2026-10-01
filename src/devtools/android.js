@@ -14,11 +14,77 @@
  *
  * A running emulator (its qemu process names the AVD, or its .avd folder
  * holds a *.lock file) blocks deleting that AVD and the system image it uses.
+ *
+ * An older side-by-side NDK stays when a scanned project needs it: its
+ * ndkVersion (build.gradle or build.gradle.kts, in the project or a module
+ * settings.gradle includes), ndk.dir in local.properties, or the default NDK
+ * of the Android Gradle Plugin version it builds with. Before a project scan
+ * every NDK stays.
  */
+
+// The NDK each Android Gradle Plugin version uses when a module sets no
+// ndkVersion (developer.android.com/studio/projects/configure-agp-ndk).
+const AGP_DEFAULT_NDK = {
+  '4.1': '21.1.6352462', '4.2': '21.4.7075529', '7.0': '21.4.7075529', '7.1': '21.4.7075529', '7.2': '21.4.7075529',
+  '7.3': '23.1.7779620', '7.4': '23.1.7779620', '8.0': '25.1.8937393', '8.1': '25.1.8937393', '8.2': '25.1.8937393',
+  '8.3': '26.1.10909125', '8.4': '26.1.10909125', '8.5': '26.1.10909125', '8.6': '26.1.10909125', '8.7': '27.0.12077973',
+  '8.8': '27.0.12077973', '8.9': '27.0.12077973', '8.10': '27.0.12077973', '8.11': '27.0.12077973',
+};
+
+/** One project's NDK needs from its Gradle files: { versions, paths, agp, native }. */
+function ndkNeedsFromFiles(files) {
+  const out = { versions: [], paths: [], agp: null, native: false };
+  for (const [name, text] of Object.entries(files)) {
+    if (typeof text !== 'string') continue;
+    for (const m of text.matchAll(/\bndkVersion\s*(?:=\s*)?\(?\s*["']([\d.]+)["']/g)) out.versions.push({ version: m[1], source: name.replace(/\\/g, '/') });
+    if (/\bexternalNativeBuild\b|\bcmake\s*\{|\bndkBuild\s*\{/.test(text)) out.native = true;
+    const agp = /com\.android\.tools\.build:gradle:(\d+\.\d+)/.exec(text)
+      || /id\s*\(?\s*["']com\.android\.(?:application|library)["']\s*\)?\s*version\s*\(?\s*["'](\d+\.\d+)/.exec(text)
+      || (/\.toml$/.test(name) && /^\s*(?:agp|androidGradlePlugin|android-gradle-plugin|androidGradle|android-gradle)\s*=\s*["'](\d+\.\d+)/m.exec(text));
+    if (agp && !out.agp) out.agp = agp[1];
+    if (/local\.properties$/.test(name)) { const d = /^\s*ndk\.dir\s*=\s*(.+?)\s*$/m.exec(text); if (d) out.paths.push({ path: d[1].replace(/\\:/g, ':').replace(/\\\\/g, '\\'), source: 'local.properties' }); }
+  }
+  return out;
+}
+
+/** Modules settings.gradle(.kts) includes: include ':app', ':core:net' -> app, core/net. */
+function gradleModules(settings) {
+  const out = [];
+  for (const m of String(settings || '').matchAll(/include\s*\(?([^\n)]*)/g)) {
+    for (const q of m[1].matchAll(/["']:?([A-Za-z0-9_.:-]+)["']/g)) out.push(q[1].split(':').join(path.sep));
+  }
+  return Array.from(new Set(out)).slice(0, 40);
+}
+
+/** NDK needs across scanned projects. -> { versions: [{ version, project, source }], paths, unknownDefault: [project] } */
+async function ndkPins(projects) {
+  const out = { versions: [], paths: [], unknownDefault: [] };
+  await pool((Array.isArray(projects) ? projects : []).slice(0, 600), 8, async (proj) => {
+    const read = (f) => readText(path.join(proj, f), 512 * 1024);
+    const settings = (await read('settings.gradle')) || (await read('settings.gradle.kts'));
+    const files = {};
+    for (const f of ['build.gradle', 'build.gradle.kts', 'local.properties', path.join('gradle', 'libs.versions.toml'), ...['app', ...gradleModules(settings)].flatMap((d) => [path.join(d, 'build.gradle'), path.join(d, 'build.gradle.kts')])]) {
+      const t = await read(f);
+      if (t != null) files[f] = t;
+    }
+    if (settings) files['settings.gradle'] = settings; // the plugins block may name AGP
+    if (!Object.keys(files).length) return;
+    const need = ndkNeedsFromFiles(files);
+    for (const v of need.versions) out.versions.push({ ...v, project: proj });
+    for (const pth of need.paths) out.paths.push({ ...pth, project: proj });
+    if (need.agp) {
+      const def = AGP_DEFAULT_NDK[need.agp];
+      if (def) out.versions.push({ version: def, project: proj, source: 'default NDK of Android Gradle Plugin ' + need.agp });
+      else if (need.native) out.unknownDefault.push(proj);
+    } else if (need.native && !need.versions.length) out.unknownDefault.push(proj);
+  });
+  return out;
+}
 
 const path = require('path');
 const { run, listDir, lstatSafe, readText, dirSize, pool, absEnv } = require('./util');
 const { matching } = require('./processes');
+const { projectsScanned, NO_SCAN } = require('./toolchains');
 const { makeGroup, makeItem } = require('./model');
 
 function api(ctx) { return ctx.platform === 'win32' ? path.win32 : path.posix; }
@@ -201,8 +267,16 @@ async function inventory(ctx) {
     if (ndks.length > 1) {
       const { compareVersions } = require('./util');
       ndks.sort((a, b) => compareVersions(b, a));
+      const needs = await ndkPins(ctx.projects);
       for (const v of ndks.slice(1)) {
         const dir = p.join(ndkRoot, v);
+        const norm = (x) => String(x).replace(/\\/g, '/').replace(/\/+$/, '');
+        const pin = needs.versions.find((x) => x.version === v)
+          || needs.paths.find((x) => norm(x.path) === norm(dir) || norm(x.path).startsWith(norm(dir) + '/') || norm(x.path).split('/').pop() === v);
+        let blocked = null;
+        if (pin) blocked = 'Pinned by ' + path.basename(pin.project) + ' (' + pin.source + ')';
+        else if (needs.unknownDefault.length) blocked = path.basename(needs.unknownDefault[0]) + ' builds native code with an NDK Spaci cannot determine, so every NDK stays.';
+        else if (!projectsScanned(ctx)) blocked = NO_SCAN;
         items.push(makeItem({
           id: 'ndk:' + v,
           group: 'android',
@@ -211,6 +285,10 @@ async function inventory(ctx) {
           name: 'ndk;' + v,
           detail: 'Older side-by-side NDK (newest is ' + ndks[0] + ')',
           size: (await dirSize(dir)).bytes,
+          blocked,
+          pinned: Boolean(pin),
+          tier: pin ? 'C' : 'B',
+          badges: pin ? [{ text: 'Pinned', kind: 'pinned' }] : [],
           restoreHint: 'sdkmanager "ndk;' + v + '"',
           paths: [dir],
           removal: { type: 'command', cmd: 'sdkmanager', args: ['--sdk_root=' + root, '--uninstall', 'ndk;' + v], timeout: 120000, expectGone: [dir], fallback: { type: 'paths', root: ndkRoot, paths: [dir] } },
@@ -227,4 +305,4 @@ async function inventory(ctx) {
   })];
 }
 
-module.exports = { sdkRoot, avdHome, parseIni, imagePackage, parseAvdList, parseSdkInstalled, readAvds, inventory };
+module.exports = { AGP_DEFAULT_NDK, ndkNeedsFromFiles, gradleModules, ndkPins, sdkRoot, avdHome, parseIni, imagePackage, parseAvdList, parseSdkInstalled, readAvds, inventory };

@@ -7,7 +7,8 @@
  *   xcrun simctl delete <udid>        Apple's delete for one device
  *   xcrun simctl runtime delete <id>  Apple's delete for one runtime
  *
- * A booted device, and a runtime any booted device uses, is never deleted.
+ * A booted device, and a runtime any simulator uses (booted or not: without
+ * its runtime a simulator can never boot again), is never deleted.
  * DeviceSupport folders (symbols Xcode copies from a connected device) have
  * no command; Xcode copies them again when a device on that version connects.
  */
@@ -118,6 +119,13 @@ async function runtimesGroup(ctx, devices) {
     if (inUse) blocked = 'A booted simulator uses this runtime. Shut it down first.';
     else if (!rt.deletable) blocked = 'Xcode marks this runtime as not deletable (it ships with Xcode).';
     const n = usedBy(rt);
+    // Deleting a runtime leaves every simulator made for it unable to boot,
+    // with its apps and data stuck. Those go first, or the runtime stays.
+    if (!blocked && !rt.runtimeIdentifier) blocked = 'Spaci could not tell which simulators use this runtime.';
+    else if (!blocked && n) {
+      const names = devices.filter((d) => d.runtime === rt.runtimeIdentifier).map((d) => d.name);
+      blocked = n + (n === 1 ? ' simulator uses' : ' simulators use') + ' this runtime (' + names.slice(0, 3).join(', ') + (n > 3 ? ' and ' + (n - 3) + ' more' : '') + ') and would stop booting. Delete ' + (n === 1 ? 'it' : 'them') + ' first, or keep the runtime.';
+    }
     return makeItem({
       id: 'simruntime:' + rt.identifier,
       group: 'simulators',
