@@ -116,7 +116,20 @@ try {
   // worktree whose folder is gone. Everything lives in a folder made here.
   const wroot = fs.realpathSync(fs.mkdtempSync(path.join(os.homedir(), 'spaci-e2e-wt-')));
   try {
-    const genv = { ...process.env, GIT_AUTHOR_NAME: 'Spaci E2E', GIT_AUTHOR_EMAIL: 'e2e@example.com', GIT_COMMITTER_NAME: 'Spaci E2E', GIT_COMMITTER_EMAIL: 'e2e@example.com' };
+    // Spaci never offers a worktree touched or created within the hour, so
+    // the fixture is dated three hours back: commits and reflogs through the
+    // git dates, files and folders through their times below.
+    const past = new Date(Date.now() - 3 * 3600 * 1000);
+    const gdate = Math.floor(past.getTime() / 1000) + ' +0000';
+    const genv = { ...process.env, GIT_AUTHOR_NAME: 'Spaci E2E', GIT_AUTHOR_EMAIL: 'e2e@example.com', GIT_COMMITTER_NAME: 'Spaci E2E', GIT_COMMITTER_EMAIL: 'e2e@example.com', GIT_AUTHOR_DATE: gdate, GIT_COMMITTER_DATE: gdate };
+    const backdate = (d) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) backdate(p);
+        if (!e.isSymbolicLink()) fs.utimesSync(p, past, past);
+      }
+      fs.utimesSync(d, past, past);
+    };
     const git = (cwd, ...a) => execFileSync('git', ['-C', cwd, '-c', 'init.defaultBranch=main', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...a], { env: genv, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
     const repo = path.join(wroot, 'shop');
     fs.mkdirSync(path.join(repo, 'web'), { recursive: true });
@@ -131,6 +144,7 @@ try {
     fs.writeFileSync(path.join(wt('done'), 'web', 'node_modules', 'dep', 'index.js'), 'x'.repeat(64 * 1024));
     fs.writeFileSync(path.join(wt('wip'), 'notes.txt'), 'not committed');
     fs.rmSync(wt('gone'), { recursive: true, force: true });
+    backdate(wroot);
 
     const scan = await evalIn(`return await window.api.scanProjects(${JSON.stringify(wroot)})`);
     const recs = (scan?.projects || []).filter((p) => p.repo);
@@ -163,7 +177,10 @@ try {
     const hist = await evalIn('return await window.api.historyGet()');
     const he = (hist || []).find((h) => h.scope === 'worktrees');
     check('history logs the removal with a git worktree add hint', !!he && he.items.some((i) => i.outcome === 'removed' && /^git worktree add /.test(i.restoreHint || '')));
-    const pr = await evalIn(`return await window.api.pruneWorktrees(${JSON.stringify(rec?.path)})`);
+    const pruneArgs = JSON.stringify(rec?.path) + ', ' + JSON.stringify([by('gone')?.path, by('wip')?.path]);
+    const unconfirmed = await evalIn(`return await window.api.pruneWorktrees(${pruneArgs}, {})`);
+    check('clearing a missing worktree record needs a confirm', unconfirmed?.ok === false && /prunable/.test(git(repo, 'worktree', 'list', '--porcelain')), JSON.stringify(unconfirmed));
+    const pr = await evalIn(`return await window.api.pruneWorktrees(${pruneArgs}, { confirmed: true })`);
     const listed = git(repo, 'worktree', 'list', '--porcelain');
     check('prune clears the missing worktree only', pr?.ok === true && pr.pruned === 1 && !/prunable/.test(listed) && fs.existsSync(wt('wip')), JSON.stringify(pr));
   } catch (e) {
