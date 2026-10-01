@@ -319,7 +319,7 @@ async function computeDocker(projects, options = {}) {
 
 /** Projects worth keeping: real artifacts on disk, or storage held in Docker. */
 function keepProject(p) {
-  return Boolean(p.items.length || (p.docker && p.docker.usage));
+  return Boolean(p.items.length || (p.docker && p.docker.usage) || (p.repo && p.repo.worktrees && p.repo.worktrees.length));
 }
 
 function updateTrayTitle() {
@@ -1238,6 +1238,128 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
   }
 });
 
+// ---------- git worktrees ----------
+// Removing a linked worktree is `git worktree remove` (never --force), run by
+// the worker after it re-verifies the worktree from scratch: still listed by
+// git, clean, unlocked, nothing nested inside, merged or pushed. Tier B: the
+// renderer must have shown a confirm naming each worktree (meta.confirmed),
+// and only worktrees from the last scan are accepted. The branch is kept.
+const repoSummary = require('./repo-summary');
+
+function sendCacheUpdated() {
+  if (win && !win.isDestroyed()) win.webContents.send('cache:updated', { scannedAt: cache.scannedAt });
+}
+
+/** Replace repo records in the cache after worktrees went away. */
+function dropWorktreesFromCache(byMain) {
+  const updated = [];
+  cache.projects = (cache.projects || []).map((p) => {
+    if (!p || !p.repo) return p;
+    const gone = byMain.get(cleanGuard.keyOf(p.repo.main || p.path));
+    if (!gone || !gone.length) return p;
+    const next = repoSummary.dropWorktrees(p, gone);
+    updated.push(next);
+    return next;
+  }).filter((p) => !p || keepProject(p));
+  return updated;
+}
+
+// api.removeWorktrees([{ path }], { confirmed, label }) -> { ok, freed,
+// removed: [{ path, branch, bytes }], refused: [{ path, reason }],
+// failed: [{ path, error }], historyId, projects: [updated repo records] }.
+ipcMain.handle('worktrees:remove', async (_e, jobs, meta) => {
+  const m = meta && typeof meta === 'object' ? meta : {};
+  const seen = new Set();
+  const list = (Array.isArray(jobs) ? jobs : []).filter((j) => {
+    if (!j || typeof j.path !== 'string' || !j.path) return false;
+    const k = cleanGuard.keyOf(j.path);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).map((j) => ({ path: j.path }));
+  const planCtx = cleanPlan.buildPlanContext({ targetIndex: TARGET_INDEX, projects: cache.projects || [] });
+  const gate = cleanPlan.gateJobs(list, planCtx, m.confirmed === true);
+  const refused = gate.refused.map((r) => ({ path: r.path, reason: r.reason }));
+  const todo = [];
+  for (const j of gate.pass) {
+    const c = cleanPlan.classifyJob(j.path, planCtx);
+    if (c.kind !== 'worktree' || !c.project) {
+      refused.push({ path: j.path, reason: 'Spaci did not find this worktree in a scan, so it left it alone. Scan again and retry.' });
+      continue;
+    }
+    todo.push({ path: j.path, main: c.project });
+  }
+  if (!todo.length) return { ok: true, freed: 0, removed: [], refused, failed: [], historyId: null, projects: [] };
+
+  const historyId = newHistoryId();
+  const started = { id: historyId, at: Date.now(), scope: 'worktrees', label: typeof m.label === 'string' && m.label ? m.label : (todo.length === 1 ? 'Git worktree' : todo.length + ' git worktrees'), requested: list.length };
+  const refusedItems = refused.map((r) => ({ path: r.path, kind: 'other', reversible: 'none', reason: r.reason, bytes: 0 }));
+  putHistory(historyLog.startedEntry({ ...started, refused: refusedItems, pending: todo.map((t) => ({ path: t.path, kind: 'other', reversible: 'rebuild', project: t.main })) }));
+
+  const removed = [];
+  const failed = [];
+  const items = refusedItems.map((r) => ({ ...r, outcome: 'refused' }));
+  const byMain = new Map();
+  try {
+    // One at a time: each removal re-verifies against git's current state.
+    for (const t of todo) {
+      let r;
+      try { r = await work('worktreeRemove', [t.main, t.path]); } catch (err) { r = { ok: false, error: (err && err.message) || 'The removal did not run.' }; }
+      if (r && r.ok) {
+        removed.push({ path: t.path, branch: r.branch || null, bytes: r.bytes || 0 });
+        items.push({ path: t.path, kind: 'other', outcome: 'removed', bytes: r.bytes || 0, reversible: 'rebuild', project: t.main, restoreHint: restoreHints.worktreeRestoreHint({ ...(r.wt || {}), path: t.path }) });
+        const k = cleanGuard.keyOf(t.main);
+        if (!byMain.has(k)) byMain.set(k, []);
+        byMain.get(k).push(t.path);
+      } else if (r && r.refused) {
+        const reason = (r.reasons || []).join(' ') || 'It no longer qualifies for removal.';
+        refused.push({ path: t.path, reason });
+        items.push({ path: t.path, kind: 'other', outcome: 'refused', bytes: 0, reversible: 'none', project: t.main, reason });
+      } else {
+        const error = (r && r.error) || 'git could not remove it.';
+        failed.push({ path: t.path, error });
+        items.push({ path: t.path, kind: 'other', outcome: 'failed', bytes: 0, reversible: 'none', project: t.main, reason: error });
+      }
+    }
+  } finally {
+    putHistory(historyLog.finishedEntry({ ...started, finishedAt: Date.now(), status: 'done', items }));
+  }
+  const projects = dropWorktreesFromCache(byMain);
+  writeCache();
+  sendCacheUpdated();
+  return { ok: true, freed: removed.reduce((s, r) => s + r.bytes, 0), removed, refused, failed, historyId, projects };
+});
+
+// api.pruneWorktrees(mainPath) -> { ok, pruned: n, projects }. `git worktree
+// prune` only clears git's records of worktrees whose folder is already gone
+// (metadata, tier A), and only for a repository from the last scan.
+ipcMain.handle('worktrees:prune', async (_e, mainPath) => {
+  if (typeof mainPath !== 'string' || !mainPath) return { ok: false, error: 'No repository given.' };
+  const key = cleanGuard.keyOf(mainPath);
+  const rec = (cache.projects || []).find((p) => p && p.repo && cleanGuard.keyOf(p.repo.main || p.path) === key);
+  if (!rec) return { ok: false, error: 'Spaci did not find this repository in a scan. Scan again and retry.' };
+  const missing = (rec.repo.worktrees || []).filter((w) => !w.exists);
+  if (!missing.length) return { ok: true, pruned: 0, projects: [] };
+  let r;
+  try { r = await work('worktreePrune', [rec.repo.main || rec.path]); } catch (err) { r = { ok: false, error: err && err.message }; }
+  if (!r || !r.ok) return { ok: false, error: (r && r.error) || 'git could not prune.' };
+  const still = Array.isArray(r.remaining) ? new Set(r.remaining.map((p) => cleanGuard.keyOf(p))) : null;
+  const gone = missing.filter((w) => still ? !still.has(cleanGuard.keyOf(w.path)) : true).map((w) => w.path);
+  if (gone.length) {
+    const at = Date.now();
+    const hint = 'Only git\'s record was cleared; the folder was already gone. The branch is kept.';
+    putHistory(historyLog.finishedEntry({
+      id: newHistoryId(), at, finishedAt: at, status: 'done', scope: 'worktrees',
+      label: 'Missing worktrees pruned in ' + rec.name, requested: missing.length,
+      items: gone.map((p) => ({ path: p, kind: 'other', outcome: 'removed', bytes: 0, reversible: 'none', project: rec.repo.main || rec.path, restoreHint: hint })),
+    }));
+  }
+  const projects = dropWorktreesFromCache(new Map([[key, gone]]));
+  writeCache();
+  sendCacheUpdated();
+  return { ok: true, pruned: gone.length, projects };
+});
+
 // Savings are what each action really removes (recommendations.js, issue #13).
 ipcMain.handle('recommendations', (_e, payload) => {
   const { projects, sysTargets } = payload && typeof payload === 'object' ? payload : {};
@@ -1255,6 +1377,10 @@ function openablePaths() {
   for (const p of cache.projects || []) {
     if (p && p.path) out.push(p.path);
     for (const it of (p && p.items) || []) if (it && it.path) out.push(it.path);
+    // Repository records: their packages and existing worktrees can be revealed.
+    const r = p && p.repo;
+    for (const pk of (r && r.packages) || []) if (pk && pk.path) out.push(pk.path);
+    for (const w of (r && r.worktrees) || []) if (w && w.path && w.exists) out.push(w.path);
   }
   out.push(...TARGET_INDEX.keys(), ...lastLargeFiles, ...lastTopChildren);
   for (const t of cache.system || []) out.push(...((t && t.existingPaths) || []));

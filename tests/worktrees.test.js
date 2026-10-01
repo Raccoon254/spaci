@@ -17,6 +17,8 @@ const wtx = require('../src/worktrees');
 const repoGroup = require('../src/repo-group');
 const cleanTiers = require('../src/clean-tiers');
 const cleanPlan = require('../src/clean-plan');
+const repoSummary = require('../src/repo-summary');
+const restoreHints = require('../src/restore-hints');
 
 const GIT_ENV = {
   ...process.env,
@@ -117,9 +119,9 @@ test('removalEligibility: clean, unlocked and merged or pushed only', () => {
 });
 
 test('restoreHint names the kept branch, or the commit when detached', () => {
-  assert.equal(wtx.restoreHint({ path: '/r/wt', branch: 'feat/x' }), 'git worktree add /r/wt feat/x');
-  assert.equal(wtx.restoreHint({ path: '/r/my wt', branch: 'b' }), 'git worktree add "/r/my wt" b');
-  assert.equal(wtx.restoreHint({ path: '/r/wt', detached: true, head: 'abc' }), 'git worktree add --detach /r/wt abc');
+  assert.equal(restoreHints.worktreeRestoreHint({ path: '/r/wt', branch: 'feat/x' }), 'git worktree add /r/wt feat/x');
+  assert.equal(restoreHints.worktreeRestoreHint({ path: '/r/my wt', branch: 'b' }), 'git worktree add "/r/my wt" b');
+  assert.equal(restoreHints.worktreeRestoreHint({ path: '/r/wt', detached: true, head: 'abc' }), 'git worktree add --detach /r/wt abc');
 });
 
 test('packageOf picks the longest package folder', () => {
@@ -384,6 +386,22 @@ test('a parent repository that tracks nothing in a project does not swallow it',
   assert.equal(recordAt(projects, root), undefined);
 });
 
+test('dropWorktrees takes a worktree and its items out and recomputes every figure', async () => {
+  const { projects } = await scanFixture();
+  const mono = recordAt(projects, F.mono);
+  const target = wtAt(mono, F.wt('merged'));
+  const nestedOne = wtAt(mono, F.agent);
+  const next = repoSummary.dropWorktrees(mono, [target.path, nestedOne.path]);
+  assert.equal(next.repo.worktrees.length, mono.repo.worktrees.length - 2);
+  assert.ok(!next.items.some((i) => i.checkout === target.path || i.checkout === nestedOne.path));
+  assert.ok(mono.items.some((i) => i.checkout === target.path), 'items carry the worktree path as listed');
+  assert.equal(next.repo.removable.count, mono.repo.removable.count - 2);
+  assert.equal(next.repo.totalBytes, mono.repo.totalBytes - target.size - nestedOne.size);
+  assert.equal(next.repo.mainSize, mono.repo.mainSize, 'the main checkout itself did not change');
+  assert.ok(next.cleanableSize < mono.cleanableSize);
+  assert.equal(mono.repo.worktrees.length, 11, 'the original record is untouched');
+});
+
 // ---------------------------------------------------------------------------
 // Remove and prune (runs last: it changes the fixture)
 // ---------------------------------------------------------------------------
@@ -426,7 +444,7 @@ test('remove deletes a merged, clean worktree and keeps its branch', async () =>
   assert.equal(r.ok, true, JSON.stringify(r.reasons || r.error));
   assert.equal(fs.existsSync(target), false);
   assert.equal(branchExists('feat-wtofwt'), true, 'the branch is kept');
-  assert.equal(wtx.restoreHint(r), `git worktree add ${target} feat-wtofwt`);
+  assert.equal(restoreHints.worktreeRestoreHint(r), `git worktree add ${target} feat-wtofwt`);
   const listed = wtx.parseWorktreeList(git(F.mono, 'worktree', 'list', '--porcelain'));
   assert.ok(!listed.some((e) => wtx.pathKey(e.path) === wtx.pathKey(target)));
   // Build output inside it went with it, ignored files included.
@@ -436,7 +454,7 @@ test('remove deletes a merged, clean worktree and keeps its branch', async () =>
   assert.equal(branchExists('feat-merged'), true);
   const d = await wtx.removeWorktree(F.mono, F.wt('detached'), opts);
   assert.equal(d.ok, true);
-  assert.match(wtx.restoreHint(d), /^git worktree add --detach /);
+  assert.match(restoreHints.worktreeRestoreHint(d), /^git worktree add --detach /);
 });
 
 test('prune clears only worktrees whose folder is gone', async () => {

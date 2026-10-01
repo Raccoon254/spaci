@@ -22,6 +22,7 @@
 const path = require('path');
 const wtx = require('./worktrees');
 const { projectFigures } = require('./reclaimable');
+const { summarizeRepo, dropWorktrees } = require('./repo-summary');
 
 const GIT_ARGV_BYTES = process.platform === 'win32' ? 24 * 1024 : 96 * 1024;
 
@@ -210,11 +211,10 @@ function buildRecord(g, desc, ctx = {}) {
     w.eligibility = wtx.removalEligibility(w);
   }
   worktrees.sort((a, b) => (b.size || 0) - (a.size || 0) || String(a.path).localeCompare(String(b.path)));
-
-  const existing = worktrees.filter((w) => w.exists);
-  const worktreeBytes = existing.reduce((s, w) => s + bytes(w.size), 0);
-  const nestedWorktreeBytes = existing.filter((w) => w.nested).reduce((s, w) => s + bytes(w.size), 0);
-  const removableList = worktrees.filter((w) => w.eligibility && w.eligibility.ok);
+  // Items name their worktree by the same path string the worktree list uses,
+  // so later updates can match them without resolving real paths again.
+  const wtByKey = new Map(worktrees.map((w) => [wtx.pathKey(w.path), w.path]));
+  for (const it of items) { const p = wtByKey.get(wtx.pathKey(it.checkout)); if (p) it.checkout = p; }
   const mainSize = typeof ctx.mainSize === 'number' && ctx.mainSize >= 0 ? ctx.mainSize : null;
 
   const types = mergeTypes(allMembers);
@@ -247,23 +247,11 @@ function buildRecord(g, desc, ctx = {}) {
       listError: (desc && desc.error) || null,
       packages,
       worktrees,
-      worktreeCount: worktrees.length,
-      worktreeBytes,
-      nestedWorktreeBytes,
-      externalWorktreeBytes: worktreeBytes - nestedWorktreeBytes,
-      // du of the main folder counts nested worktrees (.claude/worktrees) once
-      // already; the total adds only the worktrees that live elsewhere.
-      mainSize: mainSize == null ? null : Math.max(0, mainSize - nestedWorktreeBytes),
-      totalBytes: mainSize == null ? null : mainSize + (worktreeBytes - nestedWorktreeBytes),
-      removable: {
-        count: removableList.length,
-        bytes: removableList.reduce((s, w) => s + bytes(w.size), 0),
-        // What removal frees beyond the build output already counted as Safe.
-        extraBytes: removableList.reduce((s, w) => s + Math.max(0, bytes(w.size) - bytes(w.artifactBytes)), 0),
-      },
-      missing: worktrees.filter((w) => !w.exists).length,
+      // du of the main folder; it already counts worktrees nested inside it.
+      mainDu: mainSize,
     },
   };
+  summarizeRepo(record);
   const dockerDirs = withDocker.map((m) => m.path).filter((p) => p !== record.path);
   if (dockerDirs.length) record.dockerDirs = dockerDirs;
   if (allMembers.length && allMembers.every((m) => m.dockerOnly) && !worktrees.length) record.dockerOnly = true;
@@ -365,4 +353,4 @@ async function consolidate(raw, ctx = {}) {
   };
 }
 
-module.exports = { consolidate, buildRecord, trackedFolders, packageOf, mergeTypes };
+module.exports = { consolidate, buildRecord, summarizeRepo, dropWorktrees, trackedFolders, packageOf, mergeTypes };

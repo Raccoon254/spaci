@@ -26,6 +26,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const { execFile } = require('child_process');
+const { worktreeRestoreHint } = require('./restore-hints');
 
 const GIT_TIMEOUT = 15000;
 const GIT_MAX_BUFFER = 32 * 1024 * 1024;
@@ -264,14 +265,13 @@ const HARMLESS_IGNORED = new Set([
 // expo-env.d.ts, icons.generated.ts).
 const HARMLESS_IGNORED_RE = /(\.(log|tsbuildinfo|pyc|pyo)$)|(-env\.d\.ts$)|(\.generated\.[a-z0-9]+$)/i;
 
-let artifactNames = null;
-function artifactNameSet() {
-  if (!artifactNames) {
-    // Lazy: scanner requires this module, so its rules are read on first use.
-    try { artifactNames = new Set(require('./scanner').CLEAN_RULES.map((r) => r.match)); } catch { artifactNames = new Set(['node_modules']); }
-  }
-  return artifactNames;
+// The scanner's artifact folder names (node_modules, dist, .next...). The
+// scanner hands them over when it loads, so this module never requires it.
+let artifactNames = new Set(['node_modules']);
+function setArtifactNames(names) {
+  if (names && typeof names[Symbol.iterator] === 'function') artifactNames = new Set(names);
 }
+function artifactNameSet() { return artifactNames; }
 
 /** Ignored paths (from status) that are not known build output. */
 function userIgnored(paths) {
@@ -513,14 +513,6 @@ async function describeRepo(cwd, opts = {}) {
   };
 }
 
-/** Restore line for History: the branch is kept, so this brings the files back. */
-function restoreHint(wt) {
-  const q = (s) => (/[\s"'$`\\]/.test(s) ? JSON.stringify(s) : s);
-  if (wt && wt.branch && !wt.detached) return `git worktree add ${q(wt.path)} ${q(wt.branch)}`;
-  if (wt && wt.head) return `git worktree add --detach ${q(wt.path)} ${wt.head}`;
-  return 'Recreate it with git worktree add.';
-}
-
 /** JS fallback: any `.git` entry below `dir`, other than its own top-level one. */
 async function walkForNestedGit(dir, signal) {
   const queue = [dir];
@@ -612,14 +604,16 @@ async function pruneWorktrees(cwd, opts = {}) {
   if (!planned.length) return { ok: true, pruned: [] };
   const r = await runGit(cwd, ['worktree', 'prune', '--verbose'], { signal: opts.signal });
   if (r.err) return { ok: false, error: 'git could not prune', pruned: [] };
-  return { ok: true, pruned: lines(r) };
+  // What git still lists afterwards, so the caller can drop exactly what went.
+  const after = await listWorktrees(cwd, opts.signal);
+  return { ok: true, pruned: lines(r), remaining: after.entries ? after.entries.map((e) => path.resolve(e.path)) : null };
 }
 
 module.exports = {
   CREATORS, HARMLESS_IGNORED,
   parseGitFile, parseWorktreeList, parseStatusV2, coreWorktree, userIgnored,
-  likelyCreator, removalEligibility, restoreHint,
+  likelyCreator, removalEligibility, restoreHint: worktreeRestoreHint,
   readGitEntry, findCheckout, hasLinkedWorktrees, defaultRefs, isMergedInto, listWorktrees,
   inspectWorktree, describeRepo, reverify, removeWorktree, pruneWorktrees, nestedGitInside,
-  pathKey, realOr, isInsideKey, runGit,
+  pathKey, realOr, isInsideKey, runGit, setArtifactNames,
 };

@@ -89,6 +89,8 @@ const CLEAN_RULES = [
   { match: '.terraform',     kind: 'box',     safe: true,  note: 'Terraform provider cache.' },
 ];
 const CLEAN_NAMES = new Set(CLEAN_RULES.map((r) => r.match));
+// Ignored files inside a worktree that are build output do not block its removal.
+require('./worktrees').setArtifactNames(CLEAN_NAMES);
 const CLEAN_BY_NAME = Object.fromEntries(CLEAN_RULES.map((r) => [r.match, r]));
 
 /** Directories we never descend into while *detecting* projects. */

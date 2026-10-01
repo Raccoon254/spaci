@@ -27,6 +27,7 @@ const LOADERS = {
   diskbreakdown: () => require('./diskbreakdown'),
   largefiles: () => require('./largefiles'),
   aitools: () => require('./aitools'),
+  worktrees: () => require('./worktrees'),
 };
 
 /**
@@ -190,6 +191,15 @@ function buildOps(mod) {
     scanLargeFiles: (ctx, root, minBytes) => mod('largefiles').scanLargeFiles(root, minBytes, ctx.progress, ctx.signal),
 
     aiToolStatus: (ctx) => mod('aitools').aiToolStatus(),
+
+    // Git worktrees: removal re-verifies from scratch and never forces.
+    worktreeRemove: (ctx, mainPath, wtPath) => {
+      const scanner = mod('scanner'); // also hands its artifact names to worktrees
+      return mod('worktrees').removeWorktree(String(mainPath), String(wtPath), {
+        signal: ctx.signal, dirSize: (d, s) => scanner.dirSize(d, s),
+      });
+    },
+    worktreePrune: (ctx, mainPath) => mod('worktrees').pruneWorktrees(String(mainPath), { signal: ctx.signal }),
 
     // Generic routing for Docker: any allowlisted export, called by name.
     docker: async (ctx, name, args = []) => {

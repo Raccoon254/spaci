@@ -53,6 +53,8 @@ contextBridge.exposeInMainWorld('api', {
 
   // cleaning
   clean: (jobs, meta) => ipcRenderer.invoke('clean', jobs, meta),
+  removeWorktrees: (jobs, meta) => ipcRenderer.invoke('worktrees:remove', jobs, meta),
+  pruneWorktrees: (mainPath) => ipcRenderer.invoke('worktrees:prune', mainPath),
 
   // menu bar widget
   openMain: (route) => ipcRenderer.invoke('win:show', route),

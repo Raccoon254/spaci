@@ -120,7 +120,16 @@ function dockerRestoreHint(kind) {
   return kind === 'build-cache' || kind === 'dangling-images' ? DOCKER_HINT : null;
 }
 
+/** Restore line for History: the branch is kept, so this brings the files back. */
+function worktreeRestoreHint(wt) {
+  const q = (s) => (/[\s"'$`\\]/.test(s) ? JSON.stringify(s) : s);
+  if (wt && wt.branch && !wt.detached) return `git worktree add ${q(wt.path)} ${q(wt.branch)}`;
+  if (wt && wt.head) return `git worktree add --detach ${q(wt.path)} ${wt.head}`;
+  return 'Recreate it with git worktree add.';
+}
+
 module.exports = {
+  worktreeRestoreHint,
   SYSTEM_CACHE_HINT, TRASH_HINT, DOCKER_HINT, DOCKER_IMAGES_HINT, NODE_LOCKFILES,
   artifactRestoreHint, systemRestoreHint, dockerRestoreHint, baseName,
 };

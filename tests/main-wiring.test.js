@@ -431,7 +431,7 @@ const SCAN_MODULES = ['scanner.js', 'languages.js', 'diskbreakdown.js', 'largefi
 // process loads may reach them, directly or through another module. (aitools.js
 // is reachable through system.js for its target tables, and docker.js is loaded
 // for PRUNE_KINDS; both are covered by the poisoned-call checks instead.)
-const WALK_MODULES = ['scanner.js', 'languages.js', 'diskbreakdown.js', 'largefiles.js', 'scan-worker-ops.js'].map((f) => path.join(SRC, f));
+const WALK_MODULES = ['scanner.js', 'languages.js', 'diskbreakdown.js', 'largefiles.js', 'scan-worker-ops.js', 'worktrees.js', 'repo-group.js'].map((f) => path.join(SRC, f));
 
 /** Static require graph of src: every './x' require reachable from `entry`. */
 function reachable(entry) {
@@ -1261,3 +1261,74 @@ test('clean tiers and auto-clean IPC: bridged, tiers trust main, approve and und
   } finally { m.cleanup(); }
 });
 // ---- end clean tiers and auto-clean ----
+
+// ---------- git worktrees ----------
+
+test('worktrees: remove is confirm-only, re-verified in the worker, logged with a restore hint; prune clears missing ones', async () => {
+  const { execFileSync } = require('node:child_process');
+  const env = { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' };
+  const git = (cwd, ...a) => execFileSync('git', ['-C', cwd, '-c', 'init.defaultBranch=main', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', ...a], { env, stdio: 'ignore' });
+  const dir = tmpTree('spaci-wtmain-');
+  const repo = path.join(dir, 'repo');
+  fs.mkdirSync(repo);
+  fs.writeFileSync(path.join(repo, 'package.json'), '{}');
+  fs.writeFileSync(path.join(repo, '.gitignore'), 'node_modules/\n');
+  git(repo, 'init', '-q'); git(repo, 'add', '-A'); git(repo, 'commit', '-qm', 'init');
+  const done = path.join(dir, 'repo-worktrees', 'done');
+  const wip = path.join(dir, 'repo-worktrees', 'wip');
+  const gone = path.join(dir, 'repo-worktrees', 'gone');
+  git(repo, 'worktree', 'add', '-q', '-b', 'done', done);
+  git(repo, 'worktree', 'add', '-q', '-b', 'wip', wip);
+  git(repo, 'worktree', 'add', '-q', '-b', 'gone', gone);
+  fs.mkdirSync(path.join(done, 'node_modules', 'x'), { recursive: true });
+  fs.writeFileSync(path.join(done, 'node_modules', 'x', 'i.js'), 'x'.repeat(4096));
+  fs.writeFileSync(path.join(wip, 'notes.txt'), 'not committed');
+  fs.rmSync(gone, { recursive: true, force: true });
+  const realScanner = require('../src/scanner');
+  const { projects } = await realScanner.scanProjects(dir, null, new AbortController().signal);
+  const rec = projects.find((p) => p.repo && p.repo.worktrees.length);
+  assert.ok(rec, 'one repository record with worktrees');
+  assert.equal(rec.repo.worktrees.length, 3);
+
+  const m = loadMain();
+  try {
+    await scanInto(m, projects);
+    const doneWt = rec.repo.worktrees.find((w) => w.branch === 'done');
+    const wipWt = rec.repo.worktrees.find((w) => w.branch === 'wip');
+
+    const unconfirmed = await m.handlers['worktrees:remove'](cleanEvent, [{ path: doneWt.path }], {});
+    assert.deepEqual(unconfirmed.refused.map((r) => r.reason), ['needs-confirmation']);
+    assert.ok(fs.existsSync(done), 'nothing happens without the confirm');
+
+    const unknown = await m.handlers['worktrees:remove'](cleanEvent, [{ path: path.join(dir, 'elsewhere') }, { path: rec.items[0].path }], { confirmed: true });
+    assert.equal(unknown.refused.length, 2);
+    assert.ok(unknown.refused.every((r) => /did not find this worktree/.test(r.reason)), 'only worktrees from the scan, never an artifact path');
+
+    const res = await m.handlers['worktrees:remove'](cleanEvent, [{ path: doneWt.path }, { path: wipWt.path }], { confirmed: true });
+    assert.equal(res.ok, true);
+    assert.deepEqual(res.removed.map((r) => r.branch), ['done']);
+    assert.equal(fs.existsSync(done), false);
+    assert.equal(fs.existsSync(path.join(wip, 'notes.txt')), true, 'the dirty worktree is untouched');
+    assert.match(res.refused.find((r) => r.path === wipWt.path).reason, /untracked/);
+    const [entry] = readHistoryFile(m);
+    assert.deepEqual([entry.v, entry.scope, entry.count, entry.refusedCount], [2, 'worktrees', 1, 1]);
+    const item = entry.items.find((i) => i.outcome === 'removed');
+    assert.equal(item.restoreHint, `git worktree add ${doneWt.path} done`);
+    assert.equal(item.reversible, 'rebuild');
+
+    const cached = m.handlers['cache:get']().projects.find((p) => p.path === rec.path);
+    assert.equal(cached.repo.worktrees.length, 2);
+    assert.ok(!cached.items.some((i) => i.checkout === doneWt.path), 'its items left the cache with it');
+    assert.equal(res.projects[0].repo.worktrees.length, 2);
+
+    const pr = await m.handlers['worktrees:prune'](cleanEvent, rec.path);
+    assert.deepEqual([pr.ok, pr.pruned], [true, 1]);
+    const after = m.handlers['cache:get']().projects.find((p) => p.path === rec.path);
+    assert.equal(after.repo.worktrees.length, 1);
+    assert.equal(after.repo.missing, 0);
+    const [pe] = readHistoryFile(m);
+    assert.equal(pe.scope, 'worktrees');
+    const bad = await m.handlers['worktrees:prune'](cleanEvent, '/not/scanned');
+    assert.equal(bad.ok, false);
+  } finally { m.cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
