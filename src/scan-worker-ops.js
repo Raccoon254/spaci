@@ -27,6 +27,10 @@ const LOADERS = {
   diskbreakdown: () => require('./diskbreakdown'),
   largefiles: () => require('./largefiles'),
   aitools: () => require('./aitools'),
+  // ---- ai models and dev tools ----
+  devtools: () => require('./devtools'),
+  cleaner: () => require('./cleaner'),
+  // ---- end ai models and dev tools ----
 };
 
 /**
@@ -190,6 +194,17 @@ function buildOps(mod) {
     scanLargeFiles: (ctx, root, minBytes) => mod('largefiles').scanLargeFiles(root, minBytes, ctx.progress, ctx.signal),
 
     aiToolStatus: (ctx) => mod('aitools').aiToolStatus(),
+
+    // ---- ai models and dev tools ----
+    // Listing and removal both spawn tools (ollama, simctl, sdkmanager...) and
+    // walk model stores, so they run here. `item` is main's cached copy; the
+    // removal re-detects it before touching anything.
+    devtoolsInventory: (ctx, opts = {}) => mod('devtools').inventory({ projects: Array.isArray(opts && opts.projects) ? opts.projects : [] }),
+    devtoolsRemove: (ctx, item, opts = {}) => mod('devtools').removeItem(item, {
+      projects: Array.isArray(opts && opts.projects) ? opts.projects : [],
+      deletePath: (p, onProgress) => mod('cleaner').deletePath(p, onProgress, ctx.signal),
+    }),
+    // ---- end ai models and dev tools ----
 
     // Generic routing for Docker: any allowlisted export, called by name.
     docker: async (ctx, name, args = []) => {
