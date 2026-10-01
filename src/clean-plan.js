@@ -22,7 +22,7 @@ const NEEDS_CONFIRMATION = 'needs-confirmation';
  * projects: the last project scan ({ path, items: [{ path }] }).
  * largeFiles: paths from the last large-file scan.
  */
-function buildPlanContext({ targetIndex = new Map(), projects = [], largeFiles = [] } = {}) {
+function buildPlanContext({ targetIndex = new Map(), projects = [], largeFiles = [], worktrees = null } = {}) {
   const targets = new Map();
   for (const [p, t] of targetIndex) targets.set(keyOf(p), t);
   const projectOf = new Map();
@@ -33,7 +33,15 @@ function buildPlanContext({ targetIndex = new Map(), projects = [], largeFiles =
   }
   const large = new Set();
   for (const p of largeFiles || []) if (typeof p === 'string' && p) large.add(keyOf(p));
-  return { targets, projectOf, large };
+  // Linked git worktrees: removed only by `git worktree remove`, after a
+  // confirm that names each one. Taken from the scan's repository records
+  // unless the caller lists them.
+  const worktreeOf = new Map();
+  const wts = Array.isArray(worktrees) ? worktrees
+    : (projects || []).flatMap((proj) => ((proj && proj.repo && Array.isArray(proj.repo.worktrees)) ? proj.repo.worktrees : [])
+      .map((w) => ({ path: w && w.path, main: proj.repo.main || proj.path })));
+  for (const w of wts) if (w && typeof w.path === 'string' && w.path) worktreeOf.set(keyOf(w.path), w.main || null);
+  return { targets, projectOf, large, worktreeOf };
 }
 
 /**
@@ -55,6 +63,9 @@ function classifyJob(p, ctx) {
   }
   if (ctx.large.has(key)) return { kind: 'file', reversible: 'trash', needsConfirmation: true };
   if (ctx.projectOf.has(key)) return { kind: 'artifact', reversible: 'rebuild', project: ctx.projectOf.get(key), needsConfirmation: false };
+  // A whole worktree is never cleaned without the user's yes (tier B), so
+  // nothing unattended (auto-clean) can ever pass this gate with one.
+  if (ctx.worktreeOf && ctx.worktreeOf.has(key)) return { kind: 'worktree', reversible: 'rebuild', project: ctx.worktreeOf.get(key), needsConfirmation: true };
   // Unknown: clean-guard refuses it. Never claim it can be undone.
   return { kind: 'other', reversible: 'none', needsConfirmation: false };
 }
