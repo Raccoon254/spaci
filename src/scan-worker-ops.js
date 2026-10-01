@@ -199,9 +199,13 @@ function buildOps(mod) {
     // Listing and removal both spawn tools (ollama, simctl, sdkmanager...) and
     // walk model stores, so they run here. `item` is main's cached copy; the
     // removal re-detects it before touching anything.
-    devtoolsInventory: (ctx, opts = {}) => mod('devtools').inventory({ projects: Array.isArray(opts && opts.projects) ? opts.projects : [] }),
+    devtoolsInventory: (ctx, opts = {}) => mod('devtools').inventory({
+      projects: Array.isArray(opts && opts.projects) ? opts.projects : [],
+      projectsScanned: Boolean(opts && opts.projectsScanned === true),
+    }),
     devtoolsRemove: (ctx, item, opts = {}) => mod('devtools').removeItem(item, {
       projects: Array.isArray(opts && opts.projects) ? opts.projects : [],
+      projectsScanned: Boolean(opts && opts.projectsScanned === true),
       deletePath: (p, onProgress) => mod('cleaner').deletePath(p, onProgress, ctx.signal),
     }),
     // ---- end ai models and dev tools ----

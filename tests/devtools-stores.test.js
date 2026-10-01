@@ -545,3 +545,85 @@ test('a project .venv (pyvenv.cfg home=) and tool virtualenvs pin the interprete
   assert.match(uk('cpython-3.11.9-linux-x86_64-gnu').blocked, /uv tool virtualenv/);
   assert.equal(uk('cpython-3.12.4-linux-x86_64-gnu').blocked, null);
 });
+
+// ---- pin files and the project scan ------------------------------------------------------
+
+test('r2: rust-toolchain in TOML form, mise.toml and .mise.toml pin their versions', async () => {
+  const home = tmp('h');
+  const nvmDir = path.join(home, '.nvm');
+  for (const v of ['v20.10.0', 'v22.11.0']) write(path.join(nvmDir, 'versions', 'node', v, 'bin', 'node'), 'x');
+  write(path.join(nvmDir, 'alias', 'default'), 'v22.11.0\n');
+  const rh = path.join(home, '.rustup');
+  for (const t of ['1.75.0-aarch64-apple-darwin', 'stable-aarch64-apple-darwin', '1.70.0-aarch64-apple-darwin']) write(path.join(rh, 'toolchains', t, 'bin', 'rustc'), 'x');
+  write(path.join(rh, 'settings.toml'), 'default_toolchain = "stable-aarch64-apple-darwin"\n');
+  const proj2 = tmp('proj2');
+  write(path.join(proj2, 'rust-toolchain'), '[toolchain]\nchannel = "1.75.0"\n');
+  const proj3 = tmp('proj3');
+  write(path.join(proj3, 'mise.toml'), '[env]\nNODE_ENV = "dev"\n[tools]\nnode = "20.10.0"\n');
+  const inv = await devtools.inventory({ only: ['toolchains'], platform: 'darwin', home, env: {}, projects: [proj2, proj3], projectsScanned: true, procs: quietProcs });
+  const nvm = inv.groups.find((x) => x.id === 'nvm');
+  const rust = inv.groups.find((x) => x.id === 'rustup');
+  assert.match(nvm.items.find((i) => i.version === 'v20.10.0').blocked, /Pinned by .*mise\.toml/);
+  assert.match(rust.items.find((i) => i.name === '1.75.0-aarch64-apple-darwin').blocked, /Pinned by .*rust-toolchain/);
+  assert.equal(rust.items.find((i) => i.name === '1.70.0-aarch64-apple-darwin').blocked, null);
+  // The one-line legacy form still works.
+  assert.deepEqual(toolchains.pinsFromFiles({ 'rust-toolchain': 'nightly-2024-01-01\n' }).rust.map((p) => p.spec), ['nightly-2024-01-01']);
+});
+
+test('pin files: mise forms, every .tool-versions fallback, pyproject ranges', () => {
+  const pins = toolchains.pinsFromFiles({
+    '.mise.toml': '[tools]\nnode = ["22", "20.10.0"]\npython = { version = "3.11" }\n"core:rust" = "1.79.0"  # comment\n[settings]\nnode = "99"\n',
+    '.tool-versions': 'nodejs 20.11.1 18.19.0\npython 3.12.4 system\n',
+    'pyproject.toml': '[project]\nname = "x"\nrequires-python = ">=3.10,<3.12"\n[tool.poetry.dependencies]\npython = "^3.9"\nrequests = "*"\n',
+  });
+  assert.deepEqual(pins.node.map((p) => p.spec).sort(), ['18.19.0', '20.10.0', '20.11.1', '22']);
+  assert.deepEqual(pins.python.filter((p) => p.spec).map((p) => p.spec).sort(), ['3.11', '3.12.4']);
+  assert.deepEqual(pins.rust.map((p) => p.spec), ['1.79.0']);
+  assert.deepEqual(pins.python.filter((p) => p.range).map((p) => p.range), ['>=3.10,<3.12', '^3.9']);
+  const sat = toolchains.satisfiesPython;
+  assert.equal(sat('3.11.9', '>=3.10,<3.12'), true);
+  assert.equal(sat('3.12.0', '>=3.10,<3.12'), false);
+  assert.equal(sat('3.13.1', '^3.9'), true);
+  assert.equal(sat('4.0.0', '^3.9'), false);
+  assert.equal(sat('3.10.4', '~=3.10.2'), true);
+  assert.equal(sat('3.11.0', '~=3.10.2'), false);
+  assert.equal(sat('3.10.4', '==3.10.*'), true);
+  assert.equal(sat('3.9.1', '~3.9'), true);
+  assert.equal(sat('3.10.0', '~3.9'), false);
+  assert.equal(sat('3.12.1', '>=3.8 || <2'), true);
+  assert.equal(sat('3.12.1', 'banana'), null);
+});
+
+test('requires-python protects an installed version only when it is the only one that satisfies it', async () => {
+  const home = tmp('h');
+  const root = path.join(home, '.pyenv');
+  for (const v of ['3.9.18', '3.11.9', '3.12.4']) write(path.join(root, 'versions', v, 'bin', 'python'), 'x');
+  const proj = tmp('proj');
+  write(path.join(proj, 'pyproject.toml'), '[project]\nrequires-python = ">=3.10,<3.12"\n');
+  const opts = { only: ['toolchains'], platform: 'linux', home, env: { NVM_DIR: '/nonexistent' }, projects: [proj], projectsScanned: true, procs: quietProcs };
+  let g = (await devtools.inventory(opts)).groups.find((x) => x.id === 'pyenv');
+  assert.match(g.items.find((i) => i.version === '3.11.9').blocked, /only installed version that satisfies >=3\.10,<3\.12/);
+  assert.equal(g.items.find((i) => i.version === '3.9.18').blocked, null);
+  assert.equal(g.items.find((i) => i.version === '3.12.4').blocked, null);
+  // Two versions satisfy it: either may go, the other still does.
+  write(path.join(root, 'versions', '3.10.14', 'bin', 'python'), 'x');
+  g = (await devtools.inventory(opts)).groups.find((x) => x.id === 'pyenv');
+  assert.equal(g.items.find((i) => i.version === '3.11.9').blocked, null);
+  assert.equal(g.items.find((i) => i.version === '3.10.14').blocked, null);
+});
+
+test('no project scan yet: every toolchain version stays, with the reason', async () => {
+  const nvmDir = tmp('nvm');
+  write(path.join(nvmDir, 'versions', 'node', 'v16.0.0', 'bin', 'node'), 'x');
+  const base = { only: ['toolchains'], platform: 'linux', home: tmp('h'), env: { NVM_DIR: nvmDir }, procs: quietProcs };
+  for (const extra of [{}, { projects: [], projectsScanned: false }, { projects: ['/somewhere'], projectsScanned: false }]) {
+    const it = (await devtools.inventory({ ...base, ...extra })).groups.find((g) => g.id === 'nvm').items[0];
+    assert.equal(it.blocked, toolchains.NO_SCAN);
+    const res = await devtools.removeItem({ ...it, blocked: null }, { ...base, ...extra });
+    assert.equal(res.code, 'blocked');
+    assert.ok(fs.existsSync(path.join(nvmDir, 'versions', 'node', 'v16.0.0')));
+  }
+  // A finished scan that found no projects is a real answer: nothing pins it.
+  const it = (await devtools.inventory({ ...base, projects: [], projectsScanned: true })).groups.find((g) => g.id === 'nvm').items[0];
+  assert.equal(it.blocked, null);
+});

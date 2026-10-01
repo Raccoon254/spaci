@@ -5,7 +5,12 @@
  *
  * A version is protected (shown, never deletable) when:
  *   - a scanned project pins it (.nvmrc, .node-version, .python-version,
- *     rust-toolchain(.toml), .tool-versions, package.json engines or volta);
+ *     rust-toolchain(.toml), .tool-versions (asdf), mise.toml / .mise.toml,
+ *     package.json engines or volta). pyproject.toml requires-python (and
+ *     Poetry's python dependency) is a range: an installed version that
+ *     satisfies it is protected when it is the only one that does;
+ *   - Spaci has not scanned projects yet: then it cannot see any pin, so
+ *     every version is kept until a scan has run;
  *   - it is the tool's default (nvm alias default, pyenv global, rustup
  *     default, fnm default, Volta's default platform), resolved the way the
  *     tool resolves it (nvm: alias chains, lts/<codename>, lts/*, node and
@@ -64,18 +69,31 @@ function pinsFromFiles(files) {
   if (files['.nvmrc']) add('node', files['.nvmrc'].split(/\r?\n/)[0], '.nvmrc');
   if (files['.node-version']) add('node', files['.node-version'].split(/\r?\n/)[0], '.node-version');
   if (files['.python-version']) for (const l of files['.python-version'].split(/\r?\n/)) if (l.trim()) add('python', l, '.python-version');
-  if (files['rust-toolchain']) add('rust', files['rust-toolchain'].split(/\r?\n/)[0], 'rust-toolchain');
+  // The legacy rust-toolchain file is either one channel line or, like
+  // rust-toolchain.toml, TOML with a [toolchain] table.
+  if (files['rust-toolchain']) {
+    const t = files['rust-toolchain'];
+    if (/^\s*\[/.test(t)) { const m = /^\s*channel\s*=\s*["']([^"']+)["']/m.exec(t); if (m) add('rust', m[1], 'rust-toolchain'); }
+    else add('rust', t.split(/\r?\n/)[0], 'rust-toolchain');
+  }
   if (files['rust-toolchain.toml']) {
     const m = /^\s*channel\s*=\s*["']([^"']+)["']/m.exec(files['rust-toolchain.toml']);
     if (m) add('rust', m[1], 'rust-toolchain.toml');
   }
+  const TOOL_LANG = { node: 'node', nodejs: 'node', python: 'python', rust: 'rust' };
   if (files['.tool-versions']) {
     for (const l of files['.tool-versions'].split(/\r?\n/)) {
-      const [tool, ver] = l.trim().split(/\s+/);
-      if (tool === 'nodejs' || tool === 'node') add('node', ver, '.tool-versions');
-      else if (tool === 'python') add('python', ver, '.tool-versions');
-      else if (tool === 'rust') add('rust', ver, '.tool-versions');
+      // "nodejs 20.11.1 18.19.0": every listed version is a fallback asdf may use.
+      const [tool, ...vers] = l.replace(/#.*$/, '').trim().split(/\s+/);
+      if (TOOL_LANG[tool]) for (const v of vers) add(TOOL_LANG[tool], v, '.tool-versions');
     }
+  }
+  for (const f of MISE_FILES) {
+    if (!files[f]) continue;
+    for (const { tool, version } of miseTools(files[f])) if (TOOL_LANG[tool]) add(TOOL_LANG[tool], version, f.replace(/\\/g, '/'));
+  }
+  if (files['pyproject.toml']) {
+    for (const r of pythonRanges(files['pyproject.toml'])) out.python.push({ range: r.range, source: 'pyproject.toml ' + r.key });
   }
   if (files['package.json']) {
     let pkg = null;
@@ -88,7 +106,108 @@ function pinsFromFiles(files) {
 
 // A project's own virtualenv names the interpreter it was made from.
 const VENV_CFGS = [path.join('.venv', 'pyvenv.cfg'), path.join('venv', 'pyvenv.cfg')];
-const PIN_FILES = ['.nvmrc', '.node-version', '.python-version', 'rust-toolchain', 'rust-toolchain.toml', '.tool-versions', 'package.json', ...VENV_CFGS];
+const MISE_FILES = ['mise.toml', '.mise.toml', 'mise.local.toml', '.mise.local.toml', path.join('.config', 'mise.toml'), path.join('.config', 'mise', 'config.toml')];
+const PIN_FILES = ['.nvmrc', '.node-version', '.python-version', 'rust-toolchain', 'rust-toolchain.toml', '.tool-versions', 'package.json', 'pyproject.toml', ...MISE_FILES, ...VENV_CFGS];
+
+/**
+ * [tools] entries of a mise config: node = "20", python = ["3.12", "3.11"],
+ * rust = { version = "1.79" }. Other tables end the section.
+ */
+function miseTools(text) {
+  const out = [];
+  let inTools = false;
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.replace(/\s+#.*$/, '').trim();
+    if (!line || line.startsWith('#')) continue;
+    if (/^\[/.test(line)) { inTools = /^\[\s*tools\s*\]$/.test(line); continue; }
+    if (!inTools) continue;
+    const m = /^["']?([A-Za-z0-9_:@/-]+)["']?\s*=\s*(.+)$/.exec(line);
+    if (!m) continue;
+    const tool = m[1].replace(/^(core|asdf|aqua|ubi|vfox):/, '').toLowerCase();
+    let val = m[2];
+    const tbl = /version\s*=\s*["']([^"']+)["']/.exec(val);
+    if (tbl) val = '"' + tbl[1] + '"';
+    for (const q of val.matchAll(/["']([^"']+)["']/g)) out.push({ tool, version: q[1] });
+  }
+  return out;
+}
+
+/** requires-python (PEP 621) and Poetry's python dependency, as range strings. */
+function pythonRanges(text) {
+  const out = [];
+  const t = String(text || '');
+  const req = /^\s*requires-python\s*=\s*["']([^"']+)["']/m.exec(t);
+  if (req) out.push({ key: 'requires-python', range: req[1] });
+  const poetry = /^\s*\[tool\.poetry\.dependencies\]\s*$([\s\S]*?)(?=^\s*\[|(?![\s\S]))/m.exec(t);
+  if (poetry) {
+    const m = /^\s*python\s*=\s*["']([^"']+)["']/m.exec(poetry[1]);
+    if (m) out.push({ key: 'python', range: m[1] });
+  }
+  return out;
+}
+
+function pyNums(v) {
+  const m = /^v?(\d+(?:\.\d+)*)/.exec(String(v || '').trim());
+  return m ? m[1].split('.').map(Number) : null;
+}
+
+function cmpNums(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] || 0;
+    const y = b[i] || 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  return 0;
+}
+
+/**
+ * Does version satisfy a Python range? PEP 440 clauses (>=, >, <=, <, ==,
+ * ===, !=, ~=, ==X.*) joined by commas, Poetry's ^ and ~, and || between
+ * alternatives. null when the range cannot be read.
+ */
+function satisfiesPython(version, range) {
+  const v = pyNums(version);
+  if (!v) return null;
+  const alts = String(range || '').split('||');
+  let any = false;
+  for (const alt of alts) {
+    const clauses = alt.split(',').map((c) => c.trim()).filter(Boolean);
+    if (!clauses.length) return null;
+    let all = true;
+    for (const c of clauses) {
+      const m = /^(===|==|!=|~=|>=|<=|>|<|\^|~)?\s*v?(\d+(?:\.\d+)*)(\.\*)?$/.exec(c);
+      if (!m) return null;
+      const op = m[1] || '==';
+      const want = m[2].split('.').map(Number);
+      const star = Boolean(m[3]);
+      const prefixEq = () => want.every((n, i) => (v[i] || 0) === n);
+      let ok;
+      if (op === '==' || op === '===') ok = star ? prefixEq() : cmpNums(v, want) === 0;
+      else if (op === '!=') ok = star ? !prefixEq() : cmpNums(v, want) !== 0;
+      else if (op === '>=') ok = cmpNums(v, want) >= 0;
+      else if (op === '>') ok = cmpNums(v, want) > 0;
+      else if (op === '<=') ok = cmpNums(v, want) <= 0;
+      else if (op === '<') ok = cmpNums(v, want) < 0;
+      else if (op === '~=') {
+        if (want.length < 2) return null;
+        ok = cmpNums(v, want) >= 0 && want.slice(0, -1).every((n, i) => (v[i] || 0) === n);
+      } else if (op === '^') {
+        // ^3.10 -> >=3.10,<4; ^0.2 -> >=0.2,<0.3
+        const lead = want.findIndex((n) => n !== 0);
+        const k = lead < 0 ? want.length - 1 : lead;
+        const upper = want.slice(0, k + 1); upper[k] += 1;
+        ok = cmpNums(v, want) >= 0 && cmpNums(v.slice(0, k + 1), upper) < 0;
+      } else { // ~3.10 -> >=3.10,<3.11; ~3 -> >=3,<4
+        const k = want.length >= 2 ? 1 : 0;
+        const upper = want.slice(0, k + 1); upper[k] += 1;
+        ok = cmpNums(v, want) >= 0 && cmpNums(v.slice(0, k + 1), upper) < 0;
+      }
+      if (!ok) { all = false; break; }
+    }
+    if (all) any = true;
+  }
+  return any;
+}
 
 /** The interpreter folder a pyvenv.cfg names (its home= line), or null. */
 function venvHome(text) {
@@ -135,13 +254,20 @@ function insideEither(dir, p) {
 }
 
 /** Map version -> reason it is protected, from pins, defaults and processes. */
-function protections(versions, { pins = [], defaults = [], running = [], dirOf = null }) {
+function protections(versions, { pins = [], defaults = [], running = [], dirOf = null, versionOf = (v) => v }) {
   const reasons = new Map();
   const add = (v, why) => { if (v && !reasons.has(v)) reasons.set(v, why); };
   for (const d of defaults) add(resolveSpec(d.spec, versions), d.why);
   for (const p of pins) {
     const why = 'Pinned by ' + path.basename(p.project) + ' (' + p.source + ')';
     if (p.path) { if (dirOf) for (const v of versions) if (insideEither(dirOf(v), p.path)) add(v, why); continue; }
+    if (p.range) {
+      // A range keeps the one installed version that satisfies it; with
+      // several, any one of them still does.
+      const ok = versions.filter((v) => satisfiesPython(versionOf(v), p.range) === true);
+      if (ok.length === 1) add(ok[0], why + ': the only installed version that satisfies ' + p.range);
+      continue;
+    }
     add(resolveSpec(p.spec, versions), why);
   }
   for (const r of running) add(r.version, r.why);
@@ -159,6 +285,17 @@ function runningFrom(ctx, dirOf, versions) {
   return out;
 }
 
+const NO_SCAN = 'Scan your projects first so Spaci can see which versions they use.';
+
+/**
+ * Whether the project list is a real scan. Main says so explicitly; a caller
+ * that passes no flag counts as scanned only when it passes projects.
+ */
+function projectsScanned(ctx) {
+  if (ctx && ctx.projectsScanned !== undefined) return Boolean(ctx.projectsScanned);
+  return Boolean(ctx && Array.isArray(ctx.projects) && ctx.projects.length);
+}
+
 /** Build one toolchain group from installed version folders. */
 async function versionGroup(ctx, spec) {
   const p = api(ctx);
@@ -169,11 +306,11 @@ async function versionGroup(ctx, spec) {
   const versions = entries.map((e) => e.name);
   const dirOf = (v) => p.join(spec.root, v, spec.sub || '');
   const running = runningFrom(ctx, (v) => p.join(spec.root, v), versions);
-  const prot = protections(versions, { pins: spec.pins || [], defaults: spec.defaults || [], running: running || [], dirOf: (v) => p.join(spec.root, v) });
+  const prot = protections(versions, { pins: spec.pins || [], defaults: spec.defaults || [], running: running || [], dirOf: (v) => p.join(spec.root, v), versionOf: spec.versionOf });
   const extra = spec.blockFor ? await spec.blockFor(versions) : new Map();
   const items = await pool(versions, 4, async (v) => {
     const dir = p.join(spec.root, v);
-    const why = prot.get(v) || extra.get(v) || spec.blockAll || (running === null ? 'Spaci could not check whether a running program uses this version.' : null);
+    const why = prot.get(v) || extra.get(v) || spec.blockAll || (running === null ? 'Spaci could not check whether a running program uses this version.' : null) || (projectsScanned(ctx) ? null : NO_SCAN);
     const pinned = Boolean(prot.get(v)) && /^Pinned|default/i.test(prot.get(v) || '');
     const size = (await dirSize(dir)).bytes;
     const badges = [];
@@ -414,12 +551,13 @@ async function uvPython(ctx, pins) {
   const keys = (await listDir(root)).filter((e) => e.isDirectory() && /^[a-z]+-\d+\.\d+/.test(e.name)).map((e) => e.name);
   const byVersion = keys.map(verOf);
   const pyPins = pins.python.filter((pin) => pin.spec);
-  const pathPins = pins.python.filter((pin) => pin.path);
+  const otherPins = pins.python.filter((pin) => pin.path || pin.range);
   const groups = await versionGroup(ctx, {
     id: 'uv-python', title: 'Python versions (uv)', tech: 'python', root,
     match: (n) => keys.includes(n),
     // Pins name versions; map them onto keys.
-    pins: [...pyPins.map((pin) => ({ ...pin, spec: keys[byVersion.indexOf(resolveSpec(pin.spec, byVersion))] || '__none__' })), ...pathPins],
+    pins: [...pyPins.map((pin) => ({ ...pin, spec: keys[byVersion.indexOf(resolveSpec(pin.spec, byVersion))] || '__none__' })), ...otherPins],
+    versionOf: verOf,
     label: (k) => 'Python ' + verOf(k) + (k.includes('freethreaded') ? ' (free-threaded)' : ''),
     restore: (k) => 'uv python install ' + verOf(k),
     removal: (k, d) => ({ type: 'command', cmd: 'uv', args: ['python', 'uninstall', k], env: { UV_PYTHON_INSTALL_DIR: root }, expectGone: [d], fallback: { type: 'paths', root, paths: [d] } }),
@@ -541,4 +679,4 @@ async function inventory(ctx) {
   return parts.flat();
 }
 
-module.exports = { nvmDefault, pyenvVirtualenvs, pyenvBase, venvHome, toolVenvPins, cleanSpec, pinsFromFiles, projectPins, resolveSpec, protections, uvPythonDir, inventory, nvm, fnm, volta, pyenv, uvPython, conda, rustup, run };
+module.exports = { NO_SCAN, projectsScanned, miseTools, pythonRanges, satisfiesPython, nvmDefault, pyenvVirtualenvs, pyenvBase, venvHome, toolVenvPins, cleanSpec, pinsFromFiles, projectPins, resolveSpec, protections, uvPythonDir, inventory, nvm, fnm, volta, pyenv, uvPython, conda, rustup, run };

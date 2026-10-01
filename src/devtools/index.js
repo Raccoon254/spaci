@@ -66,6 +66,9 @@ function baseContext(options = {}) {
     home: options.home || os.homedir(),
     env: options.env || process.env,
     projects: Array.isArray(options.projects) ? options.projects.filter((p) => typeof p === 'string') : [],
+    // Whether `projects` comes from a finished project scan. Without one no
+    // pin is visible, so toolchain versions stay blocked (toolchains.js).
+    projectsScanned: options.projectsScanned === undefined ? undefined : Boolean(options.projectsScanned),
     exec: options.exec,
     httpJson: options.httpJson,
   };

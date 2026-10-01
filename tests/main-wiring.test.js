@@ -1278,6 +1278,7 @@ test('AI models and dev tools: listing cached, removal confirmed, allowlisted, r
     await flush();
     const inv = await m.handlers['devtools:inventory']({});
     assert.deepEqual(inv.groups.map((g) => g.id), ['ollama']);
+    assert.equal(calls[0][1].projectsScanned, false, 'no project scan yet, so the worker keeps toolchains blocked');
     await m.handlers['devtools:inventory']({});
     assert.equal(calls.filter(([c]) => c === 'inventory').length, 1, 'cached');
     await m.handlers['devtools:inventory']({}, true);

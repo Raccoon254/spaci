@@ -1316,11 +1316,15 @@ const devtoolsIndex = require('./devtools');
 const DEVTOOLS_FRESH_MS = 5 * 60 * 1000;
 let devtoolsCache = null;
 function devtoolsProjects() {
-  return (cache.projects || []).map((p) => p && p.path).filter((p) => typeof p === 'string');
+  return {
+    projects: (cache.projects || []).map((p) => p && p.path).filter((p) => typeof p === 'string'),
+    // No finished project scan means no pin is visible: toolchains stay blocked.
+    projectsScanned: Boolean(cache.kindScannedAt && cache.kindScannedAt.projects > 0),
+  };
 }
 const listDevtools = singleFlight(async () => {
   try {
-    devtoolsCache = await work('devtoolsInventory', [{ projects: devtoolsProjects() }]);
+    devtoolsCache = await work('devtoolsInventory', [devtoolsProjects()]);
   } catch (e) {
     devtoolsCache = { at: Date.now(), groups: [], totals: { ai: 0, dev: 0 }, error: (e && e.message) || 'Could not list AI models and developer tools.' };
   }
@@ -1358,7 +1362,7 @@ ipcMain.handle('devtools:remove', async (_e, id, opts) => {
   const at = Date.now();
   putHistory(devtoolsPolicy.startedEntry({ id: historyId, at, group, item }));
   let result;
-  try { result = await work('devtoolsRemove', [item, { projects: devtoolsProjects() }]); }
+  try { result = await work('devtoolsRemove', [item, devtoolsProjects()]); }
   catch (e) { result = { ok: false, freed: 0, code: 'failed', error: (e && e.message) || 'Removal failed.' }; }
   putHistory(devtoolsPolicy.finishedEntry({ id: historyId, at, finishedAt: Date.now(), group, item, result }));
   devtoolsCache = null; // what the user saw is out of date either way
