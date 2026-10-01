@@ -1,8 +1,34 @@
 [
   {
-    "version": "2.3.0",
+    "version": "2.3.1",
     "date": "2026-10-01",
     "tag": "Latest",
+    "major": false,
+    "summary": "Projects group their worktrees and packages into one row, and Spaci now finds local AI models and old developer tools.",
+    "highlight": "One row per project with its worktrees, plus local AI models and old developer tools",
+    "notes": "changelog/2.3.1.md",
+    "links": [
+      {
+        "label": "Download Spaci",
+        "url": "https://spaci.kentom.co.ke/download"
+      }
+    ],
+    "added": [
+      "Projects group every package and git worktree under their repository, with each worktree branch, changes, merge state, size and likely creator.",
+      "Remove merged or pushed worktrees with no changes, after a confirm; the branch is kept and History shows how to bring each back.",
+      "Local AI models from Ollama, LM Studio, Hugging Face and more, with real sizes and a loaded badge, deleted one at a time.",
+      "Developer tools: unused simulator runtimes, Android images and emulators, old toolchain versions, IDE caches and superseded extensions."
+    ],
+    "improved": [
+      "Project counts and sizes no longer double count worktrees and packages.",
+      "Toolchain versions your projects pin, your defaults and running ones are protected."
+    ],
+    "fixed": []
+  },
+  {
+    "version": "2.3.0",
+    "date": "2026-10-01",
+    "tag": "Feature",
     "major": false,
     "summary": "Clean all developer files in one go, optional auto-clean with a 24 hour undo, and a Storage screen that explains your whole disk.",
     "highlight": "One confirm to clear every developer build folder and cache, and a Storage screen that accounts for your whole disk",
