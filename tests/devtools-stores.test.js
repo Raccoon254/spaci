@@ -483,3 +483,65 @@ test('fnm, Volta and rustup defaults that do not resolve block every version', {
   const inv2 = await devtools.inventory({ only: ['toolchains'], platform: 'darwin', home, env: { FNM_DIR: fnmDir, VOLTA_HOME: volta, RUSTUP_HOME: rh, NVM_DIR: '/nonexistent', PYENV_ROOT: '/nonexistent' }, projectsScanned: true, procs: quietProcs });
   for (const id of ['fnm', 'volta', 'rustup']) for (const it of inv2.groups.find((x) => x.id === id).items) assert.match(it.blocked, /default/, id);
 });
+
+// ---- pyenv virtualenvs and venv pins ---------------------------------------------------
+
+test('r2: a pin naming a pyenv virtualenv protects its base, and a base with virtualenvs is kept', { skip: !canSymlink }, async () => {
+  const home = tmp('h');
+  const root = path.join(home, '.pyenv');
+  write(path.join(root, 'versions', '3.11.4', 'envs', 'myenv', 'lib', 'site.py'), 'x');
+  write(path.join(root, 'versions', '3.12.1', 'bin', 'python'), 'x');
+  write(path.join(root, 'versions', '3.9.18', 'bin', 'python'), 'x');
+  fs.symlinkSync(path.join(root, 'versions', '3.11.4', 'envs', 'myenv'), path.join(root, 'versions', 'myenv'));
+  write(path.join(root, 'version'), '3.12.1\n');
+  const proj = tmp('proj');
+  write(path.join(proj, '.python-version'), 'myenv\n');
+  const inv = await devtools.inventory({ only: ['toolchains'], platform: 'darwin', home, env: { NVM_DIR: '/nonexistent' }, projects: [proj], projectsScanned: true, procs: quietProcs });
+  const g = inv.groups.find((x) => x.id === 'pyenv');
+  const by = (v) => g.items.find((i) => i.version === v);
+  assert.match(by('3.11.4').blocked, /Pinned by .*\.python-version/);
+  assert.match(by('3.12.1').blocked, /global/);
+  assert.equal(by('3.9.18').blocked, null);
+  assert.ok(!by('myenv'), 'the virtualenv link itself is not an item');
+  // Without the pin, the virtualenv alone still keeps its base.
+  const inv2 = await devtools.inventory({ only: ['toolchains'], platform: 'darwin', home, env: { NVM_DIR: '/nonexistent' }, projects: [], projectsScanned: true, procs: quietProcs });
+  assert.match(inv2.groups.find((x) => x.id === 'pyenv').items.find((i) => i.version === '3.11.4').blocked, /virtualenvs \(myenv\)/);
+  // A global naming the virtualenv resolves to the base too.
+  assert.equal(toolchains.pyenvBase('myenv', await toolchains.pyenvVirtualenvs(path.join(root, 'versions'), path.posix)), '3.11.4');
+  assert.equal(toolchains.pyenvBase('3.11.4/envs/other', { base: new Map() }), '3.11.4');
+});
+
+test('pyenv: a global that names nothing installed keeps every version', async () => {
+  const home = tmp('h');
+  const root = path.join(home, '.pyenv');
+  write(path.join(root, 'versions', '3.12.1', 'bin', 'python'), 'x');
+  write(path.join(root, 'version'), 'gone-env\n');
+  const inv = await devtools.inventory({ only: ['toolchains'], platform: 'linux', home, env: { NVM_DIR: '/nonexistent' }, projectsScanned: true, procs: quietProcs });
+  assert.match(inv.groups.find((x) => x.id === 'pyenv').items[0].blocked, /could not work out which version pyenv/);
+});
+
+test('a project .venv (pyvenv.cfg home=) and tool virtualenvs pin the interpreter they point at', async () => {
+  const home = tmp('h');
+  const pyenvRoot = path.join(home, '.pyenv');
+  for (const v of ['3.10.13', '3.11.9', '3.12.4']) write(path.join(pyenvRoot, 'versions', v, 'bin', 'python'), 'x');
+  const uvRoot = path.join(home, '.local', 'share', 'uv', 'python');
+  for (const k of ['cpython-3.12.4-linux-x86_64-gnu', 'cpython-3.13.0-linux-x86_64-gnu', 'cpython-3.11.9-linux-x86_64-gnu']) write(path.join(uvRoot, k, 'bin', 'python3'), 'x');
+  const proj = tmp('proj');
+  write(path.join(proj, '.venv', 'pyvenv.cfg'), 'home = ' + path.join(pyenvRoot, 'versions', '3.10.13', 'bin') + '\nversion = 3.10.13\n');
+  const proj2 = tmp('proj2');
+  write(path.join(proj2, '.venv', 'pyvenv.cfg'), 'home = ' + path.join(uvRoot, 'cpython-3.13.0-linux-x86_64-gnu', 'bin') + '\nimplementation = CPython\nuv = 0.4.0\n');
+  // A Poetry virtualenv in its cache and a uv tool, outside any project.
+  write(path.join(home, '.cache', 'pypoetry', 'virtualenvs', 'app-AbCdEf12-py3.11', 'pyvenv.cfg'), 'home = ' + path.join(pyenvRoot, 'versions', '3.11.9', 'bin') + '\n');
+  write(path.join(home, '.local', 'share', 'uv', 'tools', 'ruff', 'pyvenv.cfg'), 'home = ' + path.join(uvRoot, 'cpython-3.11.9-linux-x86_64-gnu', 'bin') + '\n');
+  const inv = await devtools.inventory({ only: ['toolchains'], platform: 'linux', home, env: { NVM_DIR: '/nonexistent' }, projects: [proj, proj2], projectsScanned: true, procs: quietProcs });
+  const py = inv.groups.find((x) => x.id === 'pyenv');
+  const uv = inv.groups.find((x) => x.id === 'uv-python');
+  const pv = (v) => py.items.find((i) => i.version === v);
+  const uk = (k) => uv.items.find((i) => i.version === k);
+  assert.match(pv('3.10.13').blocked, /Pinned by .*\.venv\/pyvenv\.cfg/);
+  assert.match(pv('3.11.9').blocked, /Poetry virtualenv/);
+  assert.equal(pv('3.12.4').blocked, null);
+  assert.match(uk('cpython-3.13.0-linux-x86_64-gnu').blocked, /\.venv\/pyvenv\.cfg/);
+  assert.match(uk('cpython-3.11.9-linux-x86_64-gnu').blocked, /uv tool virtualenv/);
+  assert.equal(uk('cpython-3.12.4-linux-x86_64-gnu').blocked, null);
+});

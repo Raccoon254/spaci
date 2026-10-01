@@ -11,7 +11,11 @@
  *     tool resolves it (nvm: alias chains, lts/<codename>, lts/*, node and
  *     stable). A default Spaci cannot resolve to an installed version blocks
  *     every version of that tool: it fails closed;
- *   - a running process uses it.
+ *   - a running process uses it;
+ *   - a virtualenv points at it: pyenv virtualenvs under versions/<v>/envs/
+ *     (and their versions/<name> symlinks, which pins may name), a scanned
+ *     project's .venv or venv (pyvenv.cfg home=), and the venvs Poetry,
+ *     Pipenv, pipx and uv tools keep in their own folders.
  * Pins are matched the way the tools resolve them: "20" means the newest
  * installed 20.x, an exact version means that version.
  *
@@ -23,7 +27,8 @@
  */
 
 const path = require('path');
-const { run, listDir, lstatSafe, readText, readJson, dirSize, pool, absEnv, compareVersions } = require('./util');
+const fs = require('fs');
+const { run, listDir, lstatSafe, readText, readJson, dirSize, pool, absEnv, compareVersions, isInside } = require('./util');
 const { makeGroup, makeItem } = require('./model');
 
 function api(ctx) { return ctx.platform === 'win32' ? path.win32 : path.posix; }
@@ -46,9 +51,16 @@ function cleanSpec(s) {
 function pinsFromFiles(files) {
   const out = { node: [], python: [], rust: [] };
   const add = (lang, raw, source) => {
-    const spec = lang === 'rust' ? String(raw || '').trim() : cleanSpec(raw);
+    const text = String(raw || '').trim();
+    // Python pins may name a pyenv virtualenv or a non-CPython build
+    // (myenv, pypy3.10-7.3.12): keep the name so it can be resolved.
+    const spec = lang === 'rust' ? text : cleanSpec(raw) || (lang === 'python' && text && text !== 'system' && !/\s/.test(text) ? text : null);
     if (spec) out[lang].push({ spec, source });
   };
+  for (const f of VENV_CFGS) {
+    const home = venvHome(files[f]);
+    if (home) out.python.push({ path: home, source: f.replace(/\\/g, '/') });
+  }
   if (files['.nvmrc']) add('node', files['.nvmrc'].split(/\r?\n/)[0], '.nvmrc');
   if (files['.node-version']) add('node', files['.node-version'].split(/\r?\n/)[0], '.node-version');
   if (files['.python-version']) for (const l of files['.python-version'].split(/\r?\n/)) if (l.trim()) add('python', l, '.python-version');
@@ -74,7 +86,16 @@ function pinsFromFiles(files) {
   return out;
 }
 
-const PIN_FILES = ['.nvmrc', '.node-version', '.python-version', 'rust-toolchain', 'rust-toolchain.toml', '.tool-versions', 'package.json'];
+// A project's own virtualenv names the interpreter it was made from.
+const VENV_CFGS = [path.join('.venv', 'pyvenv.cfg'), path.join('venv', 'pyvenv.cfg')];
+const PIN_FILES = ['.nvmrc', '.node-version', '.python-version', 'rust-toolchain', 'rust-toolchain.toml', '.tool-versions', 'package.json', ...VENV_CFGS];
+
+/** The interpreter folder a pyvenv.cfg names (its home= line), or null. */
+function venvHome(text) {
+  if (typeof text !== 'string') return null;
+  const m = /^\s*home\s*=\s*(.+?)\s*$/m.exec(text);
+  return m && /^([A-Za-z]:[\\/]|[\\/])/.test(m[1]) ? m[1] : null;
+}
 
 /** Pins across scanned projects: { node: [{ spec, source, project }], ... }. */
 async function projectPins(projects) {
@@ -103,12 +124,26 @@ function resolveSpec(spec, versions) {
   return prefixed.length ? prefixed[0].v : null;
 }
 
+function realOr(p) { try { return fs.realpathSync.native(p); } catch { return null; } }
+
+/** p is inside dir, by string or by real path (venv homes often go through symlinks). */
+function insideEither(dir, p) {
+  if (isInside(dir, p)) return true;
+  const rd = realOr(dir);
+  const rp = realOr(p);
+  return Boolean(rd && rp && isInside(rd, rp));
+}
+
 /** Map version -> reason it is protected, from pins, defaults and processes. */
-function protections(versions, { pins = [], defaults = [], running = [] }) {
+function protections(versions, { pins = [], defaults = [], running = [], dirOf = null }) {
   const reasons = new Map();
   const add = (v, why) => { if (v && !reasons.has(v)) reasons.set(v, why); };
   for (const d of defaults) add(resolveSpec(d.spec, versions), d.why);
-  for (const p of pins) add(resolveSpec(p.spec, versions), 'Pinned by ' + path.basename(p.project) + ' (' + p.source + ')');
+  for (const p of pins) {
+    const why = 'Pinned by ' + path.basename(p.project) + ' (' + p.source + ')';
+    if (p.path) { if (dirOf) for (const v of versions) if (insideEither(dirOf(v), p.path)) add(v, why); continue; }
+    add(resolveSpec(p.spec, versions), why);
+  }
   for (const r of running) add(r.version, r.why);
   return reasons;
 }
@@ -134,10 +169,11 @@ async function versionGroup(ctx, spec) {
   const versions = entries.map((e) => e.name);
   const dirOf = (v) => p.join(spec.root, v, spec.sub || '');
   const running = runningFrom(ctx, (v) => p.join(spec.root, v), versions);
-  const prot = protections(versions, { pins: spec.pins || [], defaults: spec.defaults || [], running: running || [] });
+  const prot = protections(versions, { pins: spec.pins || [], defaults: spec.defaults || [], running: running || [], dirOf: (v) => p.join(spec.root, v) });
+  const extra = spec.blockFor ? await spec.blockFor(versions) : new Map();
   const items = await pool(versions, 4, async (v) => {
     const dir = p.join(spec.root, v);
-    const why = prot.get(v) || spec.blockAll || (running === null ? 'Spaci could not check whether a running program uses this version.' : null);
+    const why = prot.get(v) || extra.get(v) || spec.blockAll || (running === null ? 'Spaci could not check whether a running program uses this version.' : null);
     const pinned = Boolean(prot.get(v)) && /^Pinned|default/i.test(prot.get(v) || '');
     const size = (await dirSize(dir)).bytes;
     const badges = [];
@@ -292,14 +328,66 @@ async function volta(ctx, pins) {
 
 // ---- Python --------------------------------------------------------------------
 
+/**
+ * pyenv-virtualenv keeps each env in versions/<base>/envs/<name> and links
+ * versions/<name> to it, so "myenv" in .python-version or the global file
+ * means <base>. -> { base: Map(name -> base), envs: Map(base -> [names]) }
+ */
+async function pyenvVirtualenvs(versionsDir, p) {
+  const base = new Map();
+  const envs = new Map();
+  for (const e of await listDir(versionsDir)) {
+    if (e.name.startsWith('.')) continue;
+    if (e.isDirectory()) {
+      const names = (await listDir(p.join(versionsDir, e.name, 'envs'))).filter((x) => !x.name.startsWith('.')).map((x) => x.name);
+      if (names.length) envs.set(e.name, names);
+      for (const n of names) { base.set(e.name + '/envs/' + n, e.name); if (!base.has(n)) base.set(n, e.name); }
+    } else if (e.isSymbolicLink()) {
+      let target = null;
+      try { target = await fs.promises.readlink(p.join(versionsDir, e.name)); } catch { target = null; }
+      if (!target) continue;
+      const abs = p.resolve(versionsDir, target);
+      const rel = p.relative(versionsDir, abs).split(/[\\/]/);
+      if (rel.length >= 3 && rel[0] !== '..' && rel[1] === 'envs') base.set(e.name, rel[0]);
+    }
+  }
+  return { base, envs };
+}
+
+/** A pyenv name as the version folder it runs: a virtualenv becomes its base. */
+function pyenvBase(spec, venvs) {
+  const s = String(spec || '').trim().replace(/\\/g, '/');
+  if (venvs.base.has(s)) return venvs.base.get(s);
+  const m = /^([^/]+)\/envs\/[^/]+$/.exec(s);
+  return m ? m[1] : s;
+}
+
 async function pyenv(ctx, pins) {
   const p = api(ctx);
   const root = absEnv(ctx.env, 'PYENV_ROOT') || (ctx.platform === 'win32' ? p.join(homeOf(ctx), '.pyenv', 'pyenv-win') : p.join(ctx.home, '.pyenv'));
+  const versionsDir = p.join(root, 'versions');
   const global = (await readText(p.join(root, 'version'), 4096) || '').split(/\r?\n/).map((s) => s.trim()).filter((s) => s && s !== 'system');
+  const venvs = await pyenvVirtualenvs(versionsDir, p);
+  const installed = await installedNames(versionsDir, (n) => !n.startsWith('.'));
+  const defaults = global.map((g) => ({ spec: pyenvBase(g, venvs), why: 'pyenv global version' }));
+  const ownVenvs = [];
+  for (const v of installed) {
+    const home = venvHome(await readText(p.join(versionsDir, v, 'pyvenv.cfg'), 64 * 1024));
+    if (home) ownVenvs.push({ path: home, source: 'pyenv virtualenv', project: p.join(versionsDir, v) });
+  }
+  const unresolved = defaults.find((d) => !resolveSpec(d.spec, installed));
   return versionGroup(ctx, {
-    id: 'pyenv', title: 'Python versions (pyenv)', tech: 'python', root: p.join(root, 'versions'),
+    id: 'pyenv', title: 'Python versions (pyenv)', tech: 'python', root: versionsDir,
     match: (n) => !n.startsWith('.'),
-    pins: pins.python, defaults: global.map((g) => ({ spec: g, why: 'pyenv global version' })),
+    pins: [...pins.python.map((pin) => (pin.spec ? { ...pin, spec: pyenvBase(pin.spec, venvs) } : pin)), ...ownVenvs],
+    defaults,
+    blockAll: unresolved && installed.length ? unresolvedDefault('pyenv', unresolved.spec) : null,
+    // A version with virtualenvs: deleting it deletes them, and each is a
+    // set of packages someone installed.
+    blockFor: async (versions) => new Map(versions.filter((v) => venvs.envs.has(v)).map((v) => {
+      const names = venvs.envs.get(v);
+      return [v, 'Has pyenv virtualenvs (' + names.slice(0, 3).join(', ') + (names.length > 3 ? ' and ' + (names.length - 3) + ' more' : '') + '). Delete them first with pyenv virtualenv-delete.'];
+    })),
     label: (v) => 'Python ' + v,
     restore: (v) => 'pyenv install ' + v,
     removal: (v, d) => ({ type: 'command', cmd: 'pyenv', args: ['uninstall', '-f', v], env: { PYENV_ROOT: root }, expectGone: [d], fallback: { type: 'paths', root: p.join(root, 'versions'), paths: [d] } }),
@@ -325,12 +413,13 @@ async function uvPython(ctx, pins) {
   if (!st) return [];
   const keys = (await listDir(root)).filter((e) => e.isDirectory() && /^[a-z]+-\d+\.\d+/.test(e.name)).map((e) => e.name);
   const byVersion = keys.map(verOf);
-  const pyPins = pins.python.map((pin) => ({ ...pin, spec: pin.spec }));
+  const pyPins = pins.python.filter((pin) => pin.spec);
+  const pathPins = pins.python.filter((pin) => pin.path);
   const groups = await versionGroup(ctx, {
     id: 'uv-python', title: 'Python versions (uv)', tech: 'python', root,
     match: (n) => keys.includes(n),
     // Pins name versions; map them onto keys.
-    pins: pyPins.map((pin) => ({ ...pin, spec: keys[byVersion.indexOf(resolveSpec(pin.spec, byVersion))] || '__none__' })),
+    pins: [...pyPins.map((pin) => ({ ...pin, spec: keys[byVersion.indexOf(resolveSpec(pin.spec, byVersion))] || '__none__' })), ...pathPins],
     label: (k) => 'Python ' + verOf(k) + (k.includes('freethreaded') ? ' (free-threaded)' : ''),
     restore: (k) => 'uv python install ' + verOf(k),
     removal: (k, d) => ({ type: 'command', cmd: 'uv', args: ['python', 'uninstall', k], env: { UV_PYTHON_INSTALL_DIR: root }, expectGone: [d], fallback: { type: 'paths', root, paths: [d] } }),
@@ -412,10 +501,44 @@ async function rustup(ctx, pins) {
   });
 }
 
+/**
+ * Virtualenvs tools keep outside projects (Poetry's cache, Pipenv, pipx, uv
+ * tools): each one's pyvenv.cfg names the interpreter it needs.
+ */
+async function toolVenvPins(ctx) {
+  const p = api(ctx);
+  const env = ctx.env || {};
+  const h = homeOf(ctx);
+  const xdgData = absEnv(env, 'XDG_DATA_HOME') || p.join(ctx.home, '.local', 'share');
+  const xdgCache = absEnv(env, 'XDG_CACHE_HOME') || p.join(ctx.home, '.cache');
+  const dirs = [
+    ['Poetry', absEnv(env, 'POETRY_VIRTUALENVS_PATH') || (ctx.platform === 'darwin' ? p.join(ctx.home, 'Library', 'Caches', 'pypoetry', 'virtualenvs')
+      : ctx.platform === 'win32' ? (env.LOCALAPPDATA ? p.join(env.LOCALAPPDATA, 'pypoetry', 'Cache', 'virtualenvs') : null) : p.join(xdgCache, 'pypoetry', 'virtualenvs'))],
+    ['Pipenv', absEnv(env, 'WORKON_HOME') || p.join(h, '.virtualenvs')],
+    ['Pipenv', ctx.platform === 'win32' ? null : p.join(xdgData, 'virtualenvs')],
+    ['pipx', absEnv(env, 'PIPX_HOME') ? p.join(env.PIPX_HOME, 'venvs') : p.join(h, '.local', 'pipx', 'venvs')],
+    ['pipx', ctx.platform === 'win32' ? null : p.join(xdgData, 'pipx', 'venvs')],
+    ['uv tool', absEnv(env, 'UV_TOOL_DIR') || (ctx.platform === 'win32' ? (env.APPDATA ? p.join(env.APPDATA, 'uv', 'data', 'tools') : null) : p.join(xdgData, 'uv', 'tools'))],
+  ].filter((d) => d[1]);
+  const out = [];
+  const seen = new Set();
+  for (const [tool, dir] of dirs) {
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    for (const e of (await listDir(dir)).slice(0, 2000)) {
+      if (!e.isDirectory()) continue;
+      const home = venvHome(await readText(p.join(dir, e.name, 'pyvenv.cfg'), 64 * 1024));
+      if (home) out.push({ path: home, source: tool + ' virtualenv', project: p.join(dir, e.name) });
+    }
+  }
+  return out;
+}
+
 async function inventory(ctx) {
   const pins = await projectPins(ctx.projects);
+  pins.python.push(...await toolVenvPins(ctx).catch(() => []));
   const parts = await Promise.all([nvm(ctx, pins), fnm(ctx, pins), volta(ctx, pins), pyenv(ctx, pins), uvPython(ctx, pins), conda(ctx), rustup(ctx, pins)].map((p) => p.catch(() => [])));
   return parts.flat();
 }
 
-module.exports = { nvmDefault, cleanSpec, pinsFromFiles, projectPins, resolveSpec, protections, uvPythonDir, inventory, nvm, fnm, volta, pyenv, uvPython, conda, rustup, run };
+module.exports = { nvmDefault, pyenvVirtualenvs, pyenvBase, venvHome, toolVenvPins, cleanSpec, pinsFromFiles, projectPins, resolveSpec, protections, uvPythonDir, inventory, nvm, fnm, volta, pyenv, uvPython, conda, rustup, run };
