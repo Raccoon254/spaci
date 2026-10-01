@@ -306,28 +306,91 @@ async function jetbrains(ctx) {
 }
 
 // ---- VS Code and forks ----------------------------------------------------------
+//
+// Extensions live in one shared folder (~/.vscode/extensions), but every
+// profile has its own manifest: the default profile's is
+// extensions/extensions.json, the others' are
+// <user data>/User/profiles/<id>/extensions.json. A folder any manifest names
+// is in use. Spaci offers only folders the editor marked .obsolete, and
+// versions strictly older than every version a manifest uses.
 
-/** Extension folders safe to remove: listed in .obsolete, or an older version of an extension extensions.json points elsewhere. */
-function staleExtensions(folders, extensionsJson, obsolete) {
-  const active = new Set((Array.isArray(extensionsJson) ? extensionsJson : []).map((e) => e && e.relativeLocation).filter(Boolean));
-  const activeIds = new Set((Array.isArray(extensionsJson) ? extensionsJson : []).map((e) => e && e.identifier && String(e.identifier.id || '').toLowerCase()).filter(Boolean));
+/** The folder a manifest entry points at. */
+function entryFolder(e) {
+  if (!e || typeof e !== 'object') return null;
+  if (typeof e.relativeLocation === 'string' && e.relativeLocation) return e.relativeLocation;
+  const loc = e.location;
+  const p = loc && (typeof loc === 'string' ? loc : loc.fsPath || loc.path);
+  return typeof p === 'string' && p ? p.split(/[\\/]/).filter(Boolean).pop() : null;
+}
+
+const EXT_FOLDER_RE = /^([a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-._]*?)-(\d+\.\d+\.\d+[^]*)$/i;
+
+/**
+ * Extension folders safe to remove: listed in .obsolete, or a version older
+ * than every version any profile uses. `manifests` is one extensions.json or
+ * a list of them (one per profile); a folder any of them names is never offered.
+ */
+function staleExtensions(folders, manifests, obsolete) {
+  const lists = Array.isArray(manifests) && manifests.length && manifests.every((m) => Array.isArray(m)) ? manifests : [Array.isArray(manifests) ? manifests : []];
+  const entries = lists.flat();
+  const active = new Set(entries.map(entryFolder).filter(Boolean));
+  const activeVersions = new Map(); // id -> [versions in use]
+  for (const e of entries) {
+    const id = e && e.identifier && String(e.identifier.id || '').toLowerCase();
+    if (!id) continue;
+    const m = EXT_FOLDER_RE.exec(entryFolder(e) || '');
+    const v = (m && /^\d+\.\d+\.\d+/.exec(m[2])) ? /^\d+\.\d+\.\d+/.exec(m[2])[0] : (typeof e.version === 'string' ? e.version : null);
+    if (!activeVersions.has(id)) activeVersions.set(id, []);
+    if (v) activeVersions.get(id).push(v);
+  }
   const obs = obsolete && typeof obsolete === 'object' ? obsolete : {};
   const out = [];
   for (const f of folders) {
-    if (active.has(f)) continue; // never a folder VS Code says is installed
-    const m = /^([a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-._]*?)-(\d+\.\d+\.\d+[^]*)$/i.exec(f);
+    if (active.has(f)) continue; // never a folder any profile says is installed
+    const m = EXT_FOLDER_RE.exec(f);
     if (obs[f] === true) { out.push({ folder: f, id: m ? m[1] : f, reason: 'obsolete' }); continue; }
-    if (m && activeIds.has(m[1].toLowerCase())) out.push({ folder: f, id: m[1], reason: 'replaced' });
+    if (!m) continue;
+    const inUse = activeVersions.get(m[1].toLowerCase());
+    const mine = /^\d+\.\d+\.\d+/.exec(m[2]);
+    // Strictly older than every version in use; an unknown version is never "older".
+    if (inUse && inUse.length && mine && inUse.every((v) => compareVersions(mine[0], v) < 0)) out.push({ folder: f, id: m[1], reason: 'replaced' });
   }
   return out;
 }
 
 const EDITORS = [
-  { id: 'vscode', title: 'VS Code', dir: '.vscode', brand: 'vscode', proc: /Visual Studio Code\.app|[\\/]code(\.exe)?(\s|$)|Code\.exe/i },
-  { id: 'vscode-insiders', title: 'VS Code Insiders', dir: '.vscode-insiders', brand: 'vscode', proc: /Insiders/i },
-  { id: 'cursor-ext', title: 'Cursor', dir: '.cursor', brand: 'cursor', proc: /Cursor\.app|cursor(\.exe)?(\s|$)/i },
-  { id: 'windsurf-ext', title: 'Windsurf', dir: '.windsurf', brand: 'windsurf', proc: /Windsurf\.app|windsurf(\.exe)?(\s|$)/i },
+  { id: 'vscode', title: 'VS Code', dir: '.vscode', data: 'Code', brand: 'vscode', proc: /Visual Studio Code\.app|[\\/]code(\.exe)?(\s|$)|Code\.exe/i },
+  { id: 'vscode-insiders', title: 'VS Code Insiders', dir: '.vscode-insiders', data: 'Code - Insiders', brand: 'vscode', proc: /Insiders/i },
+  { id: 'cursor-ext', title: 'Cursor', dir: '.cursor', data: 'Cursor', brand: 'cursor', proc: /Cursor\.app|cursor(\.exe)?(\s|$)/i },
+  { id: 'windsurf-ext', title: 'Windsurf', dir: '.windsurf', data: 'Windsurf', brand: 'windsurf', proc: /Windsurf\.app|windsurf(\.exe)?(\s|$)/i },
 ];
+
+/** An editor's user data folder (where User/profiles lives). */
+function editorDataDir(ctx, name) {
+  const p = api(ctx);
+  const env = ctx.env || {};
+  if (ctx.platform === 'darwin') return p.join(ctx.home, 'Library', 'Application Support', name);
+  if (ctx.platform === 'win32') return env.APPDATA ? p.join(env.APPDATA, name) : null;
+  return p.join(absEnv(env, 'XDG_CONFIG_HOME') || p.join(ctx.home, '.config'), name);
+}
+
+/** Every profile's extensions.json, or null when one exists but cannot be read. */
+async function profileManifests(ctx, name) {
+  const p = api(ctx);
+  const data = editorDataDir(ctx, name);
+  if (!data) return [];
+  const out = [];
+  const root = p.join(data, 'User', 'profiles');
+  for (const e of await listDir(root)) {
+    if (!e.isDirectory()) continue;
+    const file = p.join(root, e.name, 'extensions.json');
+    if (!(await lstatSafe(file))) continue;
+    const json = await readJson(file, 16 * 1024 * 1024);
+    if (!Array.isArray(json)) return null;
+    out.push(json);
+  }
+  return out;
+}
 
 async function editorExtensions(ctx) {
   const p = api(ctx);
@@ -336,9 +399,11 @@ async function editorExtensions(ctx) {
     const root = ed.id === 'vscode' && absEnv(ctx.env, 'VSCODE_EXTENSIONS') ? ctx.env.VSCODE_EXTENSIONS : p.join(homeOf(ctx), ed.dir, 'extensions');
     const json = await readJson(p.join(root, 'extensions.json'), 16 * 1024 * 1024);
     if (!Array.isArray(json)) continue; // without the editor's own list, nothing is offered
+    const profiles = await profileManifests(ctx, ed.data);
+    if (profiles === null) continue; // a profile list Spaci cannot read: offer nothing
     const obsolete = await readJson(p.join(root, '.obsolete'));
     const folders = (await listDir(root)).filter((e) => e.isDirectory()).map((e) => e.name);
-    const stale = staleExtensions(folders, json, obsolete);
+    const stale = staleExtensions(folders, [json, ...profiles], obsolete);
     if (!stale.length) continue;
     const items = await pool(stale, 4, async (s) => {
       const dir = p.join(root, s.folder);
@@ -348,14 +413,14 @@ async function editorExtensions(ctx) {
         kind: 'cache',
         label: s.folder,
         name: s.id,
-        detail: s.reason === 'obsolete' ? ed.title + ' marked this version obsolete' : 'Replaced by a newer version',
+        detail: s.reason === 'obsolete' ? ed.title + ' marked this version obsolete' : 'Older than the version every profile uses',
         size: (await dirSize(dir)).bytes,
         restoreHint: 'Not needed: ' + ed.title + ' uses the newer version.',
         paths: [dir],
         removal: { type: 'paths', root, paths: [dir] },
       });
     });
-    groups.push(makeGroup({ id: ed.id, section: 'dev', category: 'ide', title: ed.title + ' old extension versions', brand: ed.brand, icon: 'monitor', roots: [root], items: items.sort((a, b) => b.size - a.size), note: ed.title + ' keeps superseded extension versions until it cleans them up itself.' }));
+    groups.push(makeGroup({ id: ed.id, section: 'dev', category: 'ide', title: ed.title + ' old extension versions', brand: ed.brand, icon: 'monitor', roots: [root], items: items.sort((a, b) => b.size - a.size), note: ed.title + ' keeps superseded extension versions until it cleans them up itself. Versions any profile uses are never listed.' }));
   }
   return groups;
 }
@@ -563,4 +628,4 @@ async function inventory(ctx) {
   return parts.flat();
 }
 
-module.exports = { registryInstalls, jbDirFromBuild, jbInstallDir, jetbrainsInstalls, jetbrainsRunning, newestChange, JB_UNUSED_DAYS, jetbrainsLeftovers, staleExtensions, jetbrains, editorExtensions, playwright, puppeteer, cypress, electronCache, terraform, gradleWrapper, homebrew, inventory, run };
+module.exports = { entryFolder, profileManifests, registryInstalls, jbDirFromBuild, jbInstallDir, jetbrainsInstalls, jetbrainsRunning, newestChange, JB_UNUSED_DAYS, jetbrainsLeftovers, staleExtensions, jetbrains, editorExtensions, playwright, puppeteer, cypress, electronCache, terraform, gradleWrapper, homebrew, inventory, run };

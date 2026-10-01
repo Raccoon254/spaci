@@ -751,3 +751,34 @@ test('r3 as written: the 2025.3 scratches are never offered', async () => {
   const paths = groups.flatMap((g) => g.items.flatMap((i) => i.paths));
   assert.ok(!paths.some((p) => /scratches|IntelliJIdea2025\.3$/.test(p)), JSON.stringify(paths));
 });
+
+// ---- VS Code-family profiles -----------------------------------------------------------------
+
+test('r3: a newer extension version is never "replaced" by an older one in use', async () => {
+  const home = tmp('vs');
+  const ext = path.join(home, '.vscode', 'extensions');
+  write(path.join(ext, 'ms-python.python-2024.1.0', 'package.json'), '{}');
+  write(path.join(ext, 'ms-python.python-2024.8.0', 'package.json'), '{}');
+  write(path.join(ext, 'extensions.json'), JSON.stringify([{ identifier: { id: 'ms-python.python' }, relativeLocation: 'ms-python.python-2024.1.0' }]));
+  const ctx = { platform: 'darwin', home, env: {}, procs: quietProcs };
+  assert.deepEqual(await ide.editorExtensions(ctx), []);
+});
+
+test('VS Code profiles: a version any profile uses stays; only versions older than all of them go', async () => {
+  for (const [platform, dataDir] of [['darwin', (h) => path.join(h, 'Library', 'Application Support', 'Code')], ['linux', (h) => path.join(h, '.config', 'Code')]]) {
+    const home = tmp('vs');
+    const ext = path.join(home, '.vscode', 'extensions');
+    for (const v of ['2023.9.0', '2024.1.0', '2024.8.0']) write(path.join(ext, 'ms-python.python-' + v, 'package.json'), '{}');
+    write(path.join(ext, 'extensions.json'), JSON.stringify([{ identifier: { id: 'ms-python.python' }, relativeLocation: 'ms-python.python-2024.8.0' }]));
+    // The "Work" profile still uses 2024.1.0, named by location only.
+    write(path.join(dataDir(home), 'User', 'profiles', '-6f1a2b', 'extensions.json'), JSON.stringify([{ identifier: { id: 'ms-python.python' }, location: { $mid: 1, path: path.join(ext, 'ms-python.python-2024.1.0').replace(/\\/g, '/'), scheme: 'file' } }]));
+    const groups = await ide.editorExtensions({ platform, home, env: {}, procs: quietProcs });
+    assert.deepEqual(groups.flatMap((g) => g.items.map((i) => i.label)), ['ms-python.python-2023.9.0'], platform);
+    // A profile manifest Spaci cannot read: nothing is offered.
+    write(path.join(dataDir(home), 'User', 'profiles', 'broken', 'extensions.json'), '[{');
+    assert.deepEqual(await ide.editorExtensions({ platform, home, env: {}, procs: quietProcs }), [], platform);
+  }
+  // .obsolete still wins only for folders no profile names.
+  const json = [{ identifier: { id: 'a.b' }, relativeLocation: 'a.b-1.0.0' }];
+  assert.deepEqual(ide.staleExtensions(['a.b-1.0.0', 'a.b-0.9.0'], [json, [{ identifier: { id: 'a.b' }, relativeLocation: 'a.b-0.9.0' }]], { 'a.b-0.9.0': true, 'a.b-1.0.0': true }), []);
+});
