@@ -23,7 +23,7 @@ for (const name of ['setTimeout', 'setInterval']) {
   global[name] = (...args) => { const h = real(...args); if (h && h.unref) h.unref(); return h; };
 }
 
-function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-')), { lock = true, shell = {}, dialog = {}, scanner = {}, system = {}, docker = {}, notification = null, updater = null, largefiles = null } = {}) {
+function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-')), { lock = true, shell = {}, dialog = {}, scanner = {}, system = {}, docker = {}, notification = null, updater = null, largefiles = null, devtools = null } = {}) {
   const counts = { windows: 0, trays: 0, quits: 0, shows: 0, focuses: 0, restores: 0 };
   const windows = [];
   const trays = [];
@@ -118,6 +118,8 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
     diskbreakdown: { diskBreakdown: async () => ({ categories: [] }), topChildren: async () => [{ path: '/x', bytes: 1 }] },
     largefiles: largefiles || { scanLargeFiles: async (root, min, onProgress) => { onProgress && onProgress({ phase: 'done' }); return { files: [], scanned: 0 }; } },
     aitools: { aiToolStatus: async () => ({ ok: true, running: [] }) },
+    devtools: devtools || { inventory: async () => ({ at: Date.now(), groups: [], totals: { ai: 0, dev: 0 } }), removeItem: async () => ({ ok: false, freed: 0, code: 'failed' }) },
+    cleaner: { deletePath: async () => 0 },
   };
   const forks = [];
   electron.utilityProcess = {
@@ -1340,4 +1342,50 @@ test('worktrees: remove is confirm-only, re-verified in the worker, logged with 
     const bad = await m.handlers['worktrees:prune'](cleanEvent, '/not/scanned', ['/not/scanned/x'], { confirmed: true });
     assert.equal(bad.ok, false);
   } finally { m.cleanup(); fs.rmSync(dir, { recursive: true, force: true }); wtxMod.setClock(null); }
+});
+
+test('AI models and dev tools: listing cached, removal confirmed, allowlisted, recorded in history v2', async () => {
+  const calls = [];
+  const item = (id, extra = {}) => ({ id, group: 'ollama', label: id, tier: 'B', size: 500, restoreHint: 'ollama pull ' + id, paths: ['/m/manifests/' + id], removal: { type: 'ollama', store: '/m', name: id, file: '/m/manifests/' + id }, ...extra });
+  const listing = { at: Date.now(), totals: { ai: 1000, dev: 0 }, groups: [{ id: 'ollama', section: 'ai', title: 'Ollama', items: [item('qwen2.5:0.5b'), item('llama3.2:3b', { blocked: 'Loaded in Ollama right now.' })] }] };
+  const devtools = {
+    inventory: async (o) => { calls.push(['inventory', o]); return structuredClone(listing); },
+    removeItem: async (it, o) => { calls.push(['removeItem', it, typeof o.deletePath]); return { ok: true, freed: 480, via: 'api' }; },
+  };
+  const m = loadMain(undefined, { devtools });
+  try {
+    m.ready.resolve();
+    await flush();
+    const inv = await m.handlers['devtools:inventory']({});
+    assert.deepEqual(inv.groups.map((g) => g.id), ['ollama']);
+    assert.equal(calls[0][1].projectsScanned, false, 'no project scan yet, so the worker keeps toolchains blocked');
+    await m.handlers['devtools:inventory']({});
+    assert.equal(calls.filter(([c]) => c === 'inventory').length, 1, 'cached');
+    await m.handlers['devtools:inventory']({}, true);
+    assert.equal(calls.filter(([c]) => c === 'inventory').length, 2, 'force refreshes');
+
+    const rm = (id, opts) => m.handlers['devtools:remove']({}, id, opts);
+    assert.equal((await rm('qwen2.5:0.5b')).error, 'needs-confirmation');
+    assert.equal((await rm('qwen2.5:0.5b', { confirmed: 1 })).error, 'needs-confirmation');
+    assert.equal((await rm('/etc/hosts', { confirmed: true })).error, 'unknown-item');
+    const blocked = await rm('llama3.2:3b', { confirmed: true });
+    assert.deepEqual([blocked.ok, blocked.error, blocked.message], [false, 'blocked', 'Loaded in Ollama right now.']);
+    assert.equal(calls.filter(([c]) => c === 'removeItem').length, 0, 'no refusal reached the worker');
+
+    const ok = await rm('qwen2.5:0.5b', { confirmed: true });
+    assert.equal(ok.ok, true);
+    assert.equal(ok.freed, 480);
+    const [, sentItem, del] = calls.find(([c]) => c === 'removeItem');
+    assert.equal(sentItem.removal.name, 'qwen2.5:0.5b', 'main sends its own cached copy');
+    assert.equal(del, 'function');
+    const [entry] = readHistoryFile(m);
+    assert.deepEqual([entry.v, entry.scope, entry.status, entry.freed, entry.label], [2, 'devtools', 'done', 480, 'Ollama: qwen2.5:0.5b']);
+    assert.equal(entry.items[0].restoreHint, 'ollama pull qwen2.5:0.5b');
+    // The listing is dropped after a removal: the next read re-detects.
+    await m.handlers['devtools:inventory']({});
+    assert.equal(calls.filter(([c]) => c === 'inventory').length, 3);
+    const pre = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
+    for (const ch of ['devtools:inventory', 'devtools:remove']) assert.ok(pre.includes(`'${ch}'`), ch);
+    m.appEvents.emit('before-quit');
+  } finally { m.cleanup(); }
 });

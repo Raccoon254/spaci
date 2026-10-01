@@ -1,0 +1,39 @@
+{
+  "devices" : {
+    "com.apple.CoreSimulator.SimRuntime.iOS-26-5" : [
+      {
+        "lastBootedAt" : "2026-09-20T10:11:12Z",
+        "dataPath" : "/Users/example/Library/Developer/CoreSimulator/Devices/0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0/data",
+        "dataPathSize" : 2147483648,
+        "logPath" : "/Users/example/Library/Logs/CoreSimulator/0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0",
+        "udid" : "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+        "state" : "Booted",
+        "name" : "iPhone 17 Pro"
+      },
+      {
+        "dataPath" : "/Users/example/Library/Developer/CoreSimulator/Devices/11111111-2222-3333-4444-555555555555/data",
+        "dataPathSize" : 524288000,
+        "logPath" : "/Users/example/Library/Logs/CoreSimulator/11111111-2222-3333-4444-555555555555",
+        "udid" : "11111111-2222-3333-4444-555555555555",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPhone-Air",
+        "state" : "Shutdown",
+        "name" : "iPhone Air"
+      }
+    ],
+    "com.apple.CoreSimulator.SimRuntime.iOS-17-5" : [
+      {
+        "availabilityError" : "runtime profile not found",
+        "dataPath" : "/Users/example/Library/Developer/CoreSimulator/Devices/AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE/data",
+        "dataPathSize" : 1073741824,
+        "udid" : "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+        "isAvailable" : false,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
+        "state" : "Shutdown",
+        "name" : "iPhone 15"
+      }
+    ]
+  }
+}

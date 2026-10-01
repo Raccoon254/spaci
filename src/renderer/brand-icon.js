@@ -193,7 +193,7 @@
     [/^grok\b/i, 'grok'], [/^zed\b/i, 'zed'], [/^github copilot\b|^copilot\b/i, 'github-copilot'],
     [/^docker\b/i, 'docker'], [/^(google )?chrome\b/i, 'chrome'], [/^firefox\b/i, 'firefox'],
     [/^safari\b/i, 'safari'], [/^(microsoft )?edge\b/i, 'edge'], [/^brave\b/i, 'brave'],
-    [/^arc\b/i, 'arc'],
+    [/^arc\b/i, 'arc'], [/^ollama\b/i, 'ollama'], [/^hugging face\b/i, 'hugging-face'],
   ];
   // Path fragments that identify an owning app. Separators are normalised to
   // '/' first, so one table covers macOS, Linux and Windows paths.

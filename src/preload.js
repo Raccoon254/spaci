@@ -95,6 +95,11 @@ contextBridge.exposeInMainWorld('api', {
   autoCleanPreview: () => ipcRenderer.invoke('autoclean:preview'),
   onAutoCleanUpdated: (cb) => sub('autoclean:updated', cb),
   // ---- end clean tiers and auto-clean ----
+
+  // ---- ai models and dev tools ----
+  devtoolsInventory: (force) => ipcRenderer.invoke('devtools:inventory', force),
+  devtoolsRemove: (id, opts) => ipcRenderer.invoke('devtools:remove', id, opts),
+  // ---- end ai models and dev tools ----
 });
 
 function sub(channel, cb) {

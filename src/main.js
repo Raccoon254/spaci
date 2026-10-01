@@ -1447,6 +1447,72 @@ ipcMain.handle('notices:open', (_e, id) => (noticesService ? noticesService.open
 ipcMain.handle('whatsnew:get', (_e, opts) => (noticesService ? noticesService.whatsNew({ always: Boolean(opts && opts.always === true) }) : null));
 ipcMain.handle('whatsnew:seen', (_e, version) => (noticesService ? noticesService.whatsNewSeen(version) : false));
 
+// ---- ai models and dev tools ----
+// Local AI model stores (Ollama, LM Studio, Hugging Face ...) and developer
+// tool storage (simulators, emulators, toolchains, IDE leftovers), from
+// src/devtools. The worker lists and removes; main keeps the last listing as
+// the allowlist, refuses anything unconfirmed or blocked, runs the item's
+// paths through the clean guard, and records every removal in history v2.
+const devtoolsPolicy = require('./devtools/policy');
+const devtoolsIndex = require('./devtools');
+const DEVTOOLS_FRESH_MS = 5 * 60 * 1000;
+let devtoolsCache = null;
+function devtoolsProjects() {
+  return {
+    projects: (cache.projects || []).map((p) => p && p.path).filter((p) => typeof p === 'string'),
+    // No finished project scan means no pin is visible: toolchains stay blocked.
+    projectsScanned: Boolean(cache.kindScannedAt && cache.kindScannedAt.projects > 0),
+  };
+}
+const listDevtools = singleFlight(async () => {
+  try {
+    devtoolsCache = await work('devtoolsInventory', [devtoolsProjects()]);
+  } catch (e) {
+    devtoolsCache = { at: Date.now(), groups: [], totals: { ai: 0, dev: 0 }, error: (e && e.message) || 'Could not list AI models and developer tools.' };
+  }
+  return devtoolsCache;
+});
+// api.devtoolsInventory(force?) -> { at, groups, totals: { ai, dev }, processes, errors, error? }
+ipcMain.handle('devtools:inventory', async (_e, force) => {
+  if (!force && devtoolsCache && Date.now() - devtoolsCache.at < DEVTOOLS_FRESH_MS) return devtoolsCache;
+  return listDevtools();
+});
+// api.devtoolsRemove(id, { confirmed: true }) -> { ok, freed, id, error?, message? }
+// error codes: needs-confirmation, invalid-id, unknown-item, blocked, refused,
+// gone, changed, running, unknown-state, failed, partial.
+ipcMain.handle('devtools:remove', async (_e, id, opts) => {
+  const refuse = (error, message) => ({ ok: false, freed: 0, id: typeof id === 'string' ? id : null, error, message: message || devtoolsPolicy.REFUSAL_TEXT[error] || error });
+  const decision = devtoolsPolicy.removalDecision(id, opts, devtoolsCache);
+  if (!decision.ok) return refuse(decision.error, decision.message);
+  const { item, group } = decision;
+  // The same guard every clean goes through: a path that belongs to a known
+  // target keeps that target's rules (a running AI tool, protected names).
+  const paths = devtoolsIndex.itemPaths(item);
+  if (paths.length) {
+    const guarded = await cleanGuard.enforceTargetRules(paths.map((p) => ({ path: p, mode: 'path' })), {
+      index: TARGET_INDEX,
+      toolStatus: () => work('aiToolStatus').catch(() => ({ ok: false, running: [] })),
+      known: new Set(paths),
+    });
+    if (guarded.refused.length) {
+      const reason = guarded.refused[0].reason;
+      putHistory(devtoolsPolicy.refusedEntry({ id: newHistoryId(), at: Date.now(), group, item, reason }));
+      return refuse('refused', reason);
+    }
+  }
+  const historyId = newHistoryId();
+  const at = Date.now();
+  putHistory(devtoolsPolicy.startedEntry({ id: historyId, at, group, item }));
+  let result;
+  try { result = await work('devtoolsRemove', [item, devtoolsProjects()]); }
+  catch (e) { result = { ok: false, freed: 0, code: 'failed', error: (e && e.message) || 'Removal failed.' }; }
+  putHistory(devtoolsPolicy.finishedEntry({ id: historyId, at, finishedAt: Date.now(), group, item, result }));
+  devtoolsCache = null; // what the user saw is out of date either way
+  if (!result || !result.ok) return { ...refuse((result && result.code) || 'failed', (result && result.error) || 'Not removed.'), freed: (result && result.freed) || 0, historyId };
+  return { ok: true, freed: result.freed || 0, id, via: result.via || null, note: result.note || null, historyId };
+});
+// ---- end ai models and dev tools ----
+
 // ---- clean tiers and auto-clean ----
 // Tiers (clean-tiers.js) for the renderer's badges and "Clean all developer
 // files", and the opt-in auto-clean (auto-clean.js): its settings, scheduler,

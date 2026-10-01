@@ -162,10 +162,61 @@ function buildDeveloperTargets(ctx) {
   ];
 }
 
+
+// ---- ai models and dev tools ----
+// Download caches the developer tool sweep found missing (docs/devtools-sources.md).
+// Each honours its tool's own override, and only an absolute one.
+function absOr(ctx, name, fallback) {
+  const v = ctx.env[name];
+  return v && ctx.pathApi.isAbsolute(v) ? v : fallback;
+}
+
+function toolCacheTargets(ctx) {
+  const { platform, env, join, winJoin, from } = ctx;
+  const local = env.LOCALAPPDATA;
+  const cacheRoot = platform === 'darwin' ? join('Library', 'Caches') : platform === 'win32' ? local : xdgCache(ctx);
+  const at = (...p) => from(cacheRoot, ...p);
+  const home = platform === 'win32' ? winJoin : join;
+  const pw = env.PLAYWRIGHT_BROWSERS_PATH && env.PLAYWRIGHT_BROWSERS_PATH !== '0' ? absOr(ctx, 'PLAYWRIGHT_BROWSERS_PATH', null) : null;
+  const t = [
+    makeTarget('playwright', 'Playwright browsers', 'Developer', 'browser', [pw || at('ms-playwright')], 'Browsers Playwright downloaded for tests. npx playwright install fetches them again, a few hundred MB each.', { safe: false, restoreHint: 'npx playwright install' }),
+    makeTarget('puppeteer', 'Puppeteer browsers', 'Developer', 'browser', [absOr(ctx, 'PUPPETEER_CACHE_DIR', home('.cache', 'puppeteer'))], 'Chrome builds Puppeteer downloaded. Fetched again on the next install.', { safe: false, restoreHint: 'npx puppeteer browsers install chrome' }),
+    makeTarget('cypress', 'Cypress binaries', 'Developer', 'play', [absOr(ctx, 'CYPRESS_CACHE_FOLDER', platform === 'win32' ? at('Cypress', 'Cache') : at('Cypress'))], 'Cypress app binaries, one per version. npx cypress install fetches the one a project needs.', { safe: false, restoreHint: 'npx cypress install' }),
+    makeTarget('electron-downloads', 'Electron downloads', 'Developer', 'download', [absOr(ctx, 'electron_config_cache', platform === 'win32' ? at('electron', 'Cache') : at('electron'))], 'Electron release zips cached by npm installs. Downloaded again when a project needs that version.', { restoreHint: 'Downloaded again on the next npm install of that Electron version.' }),
+    makeTarget('uv-cache', 'uv cache', 'Developer', 'python', [absOr(ctx, 'UV_CACHE_DIR', platform === 'win32' ? at('uv', 'cache') : (platform === 'darwin' ? join('.cache', 'uv') : xdgCache(ctx, 'uv')))], 'uv package and build cache. The same as uv cache clean; refills on the next install.', { restoreHint: 'Refills on the next uv sync or uv pip install.' }),
+  ];
+  if (platform !== 'win32') {
+    t.push(makeTarget('homebrew-cache', 'Homebrew downloads', 'Developer', 'download', [absOr(ctx, 'HOMEBREW_CACHE', at('Homebrew'))], 'Bottles and source downloads Homebrew keeps after installing. brew cleanup removes old ones itself.', { restoreHint: 'Downloaded again the next time Homebrew installs or upgrades.' }));
+  }
+  return t.filter((x) => x.paths.length > 0);
+}
+
+/**
+ * Where local AI models and developer tools keep data, so the storage
+ * breakdown counts them as Developer instead of unclaimed home folders.
+ */
+function devToolDirs(ctx) {
+  const { platform, env, join, winJoin, from } = ctx;
+  const home = platform === 'win32' ? winJoin : join;
+  const dirs = [
+    absOr(ctx, 'OLLAMA_MODELS', home('.ollama', 'models')),
+    home('.lmstudio', 'models'),
+    absOr(ctx, 'ANDROID_HOME', absOr(ctx, 'ANDROID_SDK_ROOT', platform === 'darwin' ? join('Library', 'Android', 'sdk') : platform === 'win32' ? from(env.LOCALAPPDATA, 'Android', 'Sdk') : join('Android', 'Sdk'))),
+    absOr(ctx, 'ANDROID_AVD_HOME', home('.android', 'avd')),
+    absOr(ctx, 'NVM_DIR', platform === 'win32' ? null : join('.nvm')),
+    absOr(ctx, 'PYENV_ROOT', home('.pyenv')),
+    absOr(ctx, 'VOLTA_HOME', platform === 'win32' ? from(env.LOCALAPPDATA, 'Volta') : join('.volta')),
+    absOr(ctx, 'RUSTUP_HOME', home('.rustup')),
+    platform === 'darwin' ? join('Library', 'Application Support', 'fnm') : null,
+  ];
+  return uniq(dirs);
+}
+// ---- end ai models and dev tools ----
+
 function buildSystemTargets(options = {}) {
   const ctx = platformContext(options);
   const { platform, env, join, from } = ctx;
-  const targets = buildDeveloperTargets(ctx);
+  const targets = buildDeveloperTargets(ctx).concat(toolCacheTargets(ctx));
 
   if (platform === 'darwin') {
     const lib = (...p) => join('Library', ...p);
@@ -235,6 +286,7 @@ function buildStoryCategories(options = {}) {
     join('.rustup'),
     join('.nvm'),
     platform === 'darwin' ? join('Library', 'Developer') : null,
+    ...devToolDirs(ctx),
   ]);
 
   const appDirs = [];
@@ -379,4 +431,5 @@ module.exports = {
   tierForPath,
   CATEGORY_TIER,
   makeTarget,
+  devToolDirs,
 };

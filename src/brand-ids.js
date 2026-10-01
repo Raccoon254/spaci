@@ -5,6 +5,8 @@
 const BRAND_IDS = [
   // AI tools
   'claude', 'codex', 'opencode', 'cursor', 'windsurf', 'gemini', 'grok', 'zed', 'github-copilot', 'openai',
+  // Local AI model stores
+  'ollama', 'hugging-face',
   // Containers
   'docker',
   // Browsers
@@ -14,7 +16,7 @@ const BRAND_IDS = [
 ];
 
 // Ids that have a `<id>-dark.svg` for dark backgrounds.
-const hasDark = new Set(['codex', 'opencode', 'cursor', 'windsurf', 'grok', 'zed', 'github-copilot', 'openai']);
+const hasDark = new Set(['codex', 'opencode', 'cursor', 'windsurf', 'grok', 'zed', 'github-copilot', 'openai', 'ollama']);
 
 // Spaci AI tool id -> brand id (null when there is no vendored logo).
 const BRAND_FOR_TOOL = {

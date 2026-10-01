@@ -1,0 +1,123 @@
+[
+ {
+  "identifier": {
+   "id": "prisma.prisma",
+   "uuid": "33ce9d6b-41cf-4972-a62b-386f7201981d"
+  },
+  "version": "31.12.10",
+  "location": {
+   "$mid": 1,
+   "path": "/Users/user/.vscode/extensions/prisma.prisma-31.12.10",
+   "scheme": "file"
+  },
+  "relativeLocation": "prisma.prisma-31.12.10",
+  "metadata": {
+   "isApplicationScoped": false,
+   "isMachineScoped": false,
+   "isBuiltin": false,
+   "installedTimestamp": 1789481102446,
+   "pinned": false,
+   "source": "gallery",
+   "id": "33ce9d6b-41cf-4972-a62b-386f7201981d",
+   "publisherId": "2397d6f3-c7f1-4b03-9029-414f731a68ec",
+   "publisherDisplayName": "Prisma",
+   "targetPlatform": "undefined",
+   "updated": true,
+   "private": false,
+   "isPreReleaseVersion": false,
+   "hasPreReleaseVersion": false,
+   "preRelease": false
+  }
+ },
+ {
+  "identifier": {
+   "id": "teabyii.ayu",
+   "uuid": "5178733e-4b02-4829-95c5-1ce970847c23"
+  },
+  "version": "1.4.0",
+  "location": {
+   "$mid": 1,
+   "path": "/Users/user/.vscode/extensions/teabyii.ayu-1.4.0",
+   "scheme": "file"
+  },
+  "relativeLocation": "teabyii.ayu-1.4.0",
+  "metadata": {
+   "isApplicationScoped": false,
+   "isMachineScoped": false,
+   "isBuiltin": false,
+   "installedTimestamp": 1790782645896,
+   "pinned": false,
+   "source": "gallery",
+   "id": "5178733e-4b02-4829-95c5-1ce970847c23",
+   "publisherId": "8a0aaf7f-34ab-48b1-9384-c15c80413d57",
+   "publisherDisplayName": "teabyii",
+   "targetPlatform": "undefined",
+   "updated": true,
+   "private": false,
+   "isPreReleaseVersion": false,
+   "hasPreReleaseVersion": false,
+   "preRelease": false
+  }
+ },
+ {
+  "identifier": {
+   "id": "vscode-icons-team.vscode-icons",
+   "uuid": "9ccc1dd7-7ec4-4a46-bd4f-7d7b8b9d322a"
+  },
+  "version": "13.0.0",
+  "location": {
+   "$mid": 1,
+   "path": "/Users/user/.vscode/extensions/vscode-icons-team.vscode-icons-13.0.0",
+   "scheme": "file"
+  },
+  "relativeLocation": "vscode-icons-team.vscode-icons-13.0.0",
+  "metadata": {
+   "isApplicationScoped": false,
+   "isMachineScoped": false,
+   "isBuiltin": false,
+   "installedTimestamp": 1790782645996,
+   "pinned": false,
+   "source": "gallery",
+   "id": "9ccc1dd7-7ec4-4a46-bd4f-7d7b8b9d322a",
+   "publisherId": "652ad61d-3a6a-48ca-ab1a-80dc8953b2b6",
+   "publisherDisplayName": "VSCode Icons Team",
+   "targetPlatform": "undefined",
+   "updated": true,
+   "private": false,
+   "isPreReleaseVersion": false,
+   "hasPreReleaseVersion": false,
+   "preRelease": false
+  }
+ },
+ {
+  "identifier": {
+   "id": "ms-python.python"
+  },
+  "version": "2026.6.0",
+  "location": {
+   "$mid": 1,
+   "fsPath": "/Users/user/.vscode/extensions/ms-python.python-2026.6.0-darwin-arm64",
+   "external": "file:///Users/user/.vscode/extensions/ms-python.python-2026.6.0-darwin-arm64",
+   "path": "/Users/user/.vscode/extensions/ms-python.python-2026.6.0-darwin-arm64",
+   "scheme": "file"
+  },
+  "relativeLocation": "ms-python.python-2026.6.0-darwin-arm64",
+  "metadata": {
+   "isApplicationScoped": false,
+   "isMachineScoped": false,
+   "isBuiltin": false,
+   "installedTimestamp": 1790782645996,
+   "pinned": false,
+   "source": "gallery",
+   "id": "f1f59ae4-9318-4f3c-a9b5-81b2eaa5f8a5",
+   "publisherId": "998b010b-e2af-44a5-a6cd-0b5fd3b9b6f8",
+   "publisherDisplayName": "Microsoft",
+   "targetPlatform": "darwin-arm64",
+   "updated": true,
+   "private": false,
+   "isPreReleaseVersion": false,
+   "hasPreReleaseVersion": false,
+   "preRelease": false
+  }
+ }
+]

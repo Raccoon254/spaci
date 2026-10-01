@@ -682,6 +682,14 @@
         }
       }
 
+      // ---- ai models and dev tools ----
+      // Developer storage the drill-down cannot name by folder alone: models,
+      // simulators, emulators and toolchain versions, each with its size.
+      if (c.key === 'developer' && SP.devtools) {
+        const summary = SP.devtools.storageSummary(() => { if (S.route === 'storagecat' && S.activeCat && S.activeCat.key === c.key && latestCatRender) latestCatRender(); });
+        if (summary) host.appendChild(summary);
+      }
+      // ---- end ai models and dev tools ----
       host.appendChild(capsLabel('Largest items'));
       const items = S.catChildren[c.key];
 

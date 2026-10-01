@@ -25,7 +25,10 @@ Files were checked for scripts, foreignObject, event attributes, javascript:/dat
 | github-copilot-dark.svg | https://svgl.app/library/copilot_dark.svg |
 | grok.svg | https://svgl.app/library/grok-light.svg |
 | grok-dark.svg | https://svgl.app/library/grok-dark.svg |
+| hugging-face.svg | https://svgl.app/library/hugging_face.svg (fetched 2026-10-01) |
 | intellij.svg | https://svgl.app/library/intellijidea.svg |
+| ollama.svg | https://svgl.app/library/ollama_light.svg (fetched 2026-10-01) |
+| ollama-dark.svg | https://svgl.app/library/ollama_dark.svg (fetched 2026-10-01) |
 | openai.svg | https://svgl.app/library/openai.svg |
 | openai-dark.svg | https://svgl.app/library/openai_dark.svg |
 | opencode.svg | https://svgl.app/library/opencode.svg |
@@ -37,4 +40,4 @@ Files were checked for scripts, foreignObject, event attributes, javascript:/dat
 | zed.svg | https://svgl.app/library/zed-logo.svg |
 | zed-dark.svg | https://svgl.app/library/zed-logo_dark.svg |
 
-Notes: `arc` is SVGL's single-variant Arc browser entry (arc.net); the light/dark Arc entries on SVGL are other companies. Not on SVGL: continue, xcode, android-studio.
+Notes: `arc` is SVGL's single-variant Arc browser entry (arc.net); the light/dark Arc entries on SVGL are other companies. Not on SVGL: continue, xcode, android-studio, lm-studio (LM Studio rows use the interface icon instead).
