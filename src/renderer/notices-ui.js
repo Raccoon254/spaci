@@ -364,11 +364,18 @@
     if (cur.title || cur.blocks.length) out.push(cur);
     return out;
   }
-  function wnButton(label, iconName, onClick, primary) {
-    return el('button', {
-      class: 'sp-wn-btn' + (primary ? ' sp-wn-btn-primary' : ''),
-      onclick: onClick
-    }, [iconName ? ic(iconName, 16) : null, label]);
+  // Same visual language as onboarding: a centred column, the animated Spaci
+  // ring, a large heading, calm text, simple rows and one primary button.
+  // Every part rises in after the one before it (still under reduced motion).
+  function rise(node, i) {
+    if (!node) return node;
+    node.classList.add('sp-wn-in');
+    node.style.animationDelay = Math.min(i, 24) * 55 + 'ms';
+    return node;
+  }
+  function itemText(b) {
+    // List items and paragraphs keep their inline formatting (bold, code, links).
+    return el('div', { class: 'sp-notice-body sp-wn-text' }, [renderBlocks([b])]);
   }
   SP.screens = SP.screens || {};
   SP.screens.whatsnew = function (host) {
@@ -377,67 +384,81 @@
     const page = el('div', { class: 'sp-wn' });
     host.appendChild(page);
 
+    function primary(label, onClick) {
+      return el('button', { class: 'sp-wn-primary', onclick: onClick }, [label, ic('chevron-right', 18)]);
+    }
+    function textLink(label, url) {
+      return el('button', { class: 'sp-wn-link', onclick: () => openLink(url) }, [label, ic('external-link', 14)]);
+    }
+
     function render(notes) {
       page.replaceChildren();
+      let n = 0;
+      const heroRing = SP.ring ? SP.ring('spiral', 96, 'var(--accent-fg)') : null;
+      if (heroRing) heroRing.setAttribute('style', 'width:96px;height:96px;display:block;margin:0 auto 22px;color:var(--accent-fg)');
       if (!notes) {
-        page.appendChild(el('div', { class: 'sp-wn-empty' }, [
-          el('div', { class: 'sp-wn-hero-icon' }, [ic('gift', 28)]),
-          el('h1', { class: 'sp-wn-title', style: 'font-size:24px', text: "What's new" }),
-          el('p', { class: 'sp-wn-lead', text: 'The notes for this version could not be loaded. Check your connection, or read them on the website.' }),
-          el('div', { class: 'sp-wn-actions' }, [wnButton('Open the changelog', 'external-link', () => openLink(CHANGELOG_URL), true)])
-        ]));
+        page.append(
+          rise(heroRing, n++),
+          rise(el('h1', { class: 'sp-wn-title', text: "What's new" }), n++),
+          rise(el('p', { class: 'sp-wn-lead', text: 'The notes for this version could not be loaded. Check your connection, or read them on the website.' }), n++),
+          rise(el('div', { class: 'sp-wn-actions' }, [primary('Open the changelog', () => openLink(CHANGELOG_URL))]), n++)
+        );
         return;
       }
       const v = versionParts(notes.version);
-      // Inside the app a "download" link points at what is already installed.
+      const date = dateText(notes.date);
       const links = (Array.isArray(notes.links) ? notes.links : [])
         .filter((l) => l && /^https:/.test(String(l.url || '')) && safeHref(l.url) && !/\/download\/?$/.test(String(l.url)))
-        .slice(0, 3);
-      const date = dateText(notes.date);
+        .slice(0, 2);
 
-      // Hero
-      page.appendChild(el('section', { class: 'sp-wn-hero', 'aria-labelledby': 'sp-wn-title' }, [
-        el('div', { class: 'sp-wn-hero-top' }, [
-          el('div', { class: 'sp-wn-hero-icon' }, [ic('gift', 28)]),
-          el('div', { class: 'sp-wn-eyebrow' }, [
-            el('span', { text: "What's new" }),
-            el('span', { class: 'sp-wn-pill', text: 'Version ' + v.base }),
-            v.rc ? el('span', { class: 'sp-wn-pill sp-wn-pill-rc', text: 'Release candidate ' + v.rc }) : null,
-            date ? el('span', { class: 'sp-wn-date', text: date }) : null
-          ])
-        ]),
-        el('h1', { id: 'sp-wn-title', class: 'sp-wn-title', text: 'Spaci ' + v.short }),
-        notes.highlight ? el('p', { class: 'sp-wn-lead', text: str(notes.highlight) }) : null,
-        el('div', { class: 'sp-wn-actions' }, [
-          ...links.map((l, i) => wnButton(String(l.label || 'Link').slice(0, 40), 'external-link', () => openLink(l.url), i === 0)),
-          wnButton('Full changelog', 'document-text', () => openLink(CHANGELOG_URL), !links.length)
-        ])
-      ]));
+      page.append(
+        rise(heroRing, n++),
+        rise(el('div', { class: 'sp-wn-meta' }, [
+          el('span', { text: "What's new" }),
+          el('span', { class: 'sp-wn-sep', 'aria-hidden': 'true', text: '·' }),
+          el('span', { text: 'Version ' + v.base }),
+          v.rc ? el('span', { class: 'sp-wn-rc', text: 'Release candidate ' + v.rc }) : null,
+          date ? el('span', { class: 'sp-wn-sep', 'aria-hidden': 'true', text: '·' }) : null,
+          date ? el('span', { text: date }) : null
+        ]), n++),
+        rise(el('h1', { class: 'sp-wn-title', text: 'Spaci ' + v.short }), n++),
+        notes.highlight ? rise(el('p', { class: 'sp-wn-lead', text: str(notes.highlight) }), n++) : null
+      );
 
-      // Sections
-      // The hero already carries the highlight; an introduction that only
-      // restates it in one paragraph is left out.
+      // Sections: a quiet label, then plain rows with a check mark.
       let secs = sections(notes.body);
       if (notes.highlight && secs[0] && !secs[0].title && secs[0].blocks.length === 1 && secs[0].blocks[0].t === 'p') secs = secs.slice(1);
-      const grid = el('div', { class: 'sp-wn-sections' });
       secs.forEach((sec) => {
-        grid.appendChild(el('section', { class: 'sp-wn-card' + (sec.title ? '' : ' sp-wn-card-intro') }, [
-          sec.title ? el('h2', { class: 'sp-wn-card-title' }, [el('span', { class: 'sp-wn-dot', 'aria-hidden': 'true' }), sec.title]) : null,
-          el('div', { class: 'sp-notice-body sp-wn-body' }, [renderBlocks(sec.blocks)])
-        ]));
+        const block = el('section', { class: 'sp-wn-section' });
+        if (sec.title) block.appendChild(rise(el('h2', { class: 'sp-wn-label', text: sec.title }), n++));
+        sec.blocks.forEach((b) => {
+          if (b.t === 'ul' || b.t === 'ol') {
+            const ul = el('ul', { class: 'sp-wn-list' });
+            (Array.isArray(b.items) ? b.items : []).forEach((it) => {
+              ul.appendChild(rise(el('li', {}, [
+                el('span', { class: 'sp-wn-check', 'aria-hidden': 'true' }, [ic('tick', 16)]),
+                itemText({ t: 'p', c: it })
+              ]), n++));
+            });
+            block.appendChild(ul);
+          } else {
+            block.appendChild(rise(itemText(b), n++));
+          }
+        });
+        page.appendChild(block);
       });
-      page.appendChild(grid);
 
-      // Media
       const figs = (Array.isArray(notes.media) ? notes.media : []).map((m) => m && figure(m.url, m.alt, m.caption)).filter(Boolean);
-      if (figs.length) page.appendChild(el('div', { class: 'sp-wn-media' }, figs));
+      figs.forEach((f) => page.appendChild(rise(el('div', { class: 'sp-wn-figure' }, [f]), n++)));
 
-      // Footer
-      page.appendChild(el('div', { class: 'sp-wn-foot' }, [
-        el('span', { text: 'You are running Spaci ' + str(notes.version) + '.' }),
-        el('span', { style: 'flex:1' }),
-        wnButton('Back to Smart Scan', 'chevron-left', () => SP.go('dashboard'))
-      ]));
+      page.appendChild(rise(el('div', { class: 'sp-wn-actions' }, [
+        primary('Continue', () => SP.go('dashboard')),
+        el('div', { class: 'sp-wn-links' }, [
+          ...links.map((l) => textLink(String(l.label || 'Link').slice(0, 40), l.url)),
+          textLink('Full changelog', CHANGELOG_URL)
+        ])
+      ]), n++));
+      page.appendChild(rise(el('p', { class: 'sp-wn-foot', text: 'You are running Spaci ' + str(notes.version) + '.' }), n++));
 
       // Seeing the page counts as seen.
       try { api.whatsNewSeen(notes.version); } catch (_) {}
