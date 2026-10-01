@@ -27,7 +27,7 @@
     duplicates: 'copy',
     developer: 'code',
     'auto-clean': 'clock',
-    worktrees: 'hierarchy'
+    worktrees: 'copy'
   };
   function scopeIcon(e) {
     return SCOPE_ICON[(e.scope || '').toLowerCase()] || 'box';

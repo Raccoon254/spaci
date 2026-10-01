@@ -98,8 +98,8 @@
   }
   function creatorMark(w, size) {
     const c = w.creator || {};
-    if (c.brand && SP.bic) return SP.bic(c.brand, size, { label: c.label, fallback: 'hierarchy' });
-    return ic('hierarchy', size);
+    if (c.brand && SP.bic) return SP.bic(c.brand, size, { label: c.label, fallback: 'copy' });
+    return ic('copy', size);
   }
   function chip(icon, text, title) {
     return el('span', {
@@ -111,7 +111,7 @@
     const out = [];
     const wts = wtList(p);
     const pk = pkgList(p);
-    if (wts.length) out.push(chip('hierarchy', plural(wts.length, 'worktree'), removableOf(p).length ? removableOf(p).length + ' can be removed' : ''));
+    if (wts.length) out.push(chip('copy', plural(wts.length, 'worktree'), removableOf(p).length ? removableOf(p).length + ' can be removed' : ''));
     if (pk.length) out.push(chip('layer', plural(pk.length, 'package')));
     const total = totalOnDisk(p);
     if (total > 0) out.push(chip('hard-drive', fmt(total) + ' on disk'));
@@ -1185,7 +1185,7 @@
       { icon: 'broom', label: 'Reclaimable', value: fmt(p.cleanableSize || 0), color: 'var(--accent-fg)' },
       { icon: 'hard-drive', label: 'On disk', value: totalSize ? fmt(totalSize) : '…', color: 'var(--text)' },
       { icon: 'folder-2', label: 'Items', value: String(items.length), color: 'var(--text)' },
-      wts.length ? { icon: 'hierarchy', label: 'Worktrees', value: String(wts.length), color: 'var(--text)' } : null,
+      wts.length ? { icon: 'copy', label: 'Worktrees', value: String(wts.length), color: 'var(--text)' } : null,
       { icon: 'clock', label: 'Modified', value: p.mtime ? new Date(p.mtime).toLocaleDateString() : 'n/a', color: 'var(--text)' },
     ].filter(Boolean);
     host.appendChild(el('div', { style: 'display:flex;flex-wrap:wrap;gap:10px 32px;padding:16px 2px;border-top:1px solid var(--border);border-bottom:1px solid var(--border)' },
@@ -1362,7 +1362,7 @@
     if (!rem.length) return null;
     const bytes = rem.reduce((a, w) => a + (w.size || 0), 0);
     return el('div', { 'data-wt-rec': '', style: 'display:flex;align-items:center;gap:16px;padding:16px 18px;border-radius:16px;background:var(--panel);border:1px solid var(--border-2);box-shadow:var(--shadow-sm);margin-top:16px' }, [
-      el('div', { style: 'width:44px;height:44px;border-radius:12px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--accent-fg)' }, [ic('hierarchy', 23)]),
+      el('div', { style: 'width:44px;height:44px;border-radius:12px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--accent-fg)' }, [ic('copy', 23)]),
       el('div', { style: 'flex:1;min-width:0' }, [
         el('div', { style: 'font-weight:700;font-size:14.5px;display:flex;align-items:center;gap:9px' }, [
           el('span', { text: plural(rem.length, 'worktree') + (rem.length === 1 ? ' is' : ' are') + ' merged and clean' }),
@@ -1493,7 +1493,7 @@
           }),
         ]),
         el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px;line-height:1.5', text: it.note || it.path }),
-        itemWhere(it, p) ? el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:2px;display:flex;align-items:center;gap:5px' }, [ic(it.worktree ? 'hierarchy' : 'layer', 12), itemWhere(it, p)]) : null,
+        itemWhere(it, p) ? el('div', { style: 'color:var(--text-3);font-size:11.5px;margin-top:2px;display:flex;align-items:center;gap:5px' }, [ic(it.worktree ? 'copy' : 'layer', 12), itemWhere(it, p)]) : null,
         locked ? el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:3px', text: 'Spaci will not clean this. Reveal it and delete it yourself if you are sure.' }) : null,
       ]),
       el('div', { style: 'font-weight:700;font-size:14.5px;flex:none', text: fmt(it.size || 0) }),
