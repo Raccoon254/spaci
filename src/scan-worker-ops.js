@@ -199,7 +199,9 @@ function buildOps(mod) {
         signal: ctx.signal, dirSize: (d, s) => scanner.dirSize(d, s),
       });
     },
-    worktreePrune: (ctx, mainPath) => mod('worktrees').pruneWorktrees(String(mainPath), { signal: ctx.signal }),
+    // Clears git's record of each named missing worktree, one by one.
+    worktreePrune: (ctx, mainPath, paths) => mod('worktrees').pruneWorktrees(String(mainPath),
+      (Array.isArray(paths) ? paths : []).map(String), { signal: ctx.signal }),
 
     // Generic routing for Docker: any allowlisted export, called by name.
     docker: async (ctx, name, args = []) => {

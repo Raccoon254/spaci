@@ -20,6 +20,11 @@ const cleanPlan = require('../src/clean-plan');
 const repoSummary = require('../src/repo-summary');
 const restoreHints = require('../src/restore-hints');
 
+// Fixture worktrees are seconds old, and a worktree touched within the hour
+// is never offered. Tests that are not about freshness look from two hours on.
+const LATER = () => Date.now() + 2 * wtx.FRESH_MS;
+wtx.setClock(LATER);
+
 const GIT_ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: 'Spaci Test', GIT_AUTHOR_EMAIL: 'test@example.com',
@@ -464,19 +469,20 @@ test('remove deletes a merged, clean worktree and keeps its branch', async () =>
   assert.match(restoreHints.worktreeRestoreHint(d), /^git worktree add --detach /);
 });
 
-test('prune clears only worktrees whose folder is gone', async () => {
+test('prune clears only the named worktrees whose folder is gone', async () => {
   const before = wtx.parseWorktreeList(git(F.mono, 'worktree', 'list', '--porcelain'));
   assert.ok(before.some((e) => e.prunable));
-  const r = await wtx.pruneWorktrees(F.mono);
+  const r = await wtx.pruneWorktrees(F.mono, [F.wt('gone'), F.wt('locked'), F.wt('dirty')]);
   assert.equal(r.ok, true);
-  assert.ok(r.pruned.length >= 1);
+  assert.deepEqual(r.pruned, [F.wt('gone')]);
+  assert.deepEqual(r.refused.map((x) => x.path), [F.wt('locked'), F.wt('dirty')]);
   const after = wtx.parseWorktreeList(git(F.mono, 'worktree', 'list', '--porcelain'));
   assert.ok(!after.some((e) => e.prunable));
   assert.equal(after.length, before.length - 1, 'only the missing one went');
   assert.ok(fs.existsSync(F.wt('locked')) && fs.existsSync(F.wt('dirty')));
   assert.equal(branchExists('feat-gone'), true, 'its branch is kept');
-  const again = await wtx.pruneWorktrees(F.mono);
-  assert.deepEqual(again, { ok: true, pruned: [] });
+  const again = await wtx.pruneWorktrees(F.mono, [F.wt('gone')]);
+  assert.deepEqual([again.ok, again.pruned, again.refused[0].reason], [true, [], 'Git no longer lists it.']);
 });
 
 test('the clean gate treats a worktree as needing confirmation, so auto-clean never removes one', () => {

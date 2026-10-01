@@ -1250,6 +1250,15 @@ function sendCacheUpdated() {
   if (win && !win.isDestroyed()) win.webContents.send('cache:updated', { scannedAt: cache.scannedAt });
 }
 
+/**
+ * A worktree path's identity for de-duplicating requests: resolved and NFC,
+ * never case-folded, so two worktrees whose names differ only in case on a
+ * case-sensitive volume stay two, and the confirmed one is the one removed.
+ */
+function exactPathKey(p) {
+  return path.resolve(String(p)).normalize('NFC');
+}
+
 /** Replace repo records in the cache after worktrees went away. */
 function dropWorktreesFromCache(byMain) {
   const updated = [];
@@ -1272,7 +1281,7 @@ ipcMain.handle('worktrees:remove', async (_e, jobs, meta) => {
   const seen = new Set();
   const list = (Array.isArray(jobs) ? jobs : []).filter((j) => {
     if (!j || typeof j.path !== 'string' || !j.path) return false;
-    const k = cleanGuard.keyOf(j.path);
+    const k = exactPathKey(j.path);
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
@@ -1330,34 +1339,41 @@ ipcMain.handle('worktrees:remove', async (_e, jobs, meta) => {
   return { ok: true, freed: removed.reduce((s, r) => s + r.bytes, 0), removed, refused, failed, historyId, projects };
 });
 
-// api.pruneWorktrees(mainPath) -> { ok, pruned: n, projects }. `git worktree
-// prune` only clears git's records of worktrees whose folder is already gone
-// (metadata, tier A), and only for a repository from the last scan.
-ipcMain.handle('worktrees:prune', async (_e, mainPath) => {
+// api.pruneWorktrees(mainPath, [path], { confirmed }) -> { ok, pruned: n,
+// refused: [{ path, reason }], projects }. Clears git's record of each named
+// worktree whose folder is gone, one at a time (never a global git worktree
+// prune), after the renderer showed a confirm naming each one. Only missing
+// worktrees of a repository from the last scan are accepted; the worker
+// re-checks each (folder really gone, not on an absent disk, commit on a ref).
+ipcMain.handle('worktrees:prune', async (_e, mainPath, paths, meta) => {
   if (typeof mainPath !== 'string' || !mainPath) return { ok: false, error: 'No repository given.' };
+  if (!meta || meta.confirmed !== true) return { ok: false, error: 'Clearing worktree records needs a confirmation.' };
   const key = cleanGuard.keyOf(mainPath);
   const rec = (cache.projects || []).find((p) => p && p.repo && cleanGuard.keyOf(p.repo.main || p.path) === key);
   if (!rec) return { ok: false, error: 'Spaci did not find this repository in a scan. Scan again and retry.' };
-  const missing = (rec.repo.worktrees || []).filter((w) => !w.exists);
-  if (!missing.length) return { ok: true, pruned: 0, projects: [] };
+  const missingAll = (rec.repo.worktrees || []).filter((w) => w && !w.exists);
+  const asked = new Set((Array.isArray(paths) ? paths : []).filter((p) => typeof p === 'string' && p).map(exactPathKey));
+  const missing = missingAll.filter((w) => asked.has(exactPathKey(w.path)));
+  if (!missing.length) return { ok: true, pruned: 0, refused: [], projects: [] };
   let r;
-  try { r = await work('worktreePrune', [rec.repo.main || rec.path]); } catch (err) { r = { ok: false, error: err && err.message }; }
-  if (!r || !r.ok) return { ok: false, error: (r && r.error) || 'git could not prune.' };
-  const still = Array.isArray(r.remaining) ? new Set(r.remaining.map((p) => cleanGuard.keyOf(p))) : null;
-  const gone = missing.filter((w) => still ? !still.has(cleanGuard.keyOf(w.path)) : true).map((w) => w.path);
+  try { r = await work('worktreePrune', [rec.repo.main || rec.path, missing.map((w) => w.path)]); } catch (err) { r = { ok: false, error: err && err.message }; }
+  if (!r || !r.ok) return { ok: false, error: (r && r.error) || 'git could not clear the records.' };
+  const prunedKeys = new Set((r.pruned || []).map(exactPathKey));
+  const gone = missing.filter((w) => prunedKeys.has(exactPathKey(w.path))).map((w) => w.path);
+  const refused = Array.isArray(r.refused) ? r.refused : [];
   if (gone.length) {
     const at = Date.now();
     const hint = 'Only git\'s record was cleared; the folder was already gone. The branch is kept.';
     putHistory(historyLog.finishedEntry({
       id: newHistoryId(), at, finishedAt: at, status: 'done', scope: 'worktrees',
-      label: 'Missing worktrees pruned in ' + rec.name, requested: missing.length,
+      label: 'Missing worktree records cleared in ' + rec.name, requested: missing.length,
       items: gone.map((p) => ({ path: p, kind: 'other', outcome: 'removed', bytes: 0, reversible: 'none', project: rec.repo.main || rec.path, restoreHint: hint })),
     }));
   }
   const projects = dropWorktreesFromCache(new Map([[key, gone]]));
   writeCache();
   sendCacheUpdated();
-  return { ok: true, pruned: gone.length, projects };
+  return { ok: true, pruned: gone.length, refused, projects };
 });
 
 // Savings are what each action really removes (recommendations.js, issue #13).

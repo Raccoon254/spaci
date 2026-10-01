@@ -1285,6 +1285,9 @@ test('worktrees: remove is confirm-only, re-verified in the worker, logged with 
   fs.writeFileSync(path.join(wip, 'notes.txt'), 'not committed');
   fs.rmSync(gone, { recursive: true, force: true });
   const realScanner = require('../src/scanner');
+  // The worktrees are seconds old; look from two hours on so they count as quiet.
+  const wtxMod = require('../src/worktrees');
+  wtxMod.setClock(() => Date.now() + 2 * wtxMod.FRESH_MS);
   const { projects } = await realScanner.scanProjects(dir, null, new AbortController().signal);
   const rec = projects.find((p) => p.repo && p.repo.worktrees.length);
   assert.ok(rec, 'one repository record with worktrees');
@@ -1321,14 +1324,20 @@ test('worktrees: remove is confirm-only, re-verified in the worker, logged with 
     assert.ok(!cached.items.some((i) => i.checkout === doneWt.path), 'its items left the cache with it');
     assert.equal(res.projects[0].repo.worktrees.length, 2);
 
-    const pr = await m.handlers['worktrees:prune'](cleanEvent, rec.path);
+    const goneWt = rec.repo.worktrees.find((w) => w.branch === 'gone');
+    const noConfirm = await m.handlers['worktrees:prune'](cleanEvent, rec.path, [goneWt.path]);
+    assert.equal(noConfirm.ok, false, 'clearing records needs the confirm');
+    const notMissing = await m.handlers['worktrees:prune'](cleanEvent, rec.path, [wipWt.path], { confirmed: true });
+    assert.deepEqual([notMissing.ok, notMissing.pruned], [true, 0], 'only missing worktrees from the scan are accepted');
+    assert.ok(fs.existsSync(wip));
+    const pr = await m.handlers['worktrees:prune'](cleanEvent, rec.path, [goneWt.path], { confirmed: true });
     assert.deepEqual([pr.ok, pr.pruned], [true, 1]);
     const after = m.handlers['cache:get']().projects.find((p) => p.path === rec.path);
     assert.equal(after.repo.worktrees.length, 1);
     assert.equal(after.repo.missing, 0);
     const [pe] = readHistoryFile(m);
     assert.equal(pe.scope, 'worktrees');
-    const bad = await m.handlers['worktrees:prune'](cleanEvent, '/not/scanned');
+    const bad = await m.handlers['worktrees:prune'](cleanEvent, '/not/scanned', ['/not/scanned/x'], { confirmed: true });
     assert.equal(bad.ok, false);
-  } finally { m.cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { m.cleanup(); fs.rmSync(dir, { recursive: true, force: true }); wtxMod.setClock(null); }
 });

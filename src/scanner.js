@@ -89,8 +89,9 @@ const CLEAN_RULES = [
   { match: '.terraform',     kind: 'box',     safe: true,  note: 'Terraform provider cache.' },
 ];
 const CLEAN_NAMES = new Set(CLEAN_RULES.map((r) => r.match));
-// Ignored files inside a worktree that are build output do not block its removal.
-require('./worktrees').setArtifactNames(CLEAN_NAMES);
+// Ignored build output inside a worktree does not block its removal, but only
+// the safe kinds: a virtualenv (.venv, venv) is not regenerable for free.
+require('./worktrees').setArtifactNames(CLEAN_RULES.filter((r) => r.safe === true).map((r) => r.match));
 const CLEAN_BY_NAME = Object.fromEntries(CLEAN_RULES.map((r) => [r.match, r]));
 
 /** Directories we never descend into while *detecting* projects. */

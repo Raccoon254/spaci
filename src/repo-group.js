@@ -324,13 +324,21 @@ async function consolidate(raw, ctx = {}) {
   const descs = new Array(glist.length).fill(null);
   const mainSizes = new Array(glist.length).fill(null);
   const mainExists = new Array(glist.length).fill(false);
-  await mapPool(glist.map((g, i) => i).filter((i) => withLinked[i]), 4, async (i) => {
+  const linkedIdx = glist.map((g, i) => i).filter((i) => withLinked[i]);
+  // One process snapshot for the whole scan: a worktree a tool is running in
+  // is not offered. Removal takes its own snapshot again right before.
+  let procs = ctx.procs || null;
+  if (!procs && linkedIdx.length && ctx.snapshot !== false) {
+    const snap = typeof ctx.snapshot === 'function' ? ctx.snapshot : wtx.processSnapshot;
+    try { const s = await snap(); procs = s && s.ok ? s : null; } catch { procs = null; }
+  }
+  await mapPool(linkedIdx, 4, async (i) => {
     if (signal && signal.aborted) return;
     const g = glist[i];
     const main = await wtx.readGitEntry(g.mainRoot).catch(() => null);
     mainExists[i] = Boolean(main);
     const cwd = main ? g.mainRoot : g.anyRoot;
-    descs[i] = await wtx.describeRepo(cwd, { signal, dirSize: ctx.dirSize, measure: ctx.measure });
+    descs[i] = await wtx.describeRepo(cwd, { signal, dirSize: ctx.dirSize, measure: ctx.measure, procs, now: ctx.now });
     // The main folder's own size is the expensive part (a whole repository),
     // so a scan leaves it to enrichment unless asked (tests, reports).
     if (main && ctx.measureMain === true && typeof ctx.dirSize === 'function' && ctx.measure !== false) {
