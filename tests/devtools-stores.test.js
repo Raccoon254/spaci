@@ -627,3 +627,127 @@ test('no project scan yet: every toolchain version stays, with the reason', asyn
   const it = (await devtools.inventory({ ...base, projects: [], projectsScanned: true })).groups.find((g) => g.id === 'nvm').items[0];
   assert.equal(it.blocked, null);
 });
+
+// ---- JetBrains: installed, age, running, user data ---------------------------------------
+
+/** Set every mtime under dir (and dir) to `ms`. */
+function ageTree(dir, ms) {
+  const t = new Date(ms);
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) walk(f); fs.utimesSync(f, t, t); }
+    fs.utimesSync(d, t, t);
+  };
+  walk(dir);
+}
+
+/** A macOS home with IntelliJ 2024.1 leftovers (old) and 2026.1 (current). */
+function jbHome({ oldDays = 400 } = {}) {
+  const home = tmp('jb');
+  const lib = (...x) => path.join(home, 'Library', ...x);
+  const old = 'IntelliJIdea2024.1';
+  write(lib('Application Support', 'JetBrains', old, 'scratches', 'notes.sql'), 'my work');
+  write(lib('Application Support', 'JetBrains', old, 'consoles', 'db', 'q.sql'), 'select 1');
+  write(lib('Application Support', 'JetBrains', old, 'options', 'editor.xml'), '<x/>');
+  write(lib('Application Support', 'JetBrains', old, 'plugins', 'p', 'lib', 'p.jar'), 'j'.repeat(4096));
+  write(lib('Caches', 'JetBrains', old, 'index', 'x'), 'c'.repeat(8192));
+  write(lib('Logs', 'JetBrains', old, 'idea.log'), 'log');
+  write(lib('Application Support', 'JetBrains', 'IntelliJIdea2026.1', 'options', 'x.xml'), 'new');
+  for (const r of ['Application Support', 'Caches', 'Logs']) { const d = lib(r, 'JetBrains', old); if (fs.existsSync(d)) ageTree(d, Date.now() - oldDays * 86400000); }
+  return { home, lib, old, apps: tmp('apps') };
+}
+
+test('JetBrains: an old, uninstalled, unused version offers caches, logs and plugins only, never settings or scratches', async () => {
+  const j = jbHome();
+  const ctx = { platform: 'darwin', home: j.home, env: {}, jetbrainsAppDirs: [j.apps], procs: quietProcs };
+  const [g] = await ide.jetbrains(ctx);
+  assert.equal(g.items.length, 1);
+  const it = g.items[0];
+  assert.equal(it.blocked, null);
+  assert.deepEqual(it.paths.sort(), [j.lib('Application Support', 'JetBrains', j.old, 'plugins'), j.lib('Caches', 'JetBrains', j.old), j.lib('Logs', 'JetBrains', j.old)].sort());
+  for (const pth of it.paths) assert.ok(!/scratches|consoles|options/.test(pth));
+  const del = async (pth) => { fs.rmSync(pth, { recursive: true, force: true }); return 1; };
+  const res = await devtools.removePaths(it.removal, del);
+  assert.equal(res.ok, true, res.error);
+  assert.equal(fs.readFileSync(j.lib('Application Support', 'JetBrains', j.old, 'scratches', 'notes.sql'), 'utf8'), 'my work');
+  assert.ok(fs.existsSync(j.lib('Application Support', 'JetBrains', j.old, 'consoles', 'db', 'q.sql')));
+  assert.ok(fs.existsSync(j.lib('Application Support', 'JetBrains', j.old, 'options', 'editor.xml')));
+  assert.ok(!fs.existsSync(j.lib('Caches', 'JetBrains', j.old)));
+});
+
+test('JetBrains: a version that is still installed is not offered (Toolbox, product-info.json, Info.plist)', async () => {
+  // Toolbox's state.json.
+  let j = jbHome();
+  write(j.lib('Application Support', 'JetBrains', 'Toolbox', 'state.json'), JSON.stringify({ tools: [{ toolId: 'IDEA-U', productCode: 'IU', buildNumber: '241.14494.240', installLocation: path.join(j.apps, 'nothing-here.app') }] }));
+  assert.deepEqual(await ide.jetbrains({ platform: 'darwin', home: j.home, env: {}, jetbrainsAppDirs: [j.apps], procs: quietProcs }), []);
+  // An installed app's product-info.json.
+  j = jbHome();
+  write(path.join(j.apps, 'IntelliJ IDEA 2024.1.app', 'Contents', 'Resources', 'product-info.json'), JSON.stringify({ productCode: 'IU', buildNumber: '241.14494.240', dataDirectoryName: 'IntelliJIdea2024.1' }));
+  assert.deepEqual(await ide.jetbrains({ platform: 'darwin', home: j.home, env: {}, jetbrainsAppDirs: [j.apps], procs: quietProcs }), []);
+  // Only Info.plist (CFBundleVersion IU-241...).
+  j = jbHome();
+  write(path.join(j.apps, 'IDEA.app', 'Contents', 'Info.plist'), '<plist><dict><key>CFBundleVersion</key>\n<string>IU-241.14494.240</string></dict></plist>');
+  assert.deepEqual(await ide.jetbrains({ platform: 'darwin', home: j.home, env: {}, jetbrainsAppDirs: [j.apps], procs: quietProcs }), []);
+  // A Toolbox list Spaci cannot read keeps everything.
+  j = jbHome();
+  write(j.lib('Application Support', 'JetBrains', 'Toolbox', 'state.json'), '{ not json');
+  const [g] = await ide.jetbrains({ platform: 'darwin', home: j.home, env: {}, jetbrainsAppDirs: [j.apps], procs: quietProcs });
+  assert.match(g.items[0].blocked, /Toolbox/);
+  assert.equal(ide.jbDirFromBuild('PC', '233.1'), 'PyCharmCE2023.3');
+  assert.equal(ide.jbDirFromBuild(null, 'WS-252.2.3'), 'WebStorm2025.2');
+});
+
+test('JetBrains: Windows registry install paths count as installed', async () => {
+  const appData = tmp('appdata');
+  const local = tmp('local');
+  const old = 'PyCharm2024.1';
+  write(path.join(local, 'JetBrains', old, 'caches', 'x'), 'c');
+  write(path.join(local, 'JetBrains', 'PyCharm2026.1', 'caches', 'x'), 'c');
+  ageTree(path.join(local, 'JetBrains', old), Date.now() - 400 * 86400000);
+  const inst = tmp('inst');
+  write(path.join(inst, 'product-info.json'), JSON.stringify({ productCode: 'PY', buildNumber: '241.1', dataDirectoryName: old }));
+  const regOut = '\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\JetBrains\\PyCharm\\241.1\r\n    (Default)    REG_SZ    ' + inst + '\r\n';
+  const exec = execStub({ 'reg query HKLM\\SOFTWARE\\JetBrains /s': regOut });
+  const ctx = { platform: 'win32', home: tmp('h'), env: { APPDATA: appData, LOCALAPPDATA: local }, jetbrainsAppDirs: [], exec, procs: quietProcs };
+  // The registry parser, on any OS: every install path under Software\\JetBrains.
+  const paths = await ide.registryInstalls({ platform: 'win32', exec: execStub({ 'reg query HKLM\\SOFTWARE\\JetBrains /s': '    (Default)    REG_SZ    C:\\Program Files\\JetBrains\\PyCharm 2024.1\r\n    Exe    REG_SZ    C:\\Tools\\pc\\bin\\pycharm64.exe\r\n' }) });
+  assert.deepEqual(paths, ['C:\\Program Files\\JetBrains\\PyCharm 2024.1', 'C:\\Tools\\pc']);
+  if (process.platform === 'win32') {
+    assert.deepEqual(await ide.jetbrains(ctx), [], 'installed per the registry: not offered');
+    const [g] = await ide.jetbrains({ ...ctx, exec: execStub({}) });
+    assert.equal(g.items[0].blocked, null, 'without the registry entry it is offered');
+  }
+});
+
+test('JetBrains: a version used in the last 180 days is kept', async () => {
+  const j = jbHome({ oldDays: 30 });
+  const [g] = await ide.jetbrains({ platform: 'darwin', home: j.home, env: {}, jetbrainsAppDirs: [j.apps], procs: quietProcs });
+  assert.match(g.items[0].blocked, /Used 30 days ago.*180 days/);
+});
+
+test('r3: a running IDE is matched by idea.paths.selector or its bundle, never by version text', async () => {
+  const j = jbHome();
+  const run = (args) => ide.jetbrains({ platform: 'darwin', home: j.home, env: {}, jetbrainsAppDirs: [j.apps], procs: { ok: true, list: [{ pid: 5, args }] } });
+  // The critic's case: a generic bundle path with no version in it.
+  let [g] = await run('/Users/u/Applications/IntelliJ IDEA Ultimate.app/Contents/MacOS/idea');
+  assert.match(g.items[0].blocked, /IntelliJ IDEA is running and Spaci could not tell which version/);
+  [g] = await run('/opt/jbr/bin/java -Didea.paths.selector=IntelliJIdea2024.1 -cp x');
+  assert.match(g.items[0].blocked, /IntelliJ IDEA 2024\.1 is running/);
+  // The running bundle is the 2026.1 install: 2024.1 is not in use.
+  write(path.join(j.apps, 'IntelliJ IDEA.app', 'Contents', 'Resources', 'product-info.json'), JSON.stringify({ dataDirectoryName: 'IntelliJIdea2026.1' }));
+  [g] = await run(path.join(j.apps, 'IntelliJ IDEA.app', 'Contents', 'MacOS', 'idea'));
+  assert.equal(g.items[0].blocked, null);
+  // Version text alone (a file name) means nothing.
+  [g] = await run('/usr/bin/vim notes-IntelliJ-IDEA-2024.1.txt');
+  assert.equal(g.items[0].blocked, null);
+  [g] = await ide.jetbrains({ platform: 'darwin', home: j.home, env: {}, jetbrainsAppDirs: [j.apps], procs: { ok: false, list: [] } });
+  assert.match(g.items[0].blocked, /could not check/);
+});
+
+test('r3 as written: the 2025.3 scratches are never offered', async () => {
+  const home = tmp('r3');
+  write(path.join(home, 'Library/Application Support/JetBrains/IntelliJIdea2025.3/scratches/notes.sql'), 'my work');
+  write(path.join(home, 'Library/Application Support/JetBrains/IntelliJIdea2026.1/options/x.xml'), 'eap tried once');
+  const groups = await ide.jetbrains({ platform: 'darwin', home, env: {}, jetbrainsAppDirs: [], procs: { ok: true, list: [{ pid: 5, args: '/Users/u/Applications/IntelliJ IDEA Ultimate.app/Contents/MacOS/idea' }] } });
+  const paths = groups.flatMap((g) => g.items.flatMap((i) => i.paths));
+  assert.ok(!paths.some((p) => /scratches|IntelliJIdea2025\.3$/.test(p)), JSON.stringify(paths));
+});

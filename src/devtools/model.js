@@ -30,7 +30,7 @@ const TIER_REASON = {
   runtime: 'Downloads again from Apple or Google when you need it, which is large and slow.',
   toolchain: 'A toolchain version no project pins. Reinstall it with the same tool if you need it again.',
   cache: 'A tool cache. The tool fetches it again the next time it needs it.',
-  ide: 'Settings, caches and logs of an IDE version you have since upgraded from.',
+  ide: 'Caches, logs and plugins of an IDE version that is no longer installed. Its settings and scratch files stay.',
   userdata: 'Holds its own apps, files and settings, which nothing can rebuild.',
   pinned: 'A project pins this version. Spaci never deletes it.',
 };

@@ -2,9 +2,9 @@
 /**
  * IDE leftovers and per-version tool caches.
  *
- *   JetBrains   folders of IDE versions you have upgraded from (config,
- *               caches, logs, plugins), the same set as the IDE's own
- *               Help > Delete Leftover IDE Directories.
+ *   JetBrains   caches, logs and plugins of IDE versions that are no longer
+ *               installed and unused for 180 days. Settings, scratches and
+ *               consoles are never deleted (see the JetBrains section).
  *   VS Code     extension versions VS Code itself marked obsolete (.obsolete)
  *               or replaced by a newer version in extensions.json. Cursor,
  *               Windsurf and Insiders keep the same layout.
@@ -23,6 +23,21 @@ function api(ctx) { return ctx.platform === 'win32' ? path.win32 : path.posix; }
 function homeOf(ctx) { return ctx.platform === 'win32' ? (ctx.env.USERPROFILE || ctx.home) : ctx.home; }
 
 // ---- JetBrains -----------------------------------------------------------------
+//
+// Each IDE version keeps folders named <Product><year>.<n> under a config root
+// (settings, scratches, consoles, and plugins on macOS and Windows), a caches
+// root, a logs root and, on Linux, a data root (plugins). Spaci offers one
+// version's folders only when:
+//   - that version is not installed (Toolbox's state.json, the installed
+//     apps' product-info.json or Info.plist, the Windows registry and install
+//     folders, Toolbox's and ~/.local/share/JetBrains on Linux);
+//   - a newer version of the same product has folders too;
+//   - nothing in them changed for 180 days (JetBrains' own leftover cleanup
+//     uses about the same span);
+//   - no running IDE uses them: a process is matched by its
+//     idea.paths.selector or its install path, never by version text.
+// From the config folder it takes only plugins/: settings, scratches/ and
+// consoles/ are the user's own files and are never deleted here.
 
 const JB_PRODUCTS = {
   IntelliJIdea: 'IntelliJ IDEA', IdeaIC: 'IntelliJ IDEA CE', PyCharm: 'PyCharm', PyCharmCE: 'PyCharm CE', WebStorm: 'WebStorm',
@@ -30,31 +45,177 @@ const JB_PRODUCTS = {
   DataSpell: 'DataSpell', RustRover: 'RustRover', Aqua: 'Aqua', AppCode: 'AppCode', Writerside: 'Writerside',
 };
 const JB_RE = new RegExp('^(' + Object.keys(JB_PRODUCTS).join('|') + ')(\\d{4}\\.\\d+)$');
+// Product codes in build numbers ("IU-253.28294.334") and Toolbox's state.json.
+const JB_CODES = {
+  IU: 'IntelliJIdea', IC: 'IdeaIC', PY: 'PyCharm', PC: 'PyCharmCE', WS: 'WebStorm', PS: 'PhpStorm', GO: 'GoLand', CL: 'CLion',
+  RD: 'Rider', RM: 'RubyMine', DB: 'DataGrip', DS: 'DataSpell', RR: 'RustRover', QA: 'Aqua', OC: 'AppCode', WRS: 'Writerside',
+};
+// Launcher names (Contents/MacOS/<x>, bin/<x>.sh, bin/<x>64.exe) and the products they start.
+const JB_LAUNCHERS = {
+  idea: ['IntelliJIdea', 'IdeaIC'], pycharm: ['PyCharm', 'PyCharmCE'], webstorm: ['WebStorm'], phpstorm: ['PhpStorm'], goland: ['GoLand'],
+  clion: ['CLion'], rider: ['Rider'], rubymine: ['RubyMine'], datagrip: ['DataGrip'], dataspell: ['DataSpell'], rustrover: ['RustRover'],
+  aqua: ['Aqua'], appcode: ['AppCode'], writerside: ['Writerside'],
+};
+const JB_LAUNCHER_RE = new RegExp('(?:^|[\\\\/"\'\\s])(' + Object.keys(JB_LAUNCHERS).join('|') + ')(?:64)?(?:\\.exe|\\.sh)?(?=$|[\\s"\'])', 'i');
+const JB_UNUSED_DAYS = 180;
+const DAY = 24 * 3600 * 1000;
+
+/** "IU-253.28294.334" (or code "IU" and build "253.28294") -> "IntelliJIdea2025.3". */
+function jbDirFromBuild(code, build) {
+  let c = code;
+  let b = String(build || '');
+  const m = /^([A-Z]{2,3})-(\d{3})/.exec(b);
+  if (m) { c = c || m[1]; b = m[2]; }
+  const product = JB_CODES[String(c || '').toUpperCase()];
+  const branch = /^(\d{2})(\d)/.exec(b);
+  return product && branch ? product + '20' + branch[1] + '.' + branch[2] : null;
+}
+
+/** The data folder name of an install, from product-info.json, else Info.plist (macOS). */
+async function jbInstallDir(ctx, install) {
+  const p = api(ctx);
+  const mac = /\.app[\\/]?$/i.test(install);
+  const info = await readJson(mac ? p.join(install, 'Contents', 'Resources', 'product-info.json') : p.join(install, 'product-info.json'), 1024 * 1024);
+  if (info && typeof info.dataDirectoryName === 'string' && JB_RE.test(info.dataDirectoryName)) return info.dataDirectoryName;
+  if (info) { const d = jbDirFromBuild(info.productCode, info.buildNumber); if (d) return d; }
+  if (mac) {
+    const plist = await readText(p.join(install, 'Contents', 'Info.plist'), 1024 * 1024);
+    const m = plist && /<key>CFBundleVersion<\/key>\s*<string>([^<]+)<\/string>/.exec(plist);
+    if (m) return jbDirFromBuild(null, m[1].trim());
+  }
+  return null;
+}
+
+/** Folders that may be IDE installs, by OS. ctx.jetbrainsAppDirs overrides the system ones (tests). */
+function jbInstallParents(ctx) {
+  const p = api(ctx);
+  const env = ctx.env || {};
+  const h = homeOf(ctx);
+  if (Array.isArray(ctx.jetbrainsAppDirs)) return ctx.jetbrainsAppDirs.map((d) => ({ dir: d, depth: 4 }));
+  if (ctx.platform === 'darwin') {
+    return [{ dir: '/Applications', depth: 1 }, { dir: p.join(h, 'Applications'), depth: 2 },
+      { dir: p.join(h, 'Library', 'Application Support', 'JetBrains', 'Toolbox', 'apps'), depth: 4 }];
+  }
+  if (ctx.platform === 'win32') {
+    return [env.ProgramFiles && p.join(env.ProgramFiles, 'JetBrains'), env['ProgramFiles(x86)'] && p.join(env['ProgramFiles(x86)'], 'JetBrains'),
+      env.LOCALAPPDATA && p.join(env.LOCALAPPDATA, 'Programs'), env.LOCALAPPDATA && p.join(env.LOCALAPPDATA, 'JetBrains', 'Toolbox', 'apps')]
+      .filter(Boolean).map((d) => ({ dir: d, depth: 4 }));
+  }
+  const data = absEnv(env, 'XDG_DATA_HOME') || p.join(ctx.home, '.local', 'share');
+  return [{ dir: p.join(data, 'JetBrains'), depth: 4 }, { dir: '/opt', depth: 2 }, { dir: '/snap', depth: 2 }];
+}
+
+/** Installs under a folder: dirs holding product-info.json, or *.app bundles on macOS. */
+async function findInstalls(ctx, dir, depth, out, budget) {
+  if (depth < 0 || budget.n <= 0) return;
+  const p = api(ctx);
+  for (const e of await listDir(dir)) {
+    if (--budget.n <= 0) return;
+    if (!e.isDirectory() && !e.isSymbolicLink()) continue;
+    const full = p.join(dir, e.name);
+    if (ctx.platform === 'darwin' ? /\.app$/i.test(e.name) : await lstatSafe(p.join(full, 'product-info.json'))) { out.push(full); continue; }
+    if (e.isDirectory()) await findInstalls(ctx, full, depth - 1, out, budget);
+  }
+}
+
+/** Toolbox's own list of what it installed. -> { tools: [...], error } */
+async function toolboxState(ctx) {
+  const p = api(ctx);
+  const env = ctx.env || {};
+  const file = ctx.platform === 'darwin' ? p.join(ctx.home, 'Library', 'Application Support', 'JetBrains', 'Toolbox', 'state.json')
+    : ctx.platform === 'win32' ? (env.LOCALAPPDATA ? p.join(env.LOCALAPPDATA, 'JetBrains', 'Toolbox', 'state.json') : null)
+      : p.join(absEnv(env, 'XDG_DATA_HOME') || p.join(ctx.home, '.local', 'share'), 'JetBrains', 'Toolbox', 'state.json');
+  if (!file || !(await lstatSafe(file))) return { tools: [], error: null };
+  const json = await readJson(file, 16 * 1024 * 1024);
+  if (!json || !Array.isArray(json.tools)) return { tools: [], error: 'Spaci could not read JetBrains Toolbox\'s list of installed IDEs, so it keeps every IDE folder.' };
+  return { tools: json.tools.filter((t) => t && typeof t === 'object'), error: null };
+}
+
+/** Install paths named in the Windows registry under Software\JetBrains. */
+async function registryInstalls(ctx) {
+  if (ctx.platform !== 'win32') return [];
+  const out = [];
+  for (const key of ['HKCU\\Software\\JetBrains', 'HKLM\\SOFTWARE\\JetBrains', 'HKLM\\SOFTWARE\\WOW6432Node\\JetBrains']) {
+    const res = await run('reg', ['query', key, '/s'], { exec: ctx.exec, timeout: 10000 });
+    if (!res.ok) continue;
+    for (const m of res.stdout.matchAll(/REG_(?:EXPAND_)?SZ\s+([A-Za-z]:\\[^\r\n]*?)\s*$/gm)) out.push(m[1].replace(/\\bin\\[^\\]+\.exe$/i, ''));
+  }
+  return out;
+}
+
+/** -> { dirs: Set(dataDirName), installs: [{ path, dir }], error } */
+async function jetbrainsInstalls(ctx) {
+  const state = await toolboxState(ctx);
+  const dirs = new Set();
+  const installs = [];
+  const candidates = [];
+  for (const t of state.tools) {
+    const d = jbDirFromBuild(t.productCode, t.buildNumber);
+    if (d) dirs.add(d);
+    if (typeof t.installLocation === 'string' && t.installLocation) candidates.push(t.installLocation);
+  }
+  const budget = { n: 5000 };
+  for (const { dir, depth } of jbInstallParents(ctx)) await findInstalls(ctx, dir, depth, candidates, budget);
+  candidates.push(...await registryInstalls(ctx));
+  for (const c of Array.from(new Set(candidates))) {
+    const d = await jbInstallDir(ctx, c);
+    if (!d) continue;
+    dirs.add(d);
+    installs.push({ path: c, dir: d });
+  }
+  return { dirs, installs, error: state.error };
+}
+
+/**
+ * Which IDE folders running processes use. -> { dirs: Set, products: Set,
+ * all: bool } where products are those with a running launcher Spaci could
+ * not tie to a version, and all means it could not check.
+ */
+async function jetbrainsRunning(ctx, installs) {
+  const out = { dirs: new Set(), products: new Set(), all: false };
+  if (!ctx.procs || !ctx.procs.ok) { out.all = true; return out; }
+  const p = api(ctx);
+  for (const pr of ctx.procs.list) {
+    const args = String(pr.args || '');
+    const sel = /-Didea\.paths\.selector=([^\s"']+)/.exec(args);
+    if (sel) { out.dirs.add(sel[1]); continue; }
+    const inst = installs.find((i) => args.includes(i.path + p.sep) || args.includes(i.path + '/') || args.startsWith(i.path + ' ') || args === i.path);
+    if (inst) { out.dirs.add(inst.dir); continue; }
+    const l = JB_LAUNCHER_RE.exec(args);
+    if (!l || !/Contents[\\/]MacOS|[\\/]bin[\\/]/.test(args)) continue;
+    // A launcher from an install Spaci did not list: read the install itself.
+    const app = /^(.*?\.app)[\\/]Contents[\\/]MacOS[\\/]/i.exec(args) || /^"?(.*?)[\\/]bin[\\/][^\\/]+$/i.exec(args.split(/\s+-/)[0].trim());
+    const d = app ? await jbInstallDir(ctx, app[1].replace(/^"/, '')) : null;
+    if (d) out.dirs.add(d);
+    else for (const prod of JB_LAUNCHERS[l[1].toLowerCase()] || []) out.products.add(prod);
+  }
+  return out;
+}
 
 function jetbrainsRoots(ctx) {
   const p = api(ctx);
   const env = ctx.env || {};
   if (ctx.platform === 'darwin') {
     const lib = (...x) => p.join(ctx.home, 'Library', ...x);
-    return [lib('Application Support', 'JetBrains'), lib('Caches', 'JetBrains'), lib('Logs', 'JetBrains')];
+    return [{ root: lib('Application Support', 'JetBrains'), config: true }, { root: lib('Caches', 'JetBrains') }, { root: lib('Logs', 'JetBrains') }];
   }
-  if (ctx.platform === 'win32') return [env.APPDATA && p.join(env.APPDATA, 'JetBrains'), env.LOCALAPPDATA && p.join(env.LOCALAPPDATA, 'JetBrains')].filter(Boolean);
-  return [p.join(absEnv(env, 'XDG_CONFIG_HOME') || p.join(ctx.home, '.config'), 'JetBrains'),
-    p.join(absEnv(env, 'XDG_CACHE_HOME') || p.join(ctx.home, '.cache'), 'JetBrains'),
-    p.join(absEnv(env, 'XDG_DATA_HOME') || p.join(ctx.home, '.local', 'share'), 'JetBrains')];
+  if (ctx.platform === 'win32') return [env.APPDATA && { root: p.join(env.APPDATA, 'JetBrains'), config: true }, env.LOCALAPPDATA && { root: p.join(env.LOCALAPPDATA, 'JetBrains') }].filter(Boolean);
+  return [{ root: p.join(absEnv(env, 'XDG_CONFIG_HOME') || p.join(ctx.home, '.config'), 'JetBrains'), config: true },
+    { root: p.join(absEnv(env, 'XDG_CACHE_HOME') || p.join(ctx.home, '.cache'), 'JetBrains') },
+    { root: p.join(absEnv(env, 'XDG_DATA_HOME') || p.join(ctx.home, '.local', 'share'), 'JetBrains') }];
 }
 
-/** Old versions: { product, version, dirs: [{ root, dir }] } where a newer version of the product exists. */
+/** Old versions: { product, version, newest, dirs: [{ root, dir, config }] } where a newer version of the product exists. */
 function jetbrainsLeftovers(listing) {
   const byProduct = new Map();
-  for (const { root, name } of listing) {
+  for (const { root, name, config } of listing) {
     const m = JB_RE.exec(name);
     if (!m) continue;
     const [, product, version] = m;
     if (!byProduct.has(product)) byProduct.set(product, new Map());
     const versions = byProduct.get(product);
     if (!versions.has(version)) versions.set(version, []);
-    versions.get(version).push({ root, dir: path.join(root, name) });
+    versions.get(version).push({ root, dir: path.join(root, name), config: Boolean(config) });
   }
   const out = [];
   for (const [product, versions] of byProduct) {
@@ -64,34 +225,84 @@ function jetbrainsLeftovers(listing) {
   return out;
 }
 
+/** Newest mtime under some folders, depth-limited. complete is false when the budget ran out. */
+async function newestChange(dirs, { maxEntries = 20000, depth = 4, deadline = Date.now() + 5000 } = {}) {
+  let newest = 0;
+  let n = 0;
+  let complete = true;
+  const walk = async (d, left) => {
+    const st = await lstatSafe(d);
+    if (!st) return;
+    newest = Math.max(newest, st.mtimeMs);
+    if (!st.isDirectory() || left < 0) return;
+    for (const e of await listDir(d)) {
+      if (++n > maxEntries || Date.now() > deadline) { complete = false; return; }
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) await walk(full, left - 1);
+      else { const s2 = await lstatSafe(full); if (s2) newest = Math.max(newest, s2.mtimeMs); }
+    }
+  };
+  for (const d of dirs) await walk(d, depth);
+  return { newest, complete };
+}
+
 async function jetbrains(ctx) {
+  const p = api(ctx);
   const roots = jetbrainsRoots(ctx);
   const listing = [];
-  for (const r of roots) for (const e of await listDir(r)) if (e.isDirectory()) listing.push({ root: r, name: e.name });
+  for (const r of roots) for (const e of await listDir(r.root)) if (e.isDirectory()) listing.push({ root: r.root, name: e.name, config: r.config });
   const old = jetbrainsLeftovers(listing);
   if (!old.length) return [];
+  const installed = await jetbrainsInstalls(ctx);
+  const running = await jetbrainsRunning(ctx, installed.installs);
+  const now = ctx.now || Date.now();
   const items = await pool(old, 3, async (o) => {
+    const dirName = o.product + o.version;
+    if (installed.dirs.has(dirName)) return null; // still installed: its folders are in use
+    // What may go: caches, logs and plugin folders. From the config folder,
+    // only plugins/ (settings, scratches and consoles stay).
+    const targets = [];
+    for (const d of o.dirs) {
+      if (!d.config) { targets.push(d); continue; }
+      const plugins = p.join(d.dir, 'plugins');
+      const st = await lstatSafe(plugins);
+      if (st && st.isDirectory()) targets.push({ root: d.root, dir: plugins });
+    }
+    if (!targets.length) return null;
     let size = 0;
-    for (const d of o.dirs) size += (await dirSize(d.dir)).bytes;
+    for (const d of targets) size += (await dirSize(d.dir)).bytes;
     const label = (JB_PRODUCTS[o.product] || o.product) + ' ' + o.version;
-    const appName = (JB_PRODUCTS[o.product] || o.product).replace(/ CE$/, '');
-    const running = ctx.procs && ctx.procs.ok ? ctx.procs.list.some((pr) => (pr.args || '').includes(appName) && (pr.args || '').includes(o.version)) : null;
+    // Age counts every folder of the version, settings included.
+    const age = await newestChange(o.dirs.map((d) => d.dir));
+    const days = Math.floor((now - age.newest) / DAY);
+    let blocked = null;
+    let state = 'idle';
+    if (installed.error) blocked = installed.error;
+    else if (running.all) blocked = 'Spaci could not check whether ' + label + ' is running.';
+    else if (running.dirs.has(dirName)) { blocked = label + ' is running.'; state = 'running'; }
+    else if (running.products.has(o.product)) blocked = (JB_PRODUCTS[o.product] || o.product) + ' is running and Spaci could not tell which version, so it keeps these folders.';
+    else if (!age.complete) blocked = 'Spaci could not tell when ' + label + ' was last used, so it keeps these folders.';
+    else if (days < JB_UNUSED_DAYS) blocked = 'Used ' + (days <= 0 ? 'today' : days + (days === 1 ? ' day' : ' days') + ' ago') + '. Spaci offers an old IDE version\'s folders after ' + JB_UNUSED_DAYS + ' days unused.';
     return makeItem({
-      id: 'jetbrains:' + o.product + o.version,
+      id: 'jetbrains:' + dirName,
       group: 'jetbrains',
       kind: 'ide',
       label,
       name: o.product,
       version: o.version,
-      detail: 'Upgraded to ' + o.newest + ' · ' + o.dirs.length + (o.dirs.length === 1 ? ' folder' : ' folders'),
+      detail: 'Not installed, newest is ' + o.newest + ' · caches, logs and plugins · settings and scratch files stay',
       size,
-      blocked: running ? label + ' is still running.' : running === null ? 'Spaci could not check whether ' + label + ' is running.' : null,
+      state,
+      modifiedAt: age.newest || null,
+      blocked,
       restoreHint: 'Nothing to restore: ' + o.newest + ' keeps its own settings and caches.',
-      paths: o.dirs.map((d) => d.dir),
-      removal: { type: 'paths', roots: o.dirs.map((d) => d.root), paths: o.dirs.map((d) => d.dir) },
+      paths: targets.map((d) => d.dir),
+      removal: { type: 'paths', roots: targets.map((d) => d.root), paths: targets.map((d) => d.dir) },
     });
   });
-  return [makeGroup({ id: 'jetbrains', section: 'dev', category: 'ide', title: 'JetBrains IDE leftovers', brand: 'intellij', icon: 'monitor', roots, items: items.sort((a, b) => b.size - a.size), note: 'Settings, caches, plugins and logs of IDE versions you have upgraded from, as in Help > Delete Leftover IDE Directories.' })];
+  const list = items.filter(Boolean);
+  if (!list.length) return [];
+  return [makeGroup({ id: 'jetbrains', section: 'dev', category: 'ide', title: 'JetBrains IDE leftovers', brand: 'intellij', icon: 'monitor', roots: roots.map((r) => r.root), items: list.sort((a, b) => b.size - a.size), note: 'Caches, logs and plugins of IDE versions that are no longer installed and unused for ' + JB_UNUSED_DAYS + ' days. Settings, scratch files and consoles are never deleted here.' })];
 }
 
 // ---- VS Code and forks ----------------------------------------------------------
@@ -352,4 +563,4 @@ async function inventory(ctx) {
   return parts.flat();
 }
 
-module.exports = { jetbrainsLeftovers, staleExtensions, jetbrains, editorExtensions, playwright, puppeteer, cypress, electronCache, terraform, gradleWrapper, homebrew, inventory, run };
+module.exports = { registryInstalls, jbDirFromBuild, jbInstallDir, jetbrainsInstalls, jetbrainsRunning, newestChange, JB_UNUSED_DAYS, jetbrainsLeftovers, staleExtensions, jetbrains, editorExtensions, playwright, puppeteer, cypress, electronCache, terraform, gradleWrapper, homebrew, inventory, run };
