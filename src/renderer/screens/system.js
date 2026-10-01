@@ -830,6 +830,9 @@
         }, [ic('warning', 17), S.systemError]));
         const docker = dockerCard();
         if (docker) host.appendChild(docker);
+        // ---- ai models and dev tools ----
+        if (SP.devtools) SP.devtools.sections(paint).forEach((n) => host.appendChild(n));
+        // ---- end ai models and dev tools ----
         host.appendChild(selectAllRow(targets));
         groupByCategory(targets).forEach((grp) => host.appendChild(group(grp)));
         syncActionBar(targets);
@@ -841,6 +844,9 @@
       if (loading) { host.appendChild(scanBlock()); return; }
       if (S.systemError) { host.appendChild(bigState('breathe', 'Could not scan caches', S.systemError, 'Try again', true)); return; }
       host.appendChild(bigState('breathe', 'All clean', 'No reclaimable caches were found on this machine right now.', 'Scan', false));
+      // ---- ai models and dev tools ----
+      if (SP.devtools) SP.devtools.sections(paint).forEach((n) => host.appendChild(n));
+      // ---- end ai models and dev tools ----
     }
 
     latestRender = render;
