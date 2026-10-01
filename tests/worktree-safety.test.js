@@ -204,6 +204,9 @@ test('linkProblem: a .git file pointing at another worktree\'s record is not thi
   const admins = await wtx.adminRecords(await wtx.commonDirOf(main));
   const ax = wtx.pickByPath(admins, path.join(S, 'x'));
   const ay = wtx.pickByPath(admins, path.join(S, 'y'));
+  // git marks .git hidden on Windows, where a hidden file cannot be opened
+  // for writing: replace it.
+  fs.rmSync(path.join(S, 'y', '.git'));
   fs.writeFileSync(path.join(S, 'y', '.git'), 'gitdir: ' + ax.dir + '\n');
   const entry = await wtx.readGitEntry(path.join(S, 'y'));
   assert.match(wtx.linkProblem(entry, ay), /points at/);
