@@ -8,13 +8,37 @@
 // --docker: Docker is running and has more than 1 GB of images no container
 // uses (the workflow pulls some); checks the unused-images recommendation frees
 // real space.
+// --screenshots <dir>: also save PNGs of the System Cleaner's AI model and
+// developer tool sections and the Storage drill-down (for review, not checks).
+// --read-only: deletes nothing at all: leaves OLLAMA_MODELS and OLLAMA_HOST
+// alone, skips the Ollama fixture and the large-file Trash checks, so it can
+// run on a developer's own machine and screenshot its real stores.
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 const BIN = process.argv[2];
 const WITH_DOCKER = process.argv.includes('--docker');
+const SHOTS = process.argv.includes('--screenshots') ? process.argv[process.argv.indexOf('--screenshots') + 1] : null;
+const FIXTURE = !process.argv.includes('--read-only');
+
+// A throwaway Ollama store with shared blobs, pointed at with OLLAMA_MODELS.
+// keep:latest and gone:latest share the weights blob; gone has its own
+// config and system prompt. Removing gone must leave the shared weights.
+const OLLAMA = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-e2e-ollama-'));
+const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
+const BLOBS = { W: sha('weights'), C1: sha('config-keep'), C2: sha('config-gone'), S: sha('system-gone') };
+fs.mkdirSync(path.join(OLLAMA, 'blobs'), { recursive: true });
+for (const [k, d] of Object.entries(BLOBS)) fs.writeFileSync(path.join(OLLAMA, 'blobs', 'sha256-' + d), Buffer.alloc(k === 'W' ? 2 * 1024 * 1024 : 4096, 7));
+const ollamaManifest = (cfg, layers) => JSON.stringify({ schemaVersion: 2, config: { digest: 'sha256:' + BLOBS[cfg] }, layers: layers.map((k) => ({ digest: 'sha256:' + BLOBS[k] })) });
+for (const [name, cfg, layers] of [['keep', 'C1', ['W']], ['gone', 'C2', ['W', 'S']]]) {
+  const d = path.join(OLLAMA, 'manifests', 'registry.ollama.ai', 'library', 'e2e-' + name);
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'latest'), ollamaManifest(cfg, layers));
+}
+const ollamaBlob = (k) => fs.existsSync(path.join(OLLAMA, 'blobs', 'sha256-' + BLOBS[k]));
 const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-e2e-profile-'));
 const PORT = 9333;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -26,7 +50,9 @@ const check = (name, pass, detail = '') => {
 
 const app = spawn(BIN, [`--user-data-dir=${DATA}`, `--remote-debugging-port=${PORT}`], {
   stdio: ['ignore', 'pipe', 'pipe'],
-  env: { ...process.env, SPACI_TELEMETRY: '0', SPACI_NO_MOVE_PROMPT: '1' },
+  // OLLAMA_HOST points at a port nothing listens on, so a real Ollama on the
+  // machine is never asked to delete anything.
+  env: { ...process.env, SPACI_TELEMETRY: '0', SPACI_NO_MOVE_PROMPT: '1', ...(FIXTURE ? { OLLAMA_MODELS: OLLAMA, OLLAMA_HOST: '127.0.0.1:9' } : {}) },
 });
 let log = '';
 app.stdout.on('data', (d) => { log += d; });
@@ -71,6 +97,31 @@ const dockerImageCount = () => {
   catch { return -1; }
 };
 
+
+async function shot(file) {
+  const r = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  fs.writeFileSync(file, Buffer.from(r.result.data, 'base64'));
+  console.log('saved ' + file);
+}
+// Scrolls each section into view in the System Cleaner, then the Developer
+// storage drill-down, and saves a PNG of each.
+async function screenshots(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 2, mobile: false });
+  for (const theme of ['dark', 'light']) {
+    await evalIn(`window.SP.state.theme = ${JSON.stringify(theme)}; const a = document.getElementById('app'); if (a) { a.classList.toggle('light', ${theme === 'light'}); } window.SP.go('system'); await new Promise((r) => setTimeout(r, 1200)); return true`);
+    for (const sec of ['ai', 'dev']) {
+      const found = await evalIn(`const n = document.querySelector('[data-devtools-section="${sec}"]'); if (!n) return false; n.scrollIntoView({ block: 'start' }); await new Promise((r) => setTimeout(r, 600)); return true`);
+      if (found) await shot(path.join(dir, `system-${sec}-${theme}.png`));
+    }
+  }
+  const drill = await evalIn(`const S = window.SP.state; S.breakdown = S.breakdown || await window.api.diskBreakdown();
+    const c = ((S.breakdown && S.breakdown.categories) || []).find((x) => x.key === 'developer'); if (!c) return false;
+    S.activeCat = c; window.SP.go('storagecat'); await new Promise((r) => setTimeout(r, 1500));
+    const n = document.querySelector('[data-devtools-section="storage"]'); if (n) n.scrollIntoView({ block: 'start' }); await new Promise((r) => setTimeout(r, 400)); return !!n`);
+  if (drill) await shot(path.join(dir, 'storage-developer-light.png'));
+}
+
 try {
   const page = await target();
   await connect(page.webSocketDebuggerUrl);
@@ -94,6 +145,7 @@ try {
   check('IPC hardening', ext === false && op === 'Not allowed' && lfRoot?.ok === false, JSON.stringify({ ext, op, lf: lfRoot?.ok }));
 
   // Large file: refused without a confirm, then moved to the OS Trash/Recycle Bin.
+  if (FIXTURE) {
   const tdir = path.join(os.homedir(), 'spaci-e2e-' + process.pid);
   fs.mkdirSync(tdir, { recursive: true });
   const big = path.join(tdir, 'e2e-big.bin');
@@ -110,6 +162,7 @@ try {
     const hist = JSON.parse(fs.readFileSync(path.join(DATA, 'history.json'), 'utf8'));
     check('history records the trashed file', hist[0]?.v === 2 && hist[0]?.items?.[0]?.outcome === 'trashed');
   } finally { fs.rmSync(tdir, { recursive: true, force: true }); }
+  }
 
   // The disk card must name the disk the way this OS does.
   const text = await evalIn('return document.body.innerText');
@@ -138,6 +191,39 @@ try {
     await new Promise((r) => setTimeout(r, 800)); return document.body.innerText`);
   check('System drill-down renders its sections', /Not visible to Spaci/.test(drill) && /System folders|Managed by/.test(drill), drill.slice(0, 160).replace(/\s+/g, ' '));
 
+
+  // Local AI models and developer tools: listed, refused without a confirm or
+  // for anything unlisted, and the Ollama fixture removed with its shared
+  // weights kept. With Ollama running on the machine (its API is not on the
+  // port given here), Spaci cannot tell what is loaded and must refuse.
+  const dt = await evalIn('return await window.api.devtoolsInventory(true)');
+  const og = (dt?.groups || []).find((g) => g.id === 'ollama');
+  const fixtureItems = og ? og.items.filter((i) => /^e2e-/.test(i.label)) : [];
+  check('AI models and dev tools are listed', Array.isArray(dt?.groups) && dt.totals && (!FIXTURE || fixtureItems.length === 2),
+    JSON.stringify({ groups: (dt?.groups || []).map((g) => g.id + ':' + g.items.length), errors: dt?.errors, ollama: og && og.items.map((i) => [i.label, i.size, i.blocked]) }));
+  if (FIXTURE) {
+  const gone = og && og.items.find((i) => i.label === 'e2e-gone:latest');
+  const keep = og && og.items.find((i) => i.label === 'e2e-keep:latest');
+  check('unique sizes leave shared weights out', gone && keep && gone.size < 64 * 1024 && gone.totalSize > 2 * 1024 * 1024, JSON.stringify({ gone: gone && [gone.size, gone.totalSize], keep: keep && [keep.size, keep.totalSize] }));
+  const noConfirm = await evalIn(`return await window.api.devtoolsRemove(${JSON.stringify(gone?.id || '')})`);
+  const unknown = await evalIn(`return await window.api.devtoolsRemove(${JSON.stringify(outsidePath)}, { confirmed: true })`);
+  check('devtools removal needs a confirm and a listed item', noConfirm?.error === 'needs-confirmation' && unknown?.error === 'unknown-item' && ollamaBlob('S'),
+    JSON.stringify({ noConfirm: noConfirm?.error, unknown: unknown?.error }));
+  const rm = await evalIn(`return await window.api.devtoolsRemove(${JSON.stringify(gone?.id || '')}, { confirmed: true })`);
+  if (gone && gone.blocked) {
+    check('Ollama running elsewhere: removal refused, store untouched', rm?.ok === false && ollamaBlob('S') && ollamaBlob('C2') && ollamaBlob('W'), JSON.stringify({ blocked: gone.blocked, rm }));
+  } else {
+    check('Ollama model removed, shared weights kept', rm?.ok === true && !ollamaBlob('S') && !ollamaBlob('C2') && ollamaBlob('W') && ollamaBlob('C1'),
+      JSON.stringify({ rm, left: Object.keys(BLOBS).filter(ollamaBlob) }));
+    const h = JSON.parse(fs.readFileSync(path.join(DATA, 'history.json'), 'utf8'));
+    check('history records the model with its restore command', h[0]?.scope === 'devtools' && h[0]?.items?.[0]?.restoreHint === 'ollama pull e2e-gone:latest', JSON.stringify(h[0]?.items?.[0]));
+  }
+  }
+  const ui = await evalIn(`window.SP.go('system'); await new Promise((r) => setTimeout(r, 1500));
+    return { ai: !!document.querySelector('[data-devtools-section="ai"]'), dev: !!document.querySelector('[data-devtools-section="dev"]'), text: document.body.innerText }`);
+  check('System Cleaner shows the AI models and developer tools sections', ui.ai && /Local AI models/i.test(ui.text), JSON.stringify({ ai: ui.ai, dev: ui.dev }));
+  if (SHOTS) await screenshots(SHOTS);
+
   if (WITH_DOCKER) {
     const before = dockerImageCount();
     const st = await evalIn('return await window.api.dockerStatus(true)');
@@ -164,6 +250,7 @@ try {
   check('harness', false, e.message);
 } finally {
   if (exited === null) app.kill('SIGKILL');
+  fs.rmSync(OLLAMA, { recursive: true, force: true });
   const failed = results.filter((r) => !r.pass).length;
   console.log(`\n${results.length - failed}/${results.length} passed on ${process.platform}`);
   const crash = /Uncaught|UnhandledPromiseRejection|TypeError|ReferenceError/.exec(log);
