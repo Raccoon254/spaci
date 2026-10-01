@@ -111,6 +111,65 @@ try {
     check('history records the trashed file', hist[0]?.v === 2 && hist[0]?.items?.[0]?.outcome === 'trashed');
   } finally { fs.rmSync(tdir, { recursive: true, force: true }); }
 
+  // Git worktrees: one record per repository, removal only after a confirm,
+  // re-verified by git right before it runs, the branch kept; prune clears a
+  // worktree whose folder is gone. Everything lives in a folder made here.
+  const wroot = fs.realpathSync(fs.mkdtempSync(path.join(os.homedir(), 'spaci-e2e-wt-')));
+  try {
+    const genv = { ...process.env, GIT_AUTHOR_NAME: 'Spaci E2E', GIT_AUTHOR_EMAIL: 'e2e@example.com', GIT_COMMITTER_NAME: 'Spaci E2E', GIT_COMMITTER_EMAIL: 'e2e@example.com' };
+    const git = (cwd, ...a) => execFileSync('git', ['-C', cwd, '-c', 'init.defaultBranch=main', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...a], { env: genv, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
+    const repo = path.join(wroot, 'shop');
+    fs.mkdirSync(path.join(repo, 'web'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'api'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'web', 'package.json'), '{"name":"web"}');
+    fs.writeFileSync(path.join(repo, 'api', 'package.json'), '{"name":"api"}');
+    fs.writeFileSync(path.join(repo, '.gitignore'), 'node_modules/\n');
+    git(repo, 'init', '-q'); git(repo, 'add', '-A'); git(repo, 'commit', '-qm', 'init');
+    const wt = (n) => path.join(wroot, 'shop-worktrees', n);
+    for (const n of ['done', 'wip', 'gone']) git(repo, 'worktree', 'add', '-q', '-b', n, wt(n));
+    fs.mkdirSync(path.join(wt('done'), 'web', 'node_modules', 'dep'), { recursive: true });
+    fs.writeFileSync(path.join(wt('done'), 'web', 'node_modules', 'dep', 'index.js'), 'x'.repeat(64 * 1024));
+    fs.writeFileSync(path.join(wt('wip'), 'notes.txt'), 'not committed');
+    fs.rmSync(wt('gone'), { recursive: true, force: true });
+
+    const scan = await evalIn(`return await window.api.scanProjects(${JSON.stringify(wroot)})`);
+    const recs = (scan?.projects || []).filter((p) => p.repo);
+    const rec = recs.find((p) => p.repo.worktrees.length);
+    const by = (b) => rec?.repo.worktrees.find((w) => w.branch === b);
+    check('worktrees fold into one repository record with its packages',
+      scan?.ok !== false && recs.length === 1 && rec.repo.worktrees.length === 3 && rec.repo.packages.length === 2
+        && !(scan.projects || []).some((p) => p.path.includes('shop-worktrees')) && path.basename(rec.path) === 'shop',
+      JSON.stringify({ records: (scan?.projects || []).map((p) => p.path.replace(wroot, '')), worktrees: rec?.repo.worktrees.length, packages: rec?.repo.packages.map((k) => k.rel) }));
+    check('worktree properties and eligibility',
+      by('done')?.eligibility.ok === true && by('done')?.merged === true && by('done')?.size > 0
+        && by('wip')?.eligibility.ok === false && by('wip')?.untracked === 1 && by('gone')?.exists === false && rec.repo.removable.count === 1,
+      JSON.stringify(rec?.repo.worktrees.map((w) => ({ b: w.branch, ok: w.eligibility.ok, reasons: w.eligibility.reasons }))));
+    // Paths compared loosely: git prints forward slashes and may differ in case on Windows.
+    const same = (a, b) => String(a || '').replace(/\\/g, '/').toLowerCase() === String(b || '').replace(/\\/g, '/').toLowerCase();
+    const nm = path.join(by('done')?.path || wt('done'), 'web', 'node_modules');
+    const tiers = await evalIn(`return await window.api.cleanTiers({ projects: (await window.api.cacheGet()).projects, sysTargets: [] })`);
+    check('build output inside a worktree is tier A (Clean all covers it), the worktree itself never is',
+      (tiers?.planA?.jobs || []).some((j) => same(j.path, nm)) && !(tiers?.planA?.jobs || []).some((j) => same(j.path, by('done')?.path)),
+      JSON.stringify((tiers?.planA?.jobs || []).map((j) => j.path)));
+
+    const no = await evalIn(`return await window.api.removeWorktrees([{ path: ${JSON.stringify(by('done')?.path)} }], {})`);
+    check('removing a worktree needs a confirm', (no?.refused || [])[0]?.reason === 'needs-confirmation' && fs.existsSync(wt('done')), JSON.stringify(no?.refused));
+    const yes = await evalIn(`return await window.api.removeWorktrees(${JSON.stringify([{ path: by('done')?.path }, { path: by('wip')?.path }])}, { confirmed: true })`);
+    const branches = git(repo, 'branch', '--format=%(refname:short)').split(/\r?\n/).filter(Boolean);
+    check('confirmed: the clean merged worktree goes, the dirty one stays, the branch is kept',
+      (yes?.removed || []).length === 1 && !fs.existsSync(wt('done')) && fs.existsSync(path.join(wt('wip'), 'notes.txt'))
+        && (yes?.refused || []).some((r) => /untracked/.test(r.reason)) && branches.includes('done'),
+      JSON.stringify({ removed: yes?.removed, refused: yes?.refused, failed: yes?.failed, branches }));
+    const hist = await evalIn('return await window.api.historyGet()');
+    const he = (hist || []).find((h) => h.scope === 'worktrees');
+    check('history logs the removal with a git worktree add hint', !!he && he.items.some((i) => i.outcome === 'removed' && /^git worktree add /.test(i.restoreHint || '')));
+    const pr = await evalIn(`return await window.api.pruneWorktrees(${JSON.stringify(rec?.path)})`);
+    const listed = git(repo, 'worktree', 'list', '--porcelain');
+    check('prune clears the missing worktree only', pr?.ok === true && pr.pruned === 1 && !/prunable/.test(listed) && fs.existsSync(wt('wip')), JSON.stringify(pr));
+  } catch (e) {
+    check('worktree scenario', false, e.message);
+  } finally { fs.rmSync(wroot, { recursive: true, force: true }); }
+
   // The disk card must name the disk the way this OS does.
   const text = await evalIn('return document.body.innerText');
   check('disk label matches the OS', process.platform === 'darwin' || !/Macintosh HD/.test(text));
