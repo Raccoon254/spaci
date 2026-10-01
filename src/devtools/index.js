@@ -135,8 +135,19 @@ async function bytesOf(paths) {
   return total;
 }
 
-/** Run the tool's own delete, then make sure what it should remove is gone. */
-async function removeByCommand(removal, item, options, deletePath) {
+function groupTotal(inv, groupId) {
+  const g = ((inv && inv.groups) || []).find((x) => x.id === groupId);
+  return g ? Number(g.total) || 0 : 0;
+}
+
+/**
+ * Run the tool's own delete, then make sure what it should remove is gone.
+ * With expectGone, the named paths must be gone and their bytes are what was
+ * freed. Without it (simctl runtime delete, docker model rm) the store is
+ * listed again: the item must be gone, and freed is the measured drop in the
+ * group's total, never the size Spaci listed beforehand.
+ */
+async function removeByCommand(removal, item, options, deletePath, relist) {
   const before = await bytesOf(removal.expectGone);
   const env = removal.env ? { ...process.env, ...removal.env } : undefined;
   const res = await run(removal.cmd, removal.args || [], { exec: options.exec, timeout: removal.timeout || 60000, env });
@@ -148,7 +159,12 @@ async function removeByCommand(removal, item, options, deletePath) {
   const left = [];
   for (const p of removal.expectGone || []) if (await lstatSafe(p)) left.push(p);
   if (left.length) return { ok: false, freed: Math.max(0, before - (await bytesOf(left))), code: 'partial', error: 'The command finished, but ' + left[0] + ' is still there.' };
-  return { ok: true, freed: removal.expectGone && removal.expectGone.length ? before : item.size, via: 'command' };
+  if (removal.expectGone && removal.expectGone.length) return { ok: true, freed: before, via: 'command' };
+  if (!relist) return { ok: true, freed: 0, via: 'command' };
+  const after = await relist.list();
+  const freed = Math.max(0, relist.beforeTotal - groupTotal(after, item.group));
+  if (findItem(after, item.id)) return { ok: false, freed, code: 'partial', error: 'The command finished, but ' + item.label + ' is still listed.' };
+  return { ok: true, freed, via: 'command' };
 }
 
 async function removeAfterCheck(removal, options, deletePath, note) {
@@ -178,7 +194,10 @@ async function removeItem(item, options = {}) {
     case 'ollama': return ollama.remove(now, ctx);
     case 'hf-revision': return hfcache.removeRevision(now);
     case 'paths': return removePaths(r, deletePath);
-    case 'command': return removeByCommand(r, now, options, deletePath);
+    case 'command': return removeByCommand(r, now, options, deletePath, {
+      beforeTotal: groupTotal(fresh, now.group),
+      list: () => inventory({ ...options, only: [owner] }),
+    });
     default: return { ok: false, freed: 0, code: 'invalid', error: 'Unknown removal.' };
   }
 }
@@ -201,4 +220,4 @@ function storeRoots(inv) {
   return out;
 }
 
-module.exports = { DETECTORS, GROUP_OWNER, inventory, removeItem, findItem, itemPaths, storeRoots, removePaths, isInside, fsp };
+module.exports = { DETECTORS, GROUP_OWNER, inventory, removeItem, removeByCommand, findItem, itemPaths, storeRoots, removePaths, isInside, fsp };

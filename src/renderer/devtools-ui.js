@@ -4,7 +4,18 @@
    delete goes through api.devtoolsRemove with an explicit confirm, one item
    at a time. Main refuses anything blocked, unlisted or unconfirmed, so the
    disabled buttons here are a courtesy, not the safety. */
-(function () {
+
+/** What to tell the user after a removal that did not fully succeed. */
+function spaciDevtoolsFailText(label, res, fmt) {
+  const msg = (res && (res.message || res.error)) || 'Not deleted';
+  const dot = /\.$/.test(msg) ? '' : '.';
+  // Something was removed, so "nothing else was touched" would be wrong.
+  if (res && res.error === 'partial') return 'Partly deleted ' + label + (res.freed ? ', freed ' + fmt(res.freed) : '') + '. ' + msg + dot + ' Check again to see what is left.';
+  return msg + dot + ' Nothing else was touched.';
+}
+if (typeof module !== 'undefined' && module.exports) module.exports = { spaciDevtoolsFailText };
+
+(typeof window !== 'undefined') && (function () {
   const SP = window.SP;
   const { el, ic, ring, fmt } = SP;
   const S = SP.state;
@@ -83,7 +94,7 @@
         SP.reportClean({ ok: true, totalFreed: res.freed || 0, refused: [], errors: [] }, { burstLabel: 'from ' + it.label });
         S.devtoolsResult = { group: g.id, ok: true, text: 'Deleted ' + it.label + (res.freed ? ', freed ' + fmt(res.freed) : '') + '.' + (res.note ? ' ' + res.note : '') };
       } else {
-        S.devtoolsResult = { group: g.id, ok: false, text: ((res && (res.message || res.error)) || 'Not deleted') + (/\.$/.test((res && res.message) || '') ? '' : '.') + ' Nothing else was touched.' };
+        S.devtoolsResult = { group: g.id, ok: false, text: spaciDevtoolsFailText(it.label, res, fmt) };
       }
     } catch (err) {
       S.devtoolsResult = { group: g.id, ok: false, text: ((err && err.message) || 'Not deleted') + '. Nothing else was touched.' };

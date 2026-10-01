@@ -828,3 +828,53 @@ test('Android NDK: ndkVersion, ndk.dir and the AGP default NDK pin an older NDK;
   assert.match(g3.items.find((i) => i.id === 'ndk:26.3.11579264').blocked, /cannot determine/);
   assert.deepEqual(android.gradleModules("include ':app', ':core:net'\n"), ['app', path.join('core', 'net')]);
 });
+
+// ---- command removals: measured, and partial results said as such ------------------------
+
+/** simctl that really "deletes" a runtime, or pretends to (keep: true). */
+function simctlExec({ keep = false } = {}) {
+  let gone = false;
+  const rt = (id, ver, size) => ({ identifier: id, runtimeIdentifier: 'com.apple.CoreSimulator.SimRuntime.iOS-' + ver.replace('.', '-'), version: ver, build: 'B', sizeBytes: size, deletable: true, platformIdentifier: 'com.apple.platform.iphonesimulator' });
+  const calls = [];
+  const exec = (cmd, args, opts, cb) => {
+    const key = [path.basename(cmd), ...args].join(' ');
+    calls.push(key);
+    setImmediate(() => {
+      if (key === 'xcrun simctl list -j devices') return cb(null, JSON.stringify({ devices: {} }), '');
+      if (key === 'xcrun simctl runtime list -j') return cb(null, JSON.stringify(gone ? { R1: rt('R1', '17.5', 7e9) } : { R1: rt('R1', '17.5', 7e9), R2: rt('R2', '16.4', 6e9) }), '');
+      if (key === 'xcrun simctl runtime delete R2') { if (!keep) gone = true; return cb(null, '', ''); }
+      const e = new Error('ENOENT'); e.code = 'ENOENT'; cb(e, '', '');
+    });
+  };
+  return { exec, calls };
+}
+
+test('a command removal without expectGone records the measured drop, not the listed size', async () => {
+  const home = tmp('home');
+  const opts = { platform: 'darwin', home, env: {}, procs: quietProcs };
+  const ok = simctlExec();
+  const inv = await devtools.inventory({ ...opts, exec: ok.exec, only: ['simulators'] });
+  const item = inv.groups[0].items.find((i) => i.label === 'iOS 16.4 runtime');
+  const res = await devtools.removeItem(item, { ...opts, exec: ok.exec });
+  assert.equal(res.ok, true, res.error);
+  assert.equal(res.freed, 6e9);
+  assert.ok(ok.calls.includes('xcrun simctl runtime delete R2'));
+  // simctl says it worked but the runtime is still listed: partial, nothing freed.
+  const stuck = simctlExec({ keep: true });
+  const inv2 = await devtools.inventory({ ...opts, exec: stuck.exec, only: ['simulators'] });
+  const item2 = inv2.groups[0].items.find((i) => i.label === 'iOS 16.4 runtime');
+  const res2 = await devtools.removeItem(item2, { ...opts, exec: stuck.exec });
+  assert.equal(res2.ok, false);
+  assert.equal(res2.code, 'partial');
+  assert.equal(res2.freed, 0);
+  assert.match(res2.error, /still listed/);
+});
+
+test('the result line says "partly deleted" for a partial removal, never "nothing else was touched"', () => {
+  const { spaciDevtoolsFailText } = require('../src/renderer/devtools-ui.js');
+  const fmt = (n) => n + ' B';
+  const partial = spaciDevtoolsFailText('llama3:latest', { ok: false, error: 'partial', message: 'Some files could not be removed: EPERM', freed: 512 }, fmt);
+  assert.match(partial, /^Partly deleted llama3:latest, freed 512 B\. Some files could not be removed: EPERM\. Check again/);
+  assert.ok(!/Nothing else was touched/.test(partial));
+  assert.match(spaciDevtoolsFailText('x', { ok: false, error: 'blocked', message: 'Loaded in Ollama right now.' }, fmt), /^Loaded in Ollama right now\. Nothing else was touched\.$/);
+});
