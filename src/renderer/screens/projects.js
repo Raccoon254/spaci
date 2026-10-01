@@ -135,16 +135,48 @@
   // Remove linked worktrees, confirmed once with each one named (branch and
   // size). Main re-checks every worktree right before git removes it.
   // targets: [{ p: repo record, w: worktree }].
+  // Build output git ignores inside a worktree, which git worktree remove
+  // deletes with it: [{ rel, bytes|null }], sized from the scan's items.
+  function wtBuildOutput(p, w) {
+    const base = String(w.path || '').replace(/[\\/]+$/, '');
+    const items = (p.items || []).filter((it) => it && typeof it.path === 'string');
+    const relOf = (abs) => abs.indexOf(base) === 0 && /^[\\/]/.test(abs.slice(base.length)) ? abs.slice(base.length + 1).replace(/\\/g, '/') : null;
+    return (Array.isArray(w.buildOutput) ? w.buildOutput : []).map((raw) => {
+      const rel = String(raw).replace(/\\/g, '/').replace(/\/+$/, '');
+      let bytes = null;
+      items.forEach((it) => {
+        const r = relOf(it.path);
+        if (r != null && (r === rel || r.indexOf(rel + '/') === 0)) bytes = (bytes || 0) + (it.size || 0);
+      });
+      return { rel, bytes };
+    });
+  }
+  function wtConfirmLine(t, many) {
+    const w = t.w;
+    const out = ['• ' + (many ? t.p.name + ': ' : '') + wtName(w) + ' (' + fmt(w.size || 0) + ')', '   ' + abbrevRoot(w.path)];
+    if (w.branch) {
+      out.push('   Branch ' + w.branch + ' kept' + (w.upstream && w.ahead > 0 ? ' with ' + plural(w.ahead, 'unpushed commit') : '') + '.');
+    }
+    const bo = wtBuildOutput(t.p, w);
+    if (bo.length) {
+      const sized = bo.filter((b) => b.bytes != null);
+      const total = sized.reduce((a, b) => a + b.bytes, 0);
+      const shown = bo.slice(0, 6).map((b) => b.rel + (b.bytes != null ? ' ' + fmt(b.bytes) : '')).join(', ') + (bo.length > 6 ? ' and ' + (bo.length - 6) + ' more' : '');
+      out.push('   Build output deleted with it' + (sized.length ? ' (' + fmt(total) + ')' : '') + ': ' + shown);
+    }
+    return out.join('\n');
+  }
+
   SP.removeWorktreesFlow = async function removeWorktreesFlow(targets) {
     const list = (Array.isArray(targets) ? targets : []).filter((t) => t && t.w && t.w.exists && t.w.eligibility && t.w.eligibility.ok === true);
     if (!list.length || S.wtBusy || !api.removeWorktrees) return;
     const bytes = list.reduce((a, t) => a + (t.w.size || 0), 0);
     const repos = new Set(list.map((t) => t.p.path));
-    const lines = list.map((t) => '• ' + (repos.size > 1 ? t.p.name + ': ' : '') + wtName(t.w) + ' (' + fmt(t.w.size || 0) + ')\n   ' + abbrevRoot(t.w.path));
+    const lines = list.map((t) => wtConfirmLine(t, repos.size > 1));
     const n = list.length;
     const ok = await SP.confirm({
       title: 'Remove ' + plural(n, 'worktree') + ' (' + fmt(bytes) + ')?',
-      body: lines.join('\n') + '\n\nSpaci runs git worktree remove for each one, after checking again that it is still clean and merged or pushed. Branches are kept, so git worktree add brings a worktree back. Build output inside them goes too.',
+      body: lines.join('\n') + '\n\nSpaci runs git worktree remove for each one, after checking again that it is still clean, quiet, and merged or pushed. Branches are kept, so git worktree add brings a worktree back. The build output listed above is deleted with it.',
       confirmLabel: 'Remove ' + n,
       icon: 'trash',
       width: 540,
@@ -172,17 +204,34 @@
     SP.go(S.route);
   };
 
+  // Clear git's record of each missing worktree, confirmed once with each one
+  // named. Main re-checks each: folder really gone (not an unplugged disk or
+  // an unreadable folder) and its last commit on a branch.
   SP.pruneWorktreesFlow = async function pruneWorktreesFlow(p) {
-    if (!p || S.wtBusy || !api.pruneWorktrees) return;
+    const missing = missingOf(p);
+    if (!p || !missing.length || S.wtBusy || !api.pruneWorktrees) return;
+    const n = missing.length;
+    const ok = await SP.confirm({
+      title: 'Clear ' + plural(n, 'missing worktree record') + '?',
+      body: missing.map((w) => '• ' + wtName(w) + '\n   ' + abbrevRoot(w.path)).join('\n') +
+        '\n\nGit still keeps a record of ' + (n === 1 ? 'this worktree' : 'these worktrees') + ', but the folder is gone. Spaci clears each record on its own, after checking that the folder is really gone (not on a disk that is unplugged) and that its last commit is on a branch. Branches are kept.',
+      confirmLabel: 'Clear ' + n,
+      icon: 'broom',
+      width: 540,
+      scrollBody: n > 6,
+    });
+    if (!ok) return;
     S.wtBusy = true;
     let res;
-    try { res = await api.pruneWorktrees(p.path); } catch (err) { res = { ok: false, error: err && err.message }; }
+    try { res = await api.pruneWorktrees(p.path, missing.map((w) => w.path), { confirmed: true }); } catch (err) { res = { ok: false, error: err && err.message }; }
     S.wtBusy = false;
     if (res && res.ok) {
       applyRepoUpdates(res.projects);
-      SP.toast(res.pruned ? 'Cleared ' + plural(res.pruned, 'missing worktree') : 'Nothing to clear', 'Only git\'s records were removed. Branches are kept.');
+      SP.toast(res.pruned ? 'Cleared ' + plural(res.pruned, 'missing worktree record') : 'Nothing was cleared', 'Only git\'s records were removed. Branches are kept.');
+      const left = res.refused || [];
+      if (left.length) SP.toast(plural(left.length, 'record') + ' left alone', String(left[0].reason || '').slice(0, 140));
     } else {
-      SP.toast('Nothing was pruned', (res && res.error) || 'git could not prune.');
+      SP.toast('Nothing was cleared', (res && res.error) || 'git could not clear the records.');
     }
     SP.go(S.route);
   };
@@ -1381,7 +1430,7 @@
     const missing = missingOf(p);
     const actions = [];
     if (rem.length > 1) actions.push(smallBtn('trash', 'Remove ' + rem.length + ' merged, clean (' + fmt(rem.reduce((a, w) => a + (w.size || 0), 0)) + ')', () => SP.removeWorktreesFlow(rem.map((w) => ({ p, w }))), { disabled: S.wtBusy }));
-    if (missing.length) actions.push(smallBtn('broom', 'Prune ' + missing.length + ' missing', () => SP.pruneWorktreesFlow(p), { disabled: S.wtBusy, title: 'git worktree prune: clears git\'s records of worktrees whose folder is gone' }));
+    if (missing.length) actions.push(smallBtn('broom', 'Clear ' + missing.length + ' missing', () => SP.pruneWorktreesFlow(p), { disabled: S.wtBusy, title: 'Clears git\'s record of each worktree whose folder is gone, one at a time, after you confirm the list' }));
     const sub = [];
     sub.push(fmt(r.worktreeBytes || 0) + ' on disk');
     if (r.defaultBranch) sub.push('merged means in ' + r.defaultBranch);
@@ -1392,7 +1441,7 @@
         el('div', { style: SECTION_LABEL, text: 'Worktrees (' + wts.length + ')' }),
         el('div', { style: 'display:flex;gap:8px' }, actions),
       ]),
-      el('div', { style: 'color:var(--text-3);font-size:12px;margin-bottom:12px', text: sub.join(' · ') + '. Spaci only offers to remove a worktree that is clean, unlocked, and merged or pushed.' }),
+      el('div', { style: 'color:var(--text-3);font-size:12px;margin-bottom:12px', text: sub.join(' · ') + '. Spaci only offers to remove a worktree that is clean, unlocked, quiet for an hour, and merged or pushed.' }),
       el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, sorted.map((w) => buildWorktreeRow(p, w))),
     ]);
   }
