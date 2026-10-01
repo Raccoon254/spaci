@@ -16,6 +16,7 @@ const docker = require('./docker');
 const languages = require('./languages');
 const techCache = require('./tech-cache');
 const { projectFigures } = require('./reclaimable');
+const repoGroup = require('./repo-group');
 
 // Scanning is IO bound, not CPU bound: the win comes from keeping many reads in
 // flight rather than from cores. These caps keep a scan responsive without
@@ -277,8 +278,11 @@ function gitStatus(dir) {
  * @param {AbortSignal} signal
  * @returns {Promise<{projects:object[], scanned:number}>}
  */
-async function scanProjects(root, onProgress, signal) {
+async function scanProjects(root, onProgress, signal, opts = {}) {
   const projects = [];
+  // Every folder with a .git entry the walk passed through (main checkouts,
+  // linked worktrees, submodules), for grouping by repository afterwards.
+  const checkouts = [];
   let scanned = 0;
   let files = 0;
   let lastEmit = 0;
@@ -310,12 +314,20 @@ async function scanProjects(root, onProgress, signal) {
     } catch { return null; }
     for (const e of entries) { if (e.isFile()) files++; }
     const names = entries.map((e) => e.name);
+    if (names.includes('.git')) checkouts.push(dir);
 
     const types = detectTypes(names);
     if (types.length) {
       const project = await buildProject(dir, types, signal, names);
-      if (project) { projects.push(project); emit(dir, true); }
-      return null; // do not descend further for project detection
+      if (!project) return null;
+      // Checkouts nested inside the project (a worktree under .claude/worktrees,
+      // a submodule, a cloned repo) are repositories of their own: the artifact
+      // walk stopped at them, and project detection continues there.
+      const nested = project.nestedCheckouts || [];
+      delete project.nestedCheckouts;
+      projects.push(project);
+      emit(dir, true);
+      return depth > 12 ? null : nested.map((d) => ({ dir: d, depth: depth + 1 }));
     }
 
     // A folder whose only marker is Docker: record it (compose labels can tie
@@ -336,8 +348,17 @@ async function scanProjects(root, onProgress, signal) {
     }
     return children;
   }, signal);
-  onProgress?.({ phase: 'done', scanned, files, found: projects.length, percent: 100 });
-  return { projects, scanned };
+  if (opts.group === false) {
+    onProgress?.({ phase: 'done', scanned, files, found: projects.length, percent: 100 });
+    return { projects, scanned };
+  }
+  // One record per repository: packages and linked worktrees fold into it.
+  onProgress?.({ phase: 'grouping', scanned, files, found: projects.length, percent: 96 });
+  const grouped = await repoGroup.consolidate(projects, {
+    root, signal, dirSize, checkouts, measure: opts.measure,
+  });
+  onProgress?.({ phase: 'done', scanned, files, found: grouped.projects.length, percent: 100 });
+  return { projects: grouped.projects, scanned, stats: grouped.stats };
 }
 
 /**
@@ -696,11 +717,22 @@ async function buildProject(dir, detected, signal, rootEntries) {
   // `.git` entry (a directory, or a file for worktrees and submodules), else
   // the project folder, whose enclosing repo git resolves.
   const found = [];
+  const nestedCheckouts = [];
+  const subPackages = [];
   await drain([{ cur: dir, depth: 0, repo: dir }], WALK_WORKERS, async ({ cur, depth, repo }) => {
     let ents;
     try { ents = await fsp.readdir(cur, { withFileTypes: true }); }
     catch { return null; }
-    const here = ents.some((e) => e.name === '.git') ? cur : repo;
+    const hasGit = ents.some((e) => e.name === '.git');
+    // Another checkout below the project root belongs to its own repository
+    // (or, for a linked worktree, is grouped under its main repository).
+    if (hasGit && depth > 0) { nestedCheckouts.push(cur); return null; }
+    const here = hasGit ? cur : repo;
+    // Marker folders inside the project are its packages (monorepo workspaces).
+    if (depth > 0 && depth <= 4) {
+      const t = detectTypes(ents.map((e) => e.name));
+      if (t.length) subPackages.push({ path: cur, types: t.map((x) => ({ id: x.id, name: x.name, icon: x.icon, score: x.score })) });
+    }
     const subdirs = [];
     for (const e of ents) {
       if (e.isSymbolicLink()) continue;
@@ -812,6 +844,8 @@ async function buildProject(dir, detected, signal, rootEntries) {
     // per project.
     docker: dockerFiles ? { ...dockerFiles, services, usage: null } : null,
   };
+  if (subPackages.length) project.subPackages = subPackages;
+  if (nestedCheckouts.length) project.nestedCheckouts = nestedCheckouts;
   return project;
 }
 
@@ -829,7 +863,13 @@ async function attachDockerUsage(projects, options = {}) {
 
   let attached = 0;
   for (const p of projects) {
-    const usage = byDir.get(p.path);
+    // A repository record also answers for its packages with Docker files.
+    let usage = byDir.get(p.path);
+    for (const d of Array.isArray(p.dockerDirs) ? p.dockerDirs : []) {
+      const u = byDir.get(d);
+      if (!u) continue;
+      usage = usage ? sumUsage(usage, u) : u;
+    }
     if (!usage) continue;
     p.docker = p.docker || { dockerfiles: [], composeFiles: [], compose: false, services: [] };
     p.docker.usage = {
@@ -846,6 +886,20 @@ async function attachDockerUsage(projects, options = {}) {
     attached++;
   }
   return { attached, inventory: inv };
+}
+
+function sumUsage(a, b) {
+  return {
+    project: a.project,
+    containers: [...a.containers, ...b.containers],
+    running: (a.running || 0) + (b.running || 0),
+    images: [...a.images, ...b.images],
+    volumes: [...a.volumes, ...b.volumes],
+    imageBytes: (a.imageBytes || 0) + (b.imageBytes || 0),
+    volumeBytes: (a.volumeBytes || 0) + (b.volumeBytes || 0),
+    containerBytes: (a.containerBytes || 0) + (b.containerBytes || 0),
+    totalBytes: (a.totalBytes || 0) + (b.totalBytes || 0),
+  };
 }
 
 /** Find a representative project icon: web favicon, Android launcher, or iOS AppIcon. */
@@ -960,5 +1014,5 @@ module.exports = {
   PROJECT_TYPES, CLEAN_RULES, SKIP_DELETE,
   scanProjects, dirSize, enrichProject, analyzeTech, gitStatus, detectType, detectTypes,
   exportTechCache, importTechCache, techCacheStats,
-  attachDockerUsage, walkSize, drain, mapPool, revalidateArtifact,
+  attachDockerUsage, walkSize, drain, mapPool, revalidateArtifact, findNestedGit,
 };

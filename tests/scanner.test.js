@@ -417,7 +417,8 @@ test('a .git-file worktree with an ignored dist/ is safe', async () => {
   git(main, 'worktree', 'add', '-q', '-b', 'wt', wt);
   assert.ok(fs.statSync(path.join(wt, '.git')).isFile(), 'worktree uses a .git file');
   write(wt, 'dist/bundle.js', 'output');
-  const items = await itemsAt(root, wt);
+  // A linked worktree is grouped under its main repository's record.
+  const items = await itemsAt(root, main);
   assert.equal(safeAt(items, path.join(wt, 'dist')), true);
 });
 
