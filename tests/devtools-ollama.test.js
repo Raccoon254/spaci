@@ -65,18 +65,25 @@ function makeStore() {
   return { dir, blobs, files };
 }
 
+// What /api/tags reports as a model's digest: the sha256 of its manifest file.
+const manifestDigest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const tagFor = (name, file, extra = {}) => ({ name, model: name, digest: manifestDigest(file), ...extra });
+
 const blobExists = (store, k) => fs.existsSync(path.join(store.dir, 'blobs', 'sha256-' + store.blobs[k].d));
 const alloc = (bytes) => bytes; // fixtures are measured by allocated size; compare by presence below
 
 // Stubs: an Ollama that is not running (no process, API refuses) unless told otherwise.
-function stubs({ running = false, procOk = true, ps = null, tags = null, deleteOk = true, apiDown = !running } = {}) {
+function stubs({ running = false, procOk = true, ps = null, tags = null, deleteOk = true, apiDown = !running, onDelete = null } = {}) {
   const calls = [];
   const httpJson = async (method, url, body) => {
     calls.push({ method, url, body });
     if (apiDown) return { ok: false, status: 0, json: null, error: 'ECONNREFUSED' };
     if (url.endsWith('/api/tags')) return { ok: true, status: 200, json: { models: tags || [] } };
     if (url.endsWith('/api/ps')) return { ok: true, status: 200, json: { models: ps || [] } };
-    if (url.endsWith('/api/delete')) return deleteOk ? { ok: true, status: 200, json: null } : { ok: false, status: 500, json: null };
+    if (url.endsWith('/api/delete')) {
+      if (deleteOk && onDelete) onDelete(body);
+      return deleteOk ? { ok: true, status: 200, json: null } : { ok: false, status: 500, json: null };
+    }
     return { ok: false, status: 404, json: null };
   };
   const procs = { ok: procOk, list: running ? [{ pid: 1079, args: '/Applications/Ollama.app/Contents/Resources/ollama serve' }] : [{ pid: 1, args: '/sbin/launchd' }] };
@@ -159,7 +166,10 @@ test('blob GC never lists a blob a remaining manifest references', async () => {
 
 test('inventory lists models with unique sizes, details from the API and loaded state', async () => {
   const store = makeStore();
-  const tags = [{ name: 'qwen2.5:0.5b', model: 'qwen2.5:0.5b', modified_at: '2026-09-01T00:00:00Z', size: 1, details: { parameter_size: '494M', quantization_level: 'Q4_K_M', family: 'qwen2' } }];
+  const tags = [
+    tagFor('qwen2.5:0.5b', store.files.qwen, { modified_at: '2026-09-01T00:00:00Z', size: 1, details: { parameter_size: '494M', quantization_level: 'Q4_K_M', family: 'qwen2' } }),
+    tagFor('mymodel:latest', store.files.mymodel),
+  ];
   const ps = [{ name: 'qwen2.5:0.5b', model: 'qwen2.5:0.5b', size_vram: 1000 }];
   const s = stubs({ running: true, tags, ps });
   const groups = await ollama.inventory({ platform: process.platform === 'win32' ? 'win32' : 'linux', home: os.tmpdir(), env: { OLLAMA_MODELS: store.dir, USERPROFILE: os.tmpdir() }, procs: s.procs, httpJson: s.httpJson });
@@ -244,16 +254,110 @@ test('process list unavailable and API down: refused (fail closed)', async () =>
 
 test('server running: Ollama\'s own DELETE /api/delete is used with { model }', async () => {
   const store = makeStore();
-  const s = stubs({ running: true, ps: [] });
+  // A server that deletes the way Ollama does: the manifest, then its unique blobs.
+  const onDelete = () => {
+    fs.unlinkSync(store.files.qwen);
+    for (const k of ['C3', 'W2']) fs.unlinkSync(path.join(store.dir, 'blobs', 'sha256-' + store.blobs[k].d));
+  };
+  const s = stubs({ running: true, ps: [], tags: [tagFor('qwen2.5:0.5b', store.files.qwen)], onDelete });
   const res = await ollama.remove({ removal: { type: 'ollama', store: store.dir, name: 'qwen2.5:0.5b', file: store.files.qwen } }, { env: { OLLAMA_HOST: '0.0.0.0:11434' }, procs: s.procs, httpJson: s.httpJson });
-  assert.equal(res.ok, true);
+  assert.equal(res.ok, true, res.error);
   assert.equal(res.via, 'api');
   const del = s.calls.find((c) => c.method === 'DELETE');
   assert.equal(del.url, 'http://127.0.0.1:11434/api/delete');
   assert.deepEqual(del.body, { model: 'qwen2.5:0.5b' });
-  // The stub server deleted nothing, so nothing is reported as freed.
+  assert.ok(res.freed > 0);
+  assert.ok(blobExists(store, 'T'), 'the shared template stays');
+});
+
+test('server running: an API delete that frees nothing it should have is not reported as done', async () => {
+  const store = makeStore();
+  const s = stubs({ running: true, ps: [], tags: [tagFor('qwen2.5:0.5b', store.files.qwen)] });
+  const res = await ollama.remove({ removal: { type: 'ollama', store: store.dir, name: 'qwen2.5:0.5b', file: store.files.qwen } }, { env: {}, procs: s.procs, httpJson: s.httpJson });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, 'partial');
   assert.equal(res.freed, 0);
   assert.ok(fs.existsSync(store.files.qwen), 'Spaci itself does not touch the store when the server deletes');
+});
+
+test('the /api/tags digest is the sha256 of the manifest file (real capture)', () => {
+  const tags = JSON.parse(fixture('ollama-api-tags.json')).models;
+  const raw = fs.readFileSync(path.join(FIX, 'ollama-manifest-nomic-embed-text.json'));
+  const rec = { name: 'nomic-embed-text:latest', sha: crypto.createHash('sha256').update(raw).digest('hex') };
+  assert.equal(ollama.servedTag(tags, rec), tags[0]);
+  assert.equal(ollama.servedTag(tags, { ...rec, sha: hex('another copy') }), null);
+  assert.equal(ollama.bareDigest('sha256:' + rec.sha), rec.sha);
+});
+
+// Critic repro r1: OLLAMA_MODELS is the live store the server uses, and a
+// stale ~/.ollama/models holds another llama3:latest. Deleting the stale one
+// by name through the API would delete the live copy instead.
+function twoStores() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-ollama2-'));
+  const home = path.join(tmp, 'home');
+  const live = path.join(tmp, 'ext', 'models');
+  const stale = path.join(home, '.ollama', 'models');
+  const mk = (store, digestHex) => {
+    const md = path.join(store, 'manifests', 'registry.ollama.ai', 'library', 'llama3');
+    fs.mkdirSync(md, { recursive: true });
+    fs.mkdirSync(path.join(store, 'blobs'), { recursive: true });
+    fs.writeFileSync(path.join(store, 'blobs', 'sha256-' + digestHex), 'x'.repeat(5000));
+    fs.writeFileSync(path.join(md, 'latest'), JSON.stringify({ config: { digest: 'sha256:' + digestHex }, layers: [] }));
+    return path.join(md, 'latest');
+  };
+  const liveFile = mk(live, 'a'.repeat(64));
+  const staleFile = mk(stale, 'b'.repeat(64));
+  return { home, live, stale, liveFile, staleFile };
+}
+
+test('r1: a copy in a store the running Ollama does not use is blocked and never deleted through the API', async () => {
+  const t = twoStores();
+  const s = stubs({ running: true, ps: [], tags: [tagFor('llama3:latest', t.liveFile)] });
+  const ctx = { platform: 'darwin', home: t.home, env: { OLLAMA_MODELS: t.live }, procs: s.procs, httpJson: s.httpJson };
+  const [g] = await ollama.inventory(ctx);
+  const staleItem = g.items.find((i) => i.removal.store === t.stale);
+  const liveItem = g.items.find((i) => i.removal.store === t.live);
+  assert.match(staleItem.blocked, /a store the running Ollama does not use/);
+  assert.equal(liveItem.blocked, null);
+  // Even with a forged unblocked copy, remove() checks again and refuses.
+  const res = await ollama.remove(staleItem, ctx);
+  assert.equal(res.ok, false);
+  assert.equal(res.code, 'not-served');
+  assert.ok(!s.calls.some((c) => c.method === 'DELETE'), 'no API delete was sent');
+  assert.ok(fs.existsSync(t.staleFile) && fs.existsSync(t.liveFile));
+  // The same tag name without a digest (an old server) proves nothing: refused.
+  const s2 = stubs({ running: true, ps: [], tags: [{ name: 'llama3:latest' }] });
+  const res2 = await ollama.remove(liveItem, { ...ctx, httpJson: s2.httpJson });
+  assert.equal(res2.code, 'not-served');
+  assert.ok(!s2.calls.some((c) => c.method === 'DELETE'));
+});
+
+test('r1: with Ollama stopped, the stale copy is deleted on disk and the live store is untouched', async () => {
+  const t = twoStores();
+  const s = stubs({ running: false });
+  const ctx = { platform: 'darwin', home: t.home, env: { OLLAMA_MODELS: t.live }, procs: s.procs, httpJson: s.httpJson };
+  const [g] = await ollama.inventory(ctx);
+  const staleItem = g.items.find((i) => i.removal.store === t.stale);
+  assert.equal(staleItem.blocked, null);
+  const res = await ollama.remove(staleItem, ctx);
+  assert.equal(res.ok, true, res.error);
+  assert.equal(res.via, 'disk');
+  assert.ok(!fs.existsSync(t.staleFile));
+  assert.ok(fs.existsSync(t.liveFile) && fs.existsSync(path.join(t.live, 'blobs', 'sha256-' + 'a'.repeat(64))));
+});
+
+test('a store whose blobs folder is another store\'s keeps every blob the other store still names', { skip: process.platform === 'win32' }, async () => {
+  const t = twoStores();
+  // The stale store's blobs folder is the live one's; both manifests name blob A.
+  fs.rmSync(path.join(t.stale, 'blobs'), { recursive: true });
+  fs.symlinkSync(path.join(t.live, 'blobs'), path.join(t.stale, 'blobs'));
+  fs.writeFileSync(t.staleFile, fs.readFileSync(t.liveFile));
+  const s = stubs({ running: false });
+  const ctx = { platform: 'darwin', home: t.home, env: { OLLAMA_MODELS: t.live }, procs: s.procs, httpJson: s.httpJson };
+  const manifests = await ollama.readManifests(t.stale);
+  const res = await ollama.removeOnDisk(t.stale, manifests[0], manifests, new Map(), ollama.storeDirs(ctx));
+  assert.equal(res.ok, true, res.error);
+  assert.ok(fs.existsSync(path.join(t.live, 'blobs', 'sha256-' + 'a'.repeat(64))), 'blob still named by the live store stays');
 });
 
 test('removeItem re-detects first: a model loaded since the listing is refused', async () => {

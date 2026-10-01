@@ -13,20 +13,28 @@
  * of the blobs no other manifest references. That is what deleting it frees.
  *
  * Removal, in order of preference:
- *   1. The server is up: DELETE /api/delete { model } (Ollama's own delete,
- *      which removes the manifest and prunes blobs nothing references).
+ *   1. The server is up and serves this very manifest: DELETE /api/delete
+ *      { model } (Ollama's own delete, which removes the manifest and prunes
+ *      blobs nothing references). "This very manifest" means the sha256 of
+ *      the manifest file equals the digest /api/tags reports for that name:
+ *      the API deletes by name from the store the server uses, which is not
+ *      necessarily the store the user picked (OLLAMA_MODELS for the server
+ *      and a stale ~/.ollama/models, say). A copy the server does not serve
+ *      is refused while it runs.
  *   2. No Ollama process at all: the same thing on disk, the way Ollama does
  *      it: remove the manifest, then delete only blobs that no remaining
  *      manifest references.
  *   3. An Ollama process runs but its API does not answer here: refuse. Spaci
  *      cannot tell what is loaded, so it does not touch the store.
- * A model that /api/ps lists as loaded is never deleted.
+ * A model that /api/ps lists as loaded is never deleted. An API delete that
+ * should have freed bytes but freed none is reported as not done.
  */
 
 const fs = require('fs');
 const fsp = fs.promises;
+const crypto = require('crypto');
 const path = require('path');
-const { httpJson, listDir, readJson, lstatSafe, allocated, pool, absEnv, isInside } = require('./util');
+const { httpJson, listDir, lstatSafe, allocated, pool, absEnv, isInside } = require('./util');
 const { runningState } = require('./processes');
 const { makeGroup, makeItem } = require('./model');
 
@@ -103,6 +111,37 @@ function sameModel(a, b) {
   return full(a) === full(b);
 }
 
+const MAX_MANIFEST = 1024 * 1024;
+async function readManifestFile(file) {
+  try {
+    const st = await fsp.stat(file);
+    if (!st.isFile() || st.size > MAX_MANIFEST) return null;
+    return await fsp.readFile(file);
+  } catch { return null; }
+}
+
+async function realOrSelf(p) { try { return await fsp.realpath(p); } catch { return p; } }
+
+function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+
+/** A digest as bare lowercase hex ("sha256:abc" and "abc" are the same). */
+function bareDigest(d) {
+  const m = /^(?:sha256[:-])?([0-9a-f]{64})$/i.exec(String(d || '').trim());
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * The /api/tags entry that is this exact manifest: same name, and its digest
+ * (the sha256 of the manifest file, as Ollama computes it) equals the file's.
+ * Null when the server lists the name from another store, or not at all.
+ */
+function servedTag(tags, manifest) {
+  if (!Array.isArray(tags) || !manifest || !manifest.sha) return null;
+  return tags.find((t) => t && sameModel(t.name || t.model, manifest.name) && bareDigest(t.digest) === manifest.sha) || null;
+}
+
+const NOT_SERVED = 'A copy in a store the running Ollama does not use. Ollama would delete its own copy instead, so Spaci leaves this alone. Quit Ollama, then delete it here.';
+
 /**
  * Every manifest under a store: [{ host, namespace, model, tag, file, name,
  * digests, mtimeMs }]. Manifests are exactly four levels deep.
@@ -119,11 +158,14 @@ async function readManifests(dir) {
         const tags = await listDir(path.join(root, h.name, ns.name, m.name));
         await pool(tags.filter((t) => t.isFile()), 8, async (t) => {
           const file = path.join(root, h.name, ns.name, m.name, t.name);
-          const json = await readJson(file, 1024 * 1024);
+          const raw = await readManifestFile(file);
+          if (!raw) return;
+          let json = null;
+          try { json = JSON.parse(raw.toString('utf8')); } catch { json = null; }
           const digests = manifestDigests(json);
           if (!digests) return;
           const st = await lstatSafe(file);
-          const rec = { host: h.name, namespace: ns.name, model: m.name, tag: t.name, file, digests, mtimeMs: st ? st.mtimeMs : 0 };
+          const rec = { host: h.name, namespace: ns.name, model: m.name, tag: t.name, file, digests, sha: sha256(raw), mtimeMs: st ? st.mtimeMs : 0 };
           rec.name = displayName(rec);
           out.push(rec);
         });
@@ -215,9 +257,16 @@ async function inventory(ctx) {
   const dirs = storeDirs(ctx);
   let firstDir = null;
   const items = [];
+  const seenReal = new Set();
   for (const dir of dirs) {
     const st = await lstatSafe(path.join(dir, 'manifests'));
     if (!st || !st.isDirectory()) continue;
+    // The same store reached twice (OLLAMA_MODELS symlinked to the default)
+    // is listed once.
+    let real = dir;
+    try { real = await fsp.realpath(dir); } catch { real = dir; }
+    if (seenReal.has(real)) continue;
+    seenReal.add(real);
     if (!firstDir) firstDir = dir;
     const manifests = await readManifests(dir);
     const sizes = await blobSizesFor(dir, manifests);
@@ -225,8 +274,9 @@ async function inventory(ctx) {
     for (let i = 0; i < manifests.length; i++) {
       const m = manifests[i];
       const sz = computed[i];
-      const tag = (server.tags || []).find((t) => sameModel(t.name || t.model, m.name)) || null;
-      const loaded = server.ps ? server.ps.find((p) => sameModel(p.name || p.model, m.name)) : null;
+      const tag = servedTag(server.tags, m);
+      const notServed = server.state === 'running' && !tag;
+      const loaded = !notServed && server.ps ? server.ps.find((p) => sameModel(p.name || p.model, m.name)) : null;
       const details = tag && tag.details;
       let blocked = null;
       let state = 'idle';
@@ -238,6 +288,9 @@ async function inventory(ctx) {
       } else if (server.state === 'unknown') {
         blocked = server.reason || 'Spaci could not check whether this model is loaded.';
         badges.push({ text: 'Not checked', kind: 'unknown' });
+      } else if (notServed) {
+        blocked = NOT_SERVED;
+        badges.push({ text: 'Other store', kind: 'info' });
       }
       if (sz.shared > 0) badges.push({ text: 'Shares ' + Math.round((sz.shared / Math.max(1, sz.total)) * 100) + '% with other models', kind: 'info' });
       items.push(makeItem({
@@ -303,6 +356,9 @@ async function remove(item, ctx) {
   const expected = collect.reduce((a, d) => a + (sizes.get(d) || 0), 0);
 
   if (server.state === 'running') {
+    // The API deletes by name from the server's own store. Use it only when
+    // that store holds exactly this manifest.
+    if (!servedTag(server.tags, target)) return { ok: false, freed: 0, code: 'not-served', error: NOT_SERVED };
     const del = ctx.httpJson || httpJson;
     let res = await del('DELETE', server.base + '/api/delete', { model: r.name }, { timeout: 30000 });
     // Older servers take { name } instead of { model }.
@@ -311,12 +367,16 @@ async function remove(item, ctx) {
     // Ollama prunes the blobs itself; count only what is really gone.
     let freed = 0;
     for (const d of collect) if (!(await lstatSafe(blobFile(r.store, d)))) freed += sizes.get(d) || 0;
+    if (await lstatSafe(target.file)) return { ok: false, freed, code: 'partial', error: 'Ollama answered, but ' + r.name + ' is still in this store.', expected };
+    if (expected > 0 && freed === 0) return { ok: false, freed: 0, code: 'partial', error: 'Ollama removed ' + r.name + ' from its list, but none of its files were freed here.', expected };
     return { ok: true, freed, via: 'api', expected };
   }
   if (server.state !== 'stopped') {
     return { ok: false, freed: 0, code: 'unknown-state', error: server.reason || 'Spaci could not check whether Ollama is using this model, so it left it alone.' };
   }
-  return removeOnDisk(r.store, target, manifests, sizes);
+  let others = [];
+  try { others = storeDirs(ctx); } catch { others = []; }
+  return removeOnDisk(r.store, target, manifests, sizes, others);
 }
 
 /**
@@ -324,17 +384,21 @@ async function remove(item, ctx) {
  * manifest, then each blob nothing else references (recomputed from a fresh
  * read of every manifest), then empty manifest folders.
  */
-async function removeOnDisk(store, target, manifests, sizes) {
+async function removeOnDisk(store, target, manifests, sizes, allStores = []) {
   const manifestsRoot = path.join(store, 'manifests');
   if (!isInside(manifestsRoot, target.file)) return { ok: false, freed: 0, code: 'invalid', error: 'Manifest outside the store.' };
   try { await fsp.unlink(target.file); } catch (e) {
     if (e.code !== 'ENOENT') return { ok: false, freed: 0, code: e.code || 'failed', error: 'Could not remove the manifest: ' + e.message };
   }
   // Re-read after the unlink, so a manifest that appeared meanwhile still
-  // protects its blobs.
-  const after = await readManifests(store);
+  // protects its blobs. Another store whose blobs folder is really this one
+  // (a symlink) counts as well: its manifests name the same files.
   const still = new Set();
-  for (const m of after) for (const d of m.digests) still.add(d);
+  const realBlobs = await realOrSelf(path.join(store, 'blobs'));
+  for (const dir of Array.from(new Set([store, ...allStores]))) {
+    if (dir !== store && (await realOrSelf(path.join(dir, 'blobs'))) !== realBlobs) continue;
+    for (const m of await readManifests(dir)) for (const d of m.digests) still.add(d);
+  }
   let freed = 0;
   const errors = [];
   for (const d of target.digests) {
@@ -357,5 +421,5 @@ async function removeOnDisk(store, target, manifests, sizes) {
 
 module.exports = {
   storeDirs, hostUrl, blobFile, manifestDigests, displayName, sameModel, readManifests, refCounts,
-  computeSizes, blobsToCollect, serverState, inventory, remove, removeOnDisk, OLLAMA_PROC_RE,
+  computeSizes, blobsToCollect, serverState, inventory, remove, removeOnDisk, servedTag, bareDigest, OLLAMA_PROC_RE,
 };
