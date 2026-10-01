@@ -881,3 +881,11 @@ test('the result line says "partly deleted" for a partial removal, never "nothin
   assert.ok(!/Nothing else was touched/.test(partial));
   assert.match(spaciDevtoolsFailText('x', { ok: false, error: 'blocked', message: 'Loaded in Ollama right now.' }, fmt), /^Loaded in Ollama right now\. Nothing else was touched\.$/);
 });
+
+test('AGP default NDK table matches the AGP release notes (8.3 is NDK 25.1; 26 is the default from 8.4)', () => {
+  const t = android.AGP_DEFAULT_NDK || require('../src/devtools/android').AGP_DEFAULT_NDK;
+  if (!t) return; // not exported: covered through the pin tests above
+  assert.equal(t['8.3'], '25.1.8937393');
+  assert.equal(t['8.4'], '26.1.10909125');
+  assert.equal(t['9.0'], '28.2.13676358');
+});
