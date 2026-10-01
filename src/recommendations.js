@@ -111,7 +111,7 @@ function buildRecommendations(projects, sysTargets, prefs, dockerInfo, docker = 
       itemCount: wt.count,
       repos: wt.repos,
       severity: wt.bytes > HIGH_SYSTEM_BYTES ? 'high' : 'normal',
-      icon: 'hierarchy',
+      icon: 'copy',
       safe: false,
       title: `${wt.count} merged, clean git worktree${wt.count === 1 ? '' : 's'} · ${fmt(wt.bytes)} on disk`,
       body: `In ${wt.repos} ${wt.repos === 1 ? 'repository' : 'repositories'}. Their branches are merged or pushed and nothing is uncommitted. Removing them keeps every branch.`
