@@ -122,7 +122,9 @@ function dockerRestoreHint(kind) {
 
 /** Restore line for History: the branch is kept, so this brings the files back. */
 function worktreeRestoreHint(wt) {
-  const q = (s) => (/[\s"'$`\\]/.test(s) ? JSON.stringify(s) : s);
+  // Quoted only when it must be. Backslashes stay as they are: they are path
+  // separators on Windows, not escapes.
+  const q = (s) => (/[\s"'$`]/.test(s) ? '"' + s.replace(/(["$`])/g, '\\$1') + '"' : s);
   if (wt && wt.branch && !wt.detached) return `git worktree add ${q(wt.path)} ${q(wt.branch)}`;
   if (wt && wt.head) return `git worktree add --detach ${q(wt.path)} ${wt.head}`;
   return 'Recreate it with git worktree add.';
