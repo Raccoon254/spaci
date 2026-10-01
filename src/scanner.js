@@ -357,7 +357,7 @@ async function scanProjects(root, onProgress, signal, opts = {}) {
   // One record per repository: packages and linked worktrees fold into it.
   onProgress?.({ phase: 'grouping', scanned, files, found: projects.length, percent: 96 });
   const grouped = await repoGroup.consolidate(projects, {
-    root, signal, dirSize, checkouts, measure: opts.measure,
+    root, signal, dirSize, checkouts, measure: opts.measure, measureMain: opts.measureMain,
   });
   onProgress?.({ phase: 'done', scanned, files, found: grouped.projects.length, percent: 100 });
   return { projects: grouped.projects, scanned, stats: grouped.stats };

@@ -231,7 +231,7 @@ function buildFixture() {
 const F = buildFixture();
 let scanned = null;
 async function scanFixture() {
-  if (!scanned) scanned = await scanner.scanProjects(F.root, null, new AbortController().signal);
+  if (!scanned) scanned = await scanner.scanProjects(F.root, null, new AbortController().signal, { measureMain: true });
   return scanned;
 }
 const recordAt = (projects, p) => projects.find((x) => wtx.pathKey(x.path) === wtx.pathKey(p));
@@ -329,6 +329,13 @@ test('sizes add up without counting nested worktrees twice', async () => {
   assert.ok(Math.abs(r.mainSize - (du - nested)) <= tol);
   assert.equal(r.worktreeBytes, nested + external);
   assert.equal(r.externalWorktreeBytes, external);
+});
+
+test('without measureMain the main folder is left to enrichment, and worktree figures still add up', async () => {
+  const { projects } = await scanner.scanProjects(F.root, null, new AbortController().signal);
+  const r = recordAt(projects, F.mono).repo;
+  assert.deepEqual([r.mainDu, r.mainSize, r.totalBytes], [null, null, null]);
+  assert.ok(r.worktreeBytes > 0 && r.externalWorktreeBytes > 0 && r.externalWorktreeBytes < r.worktreeBytes);
 });
 
 test('artifacts inside worktrees stay tier A, tagged, and are never counted twice', async () => {

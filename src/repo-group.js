@@ -331,7 +331,9 @@ async function consolidate(raw, ctx = {}) {
     mainExists[i] = Boolean(main);
     const cwd = main ? g.mainRoot : g.anyRoot;
     descs[i] = await wtx.describeRepo(cwd, { signal, dirSize: ctx.dirSize, measure: ctx.measure });
-    if (main && typeof ctx.dirSize === 'function' && ctx.measure !== false) {
+    // The main folder's own size is the expensive part (a whole repository),
+    // so a scan leaves it to enrichment unless asked (tests, reports).
+    if (main && ctx.measureMain === true && typeof ctx.dirSize === 'function' && ctx.measure !== false) {
       try { mainSizes[i] = await ctx.dirSize(g.mainRoot, signal); } catch { mainSizes[i] = null; }
     }
   });
