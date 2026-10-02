@@ -668,7 +668,7 @@ test('a tier A cache with a gentle native command is handed to its tool, not sta
   assert.equal(it.exitCode, 0);
   assert.equal(it.bytes, GB);
   assert.equal(it.restoreHint, 'Nothing a project uses was removed.');
-  assert.ok(h.notes.some((n) => /each tool's own cleanup command/.test(n.body)));
+  assert.ok(h.notes.some((n) => /^Freed 1(\.0)? GB by running pnpm store prune\./.test(n.body)), JSON.stringify(h.notes));
 
   // A package manager running: neither is touched.
   const h2 = harness();
@@ -679,6 +679,48 @@ test('a tier A cache with a gentle native command is handed to its tool, not sta
   h2.deps.nativeClean = async () => { ran = true; return { items: [] }; };
   await ac.runAutoClean(h2.deps);
   assert.equal(ran, false);
+});
+
+test('finding 2: a missing or declined tool sends its cache through staging, never a folder delete', async () => {
+  const h = harness();
+  const store = path.join(h.root, 'home', 'Library', 'pnpm', 'store');
+  write(path.join(store, 'v10', 'files', 'aa', 'x'), 'x');
+  h.scan.system = [{ id: 'pnpm', name: 'pnpm store', safe: true, reversible: true, size: 4 * GB, existingPaths: [store] }];
+  h.scan.projects = [];
+  h.settings = { enabled: true, approved: { at: NOW, rules: ac.rulesFingerprint({ enabled: true }), previewId: 'p' } };
+  const calls = [];
+  // What main returns for runNative's code 'missing' in auto mode.
+  h.deps.nativeClean = async (id, jobs) => {
+    calls.push(id);
+    return { items: jobs.map((j) => ({ path: j.path, outcome: 'failed', bytes: 0, code: 'missing', reason: 'pnpm was not found, so auto-clean did not run it.' })) };
+  };
+  const r = await ac.runAutoClean(h.deps);
+  assert.deepEqual(calls, ['pnpm'], 'asked once');
+  assert.equal(r.status, 'ok');
+  const e = h.history.find((x) => x.id === r.runId);
+  const it = e.items.find((x) => x.path === store);
+  assert.equal(it.outcome, 'trashed', 'staged: Undo can put it back');
+  assert.ok(!fs.existsSync(path.join(store, 'v10')), 'moved aside, not left');
+  assert.ok(!h.notes.some((n) => /by running/.test(n.body)), 'nothing claims a tool ran');
+  assert.ok(h.notes.some((n) => /Undo it from History/.test(n.body)));
+});
+
+test('finding 2: approvals given before native auto-clean need a new preview', () => {
+  const s = { enabled: true };
+  const x = ac.sanitizeSettings(s);
+  const old = JSON.stringify([x.staleDays, x.minCacheBytes, x.maxRunBytes, x.maxItems, [...x.excludes].sort()]);
+  assert.equal(ac.isApproved({ ...s, approved: { at: NOW, rules: old, previewId: 'prev-1' } }), false, 'a 2.3.1 approval no longer counts');
+  const fp = JSON.parse(ac.rulesFingerprint(s));
+  assert.ok(fp.includes(ac.APPROVAL_SCHEMA));
+  assert.deepEqual(fp[fp.length - 1], [...ac.NATIVE_AUTO].sort());
+  assert.equal(ac.isApproved({ ...s, approved: { at: NOW, rules: ac.rulesFingerprint(s), previewId: 'prev-1' } }), true);
+});
+
+test('finding 2: the notification says what actually ran', () => {
+  assert.equal(ac.nativeSummary([{ via: 'native', command: 'pnpm store prune' }, { via: 'native', command: 'uv cache prune' }, { via: 'native', command: 'go clean -cache' }]),
+    'by running pnpm store prune, uv cache prune and go clean -cache');
+  assert.equal(ac.nativeSummary([{ via: 'folder', command: null }]), 'by emptying 1 folder');
+  assert.equal(ac.nativeSummary([{ via: 'native', command: 'pip cache purge' }, { via: 'folder' }]), 'by running pip cache purge and by emptying 1 folder');
 });
 
 test('auto-clean never runs a native command for a target that is not tier A', () => {

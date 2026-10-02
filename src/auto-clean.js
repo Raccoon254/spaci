@@ -33,6 +33,10 @@ const nativeSpecs = require('./native-cleanup-specs');
 // knows what is in use, and a folder move would not free hard-linked stores.
 // Not undoable, so each is only run when its tool is idle.
 const NATIVE_AUTO = new Set(Object.keys(nativeSpecs.SPECS).filter((id) => Array.isArray(nativeSpecs.SPECS[id].autoRun)));
+// Part of what the user approves: what auto-clean may do, not only the rules.
+// Bump when that changes, so an approval given before needs a new preview.
+// 2: tier A caches run their tool's own command (NATIVE_AUTO).
+const APPROVAL_SCHEMA = 2;
 
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
@@ -91,7 +95,7 @@ function sanitizeSettings(raw) {
 /** What the user approves: the rules, not the run. */
 function rulesFingerprint(s) {
   const x = sanitizeSettings(s);
-  return JSON.stringify([x.staleDays, x.minCacheBytes, x.maxRunBytes, x.maxItems, [...x.excludes].sort()]);
+  return JSON.stringify([x.staleDays, x.minCacheBytes, x.maxRunBytes, x.maxItems, [...x.excludes].sort(), APPROVAL_SCHEMA, [...NATIVE_AUTO].sort()]);
 }
 
 /** Approved rules, given for a preview the user saw (approvalCheck: never an empty one). */
@@ -1119,12 +1123,16 @@ async function runAutoClean(deps) {
   let stopped = null;
   const movedBy = new Map(); // candidate path -> entries still staged
   const nativeDone = new Set(); // target ids already handed to their tool
+  // Targets whose tool was missing or declined: their folders are staged
+  // like any other cache, never deleted for good.
+  const nativeStaged = new Set();
   let nativeFreed = 0;
   let nativeCount = 0;
+  const nativeRan = []; // what actually freed space: { via, command }
   for (const c of sel.candidates) {
     const job = allowedBy.get(c.path);
     if (!job) continue;
-    if (c.native && nativeDone.has(c.target)) continue;
+    if (c.native && nativeDone.has(c.target) && !nativeStaged.has(c.target)) continue;
     if (stopped) { items.push({ ...describe(c), outcome: 'failed', bytes: 0, reason: 'Not moved: ' + stopped }); continue; }
     const why = stillOk();
     if (why) { stopped = why; items.push({ ...describe(c), outcome: 'failed', bytes: 0, reason: 'Not moved: ' + why }); continue; }
@@ -1139,7 +1147,7 @@ async function runAutoClean(deps) {
       const fam = TARGET_FAMILY[c.target];
       if (!fam || familyRunning(fresh, fam)) { leave(c, `A ${fam === 'node' ? 'package manager' : (fam || 'developer') + ' tool'} started running.`); continue; }
     }
-    if (c.native && typeof nativeClean === 'function') {
+    if (c.native && !nativeStaged.has(c.target) && typeof nativeClean === 'function') {
       // Every path of this target in one run of its tool, which checks again
       // that it is idle. Freed in place: nothing to undo, nothing staged.
       nativeDone.add(c.target);
@@ -1147,13 +1155,24 @@ async function runAutoClean(deps) {
       let r;
       try { r = await nativeClean(c.target, mine.map((x) => allowedBy.get(x.path))); }
       catch (e) { r = { items: mine.map((x) => ({ path: x.path, outcome: 'failed', bytes: 0, reason: (e && e.message) || 'The cleanup did not run.' })) }; }
-      for (const n of (r && Array.isArray(r.items) ? r.items : [])) {
-        const cand = mine.find((x) => x.path === n.path) || c;
-        items.push({ ...describe(cand), ...n, restoreHint: n.restoreHint || undefined });
-        if (n.outcome === 'removed') { nativeFreed += n.bytes || 0; if (n.bytes) nativeCount++; }
+      const got = r && Array.isArray(r.items) ? r.items : [];
+      // The tool is missing, or auto-clean may not run it: nothing ran, so the
+      // target goes through staging as it did before native cleanup existed.
+      if (got.length && got.every((n) => n.code === 'missing' || n.code === 'not-auto')) {
+        nativeStaged.add(c.target);
+      } else {
+        for (const n of got) {
+          const cand = mine.find((x) => x.path === n.path) || c;
+          items.push({ ...describe(cand), ...n, restoreHint: n.restoreHint || undefined });
+          if (n.outcome === 'removed') {
+            nativeFreed += n.bytes || 0;
+            if (n.bytes) nativeCount++;
+            if (n.bytes || n.command) nativeRan.push({ via: n.via || null, command: n.command || null });
+          }
+        }
+        if (got.some((n) => n.outcome === 'failed')) stopped = 'an earlier item failed, so the run stopped.';
+        continue;
       }
-      if (r && Array.isArray(r.items) && r.items.some((n) => n.outcome === 'failed')) stopped = 'an earlier item failed, so the run stopped.';
-      continue;
     }
     const protect = new Set([...(job.protect || [])].map((x) => String(x).toLowerCase()));
     const excludes = [...(job.excludePaths || []), ...userExcludes];
@@ -1229,7 +1248,7 @@ async function runAutoClean(deps) {
   onStaged(heldPaths);
   const partlyNote = items.some((it) => it.partial && it.bytes === 0 && it.outcome === 'trashed') ? ' Part of one item could not be moved back; it is listed in History.' : '';
   if (nativeFreed > 0) {
-    notify('Auto-clean', `Freed ${fmtBytes(nativeFreed)} with each tool's own cleanup command.${stagedCount ? '' : (stopped ? ' It stopped early: ' + stopped : '')}`);
+    notify('Auto-clean', `Freed ${fmtBytes(nativeFreed)} ${nativeSummary(nativeRan)}.${stagedCount ? '' : (stopped ? ' It stopped early: ' + stopped : '')}`);
   }
   if (stagedCount) {
     notify('Auto-clean', `Moved ${stagedBytes ? fmtBytes(stagedBytes) + ' from ' : ''}${stagedCount} ${stagedCount === 1 ? 'item' : 'items'} aside. The space is freed in 24 hours. Undo it from History until then.${stopped ? ' It stopped early: ' + stopped : ''}${partlyNote}`);
@@ -1239,7 +1258,22 @@ async function runAutoClean(deps) {
   return { status: stopped ? 'partial' : 'ok', runId, count: stagedCount + nativeCount, bytes: stagedBytes + nativeFreed, stopped };
 }
 
+/**
+ * "by running pnpm store prune and uv cache prune": what actually ran, from
+ * each item's `via` and `command`, never what was planned.
+ */
+function nativeSummary(ran) {
+  const commands = Array.from(new Set((ran || []).filter((r) => r && r.via !== 'folder' && r.command).map((r) => r.command)));
+  const folders = (ran || []).filter((r) => r && r.via === 'folder').length;
+  const list = (xs) => (xs.length <= 1 ? xs.join('') : xs.slice(0, -1).join(', ') + ' and ' + xs[xs.length - 1]);
+  const parts = [];
+  if (commands.length) parts.push('by running ' + list(commands));
+  if (folders) parts.push(`by emptying ${folders} ${folders === 1 ? 'folder' : 'folders'}`);
+  return parts.length ? parts.join(' and ') : 'with each tool\'s own cleanup';
+}
+
 module.exports = {
+  APPROVAL_SCHEMA, nativeSummary,
   DEFAULT_SETTINGS, STAGING_TTL_MS, KEEP_MARKER, NATIVE_AUTO, AUTO_ARTIFACTS, TOOL_FAMILIES, TARGET_FAMILY, DEV_PROCESS_NAMES, AI_CODING_TOOLS,
   sanitizeSettings, rulesFingerprint, isApproved, approvalCheck, autoCleanGate, selectCandidates,
   projectEvidence, itemEvidence, gitActivityTimes, snapshotProcesses, parsePs, parseLsofCwd, namesOf, namesFrom,

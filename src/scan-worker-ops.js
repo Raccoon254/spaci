@@ -247,10 +247,15 @@ function buildOps(mod) {
           ...(Array.isArray(j.protect) ? { protect: j.protect.filter((x) => typeof x === 'string') } : {}),
           ...(Array.isArray(j.excludePaths) ? { excludePaths: j.excludePaths.filter((x) => typeof x === 'string') } : {}),
         }));
+      const mode = opts && opts.mode === 'auto' ? 'auto' : 'manual';
       return mod('native').runNative(target, {
-        mode: opts && opts.mode === 'auto' ? 'auto' : 'manual',
-        folderJobs,
-        deleteFolders: (list, onProgress) => mod('cleaner').clean(list, onProgress, ctx.signal),
+        mode,
+        // Auto-clean never deletes a folder for good: it stages instead. So in
+        // auto mode the worker gets no folder and no way to delete one.
+        ...(mode === 'auto' ? {} : {
+          folderJobs,
+          deleteFolders: (list, onProgress) => mod('cleaner').clean(list, onProgress, ctx.signal),
+        }),
         signal: ctx.signal,
         onProgress: ctx.progress || undefined,
       });

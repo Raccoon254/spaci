@@ -176,3 +176,15 @@ test('nativeClean: only a catalogued target id runs, with its own paths, never a
   }
   assert.equal(calls.length, 1);
 });
+
+test('finding 2: nativeClean in auto mode gets no folder and no way to delete one', async () => {
+  const calls = [];
+  const native = { runNative: async (target, o) => { calls.push(o); return { ok: false, code: 'missing', freed: 0 }; } };
+  const system = { TARGETS: [{ id: 'pnpm', paths: ['/h/Library/pnpm/store'] }] };
+  const h = harness({ native, system, cleaner: { clean: async () => { throw new Error('never'); } } });
+  h.d.handle({ id: 1, op: 'nativeClean', args: ['pnpm', [{ path: '/h/Library/pnpm/store', mode: 'contents' }], { mode: 'auto' }] });
+  await h.reply(1);
+  assert.equal(calls[0].mode, 'auto');
+  assert.equal(calls[0].folderJobs, undefined);
+  assert.equal(calls[0].deleteFolders, undefined);
+});
