@@ -26,6 +26,13 @@ const nodeFs = require('fs');
 const nodePath = require('path');
 const { execFile } = require('child_process');
 const tiers = require('./clean-tiers');
+const nativeSpecs = require('./native-cleanup-specs');
+
+// Tier A caches auto-clean hands to their tool's gentle command (pnpm store
+// prune, uv cache prune, go clean -cache ...) instead of staging: the tool
+// knows what is in use, and a folder move would not free hard-linked stores.
+// Not undoable, so each is only run when its tool is idle.
+const NATIVE_AUTO = new Set(Object.keys(nativeSpecs.SPECS).filter((id) => Array.isArray(nativeSpecs.SPECS[id].autoRun)));
 
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
@@ -333,7 +340,7 @@ function projectBusy(procs, projectPath) {
  * @param {string[]} [o.cloudRoots]                   OneDrive roots from the environment
  */
 function selectCandidates({ projects = [], system = [], settings, now, evidence = new Map(), itemEvidence = new Map(), procs = { ok: false, list: [] }, aiTools = { ok: false, running: [] },
-  docker = { ok: false, running: 0 }, cloudOf = null, sameDisk = null, cloudRoots = envCloudRoots() }) {
+  docker = { ok: false, running: 0 }, cloudOf = null, sameDisk = null, cloudRoots = envCloudRoots(), nativeTargets = null }) {
   const s = sanitizeSettings(settings);
   const staleMs = s.staleDays * DAY;
   const out = [];
@@ -406,16 +413,20 @@ function selectCandidates({ projects = [], system = [], settings, now, evidence 
     if (paths.some(excluded)) { skipT('You excluded this folder.'); continue; }
     const where = paths.map(whereOf).find(Boolean);
     if (where) { skipT(where); continue; }
-    if (paths.some(offDisk)) { paths.forEach((p) => skip(p, OFF_DISK, { target: t.id, offDisk: true })); continue; }
+    const native = nativeTargets instanceof Set && nativeTargets.has(t.id);
+    // A native command frees in place: it never needs the staging volume.
+    if (!native && paths.some(offDisk)) { paths.forEach((p) => skip(p, OFF_DISK, { target: t.id, offDisk: true })); continue; }
     if (!procs.ok) { skipT('Spaci could not check which tools are running.'); continue; }
     const fam = TARGET_FAMILY[t.id];
     if (!fam) { skipT('Auto-clean leaves this cache to you.'); continue; }
     if (familyRunning(procs, fam)) { skipT(`A ${fam === 'node' ? 'package manager' : fam + ' tool'} is running.`); continue; }
     // The size belongs to the whole target; the first path carries it.
+    const cmd = native ? nativeSpecs.commandLine(nativeSpecs.specFor(t.id), 'auto') : null;
     paths.forEach((p, i) => out.push({
       path: p, kind: 'cache', target: t.id, name: t.name, bytes: i === 0 ? bytes : 0, mode: 'contents',
-      rule: `${t.name} larger than ${Math.round(s.minCacheBytes / MB)} MB`,
+      rule: `${t.name} larger than ${Math.round(s.minCacheBytes / MB)} MB` + (cmd ? `, cleaned with ${cmd}` : ''),
       group: tiers.A_TARGETS[t.id].group,
+      ...(native ? { native: true } : {}),
     }));
   }
 
@@ -1023,6 +1034,7 @@ async function runAutoClean(deps) {
     getSettings, saveSettings, getScan, gatherEvidence, snapshot, aiToolStatus, guard,
     staging, historyLog, putHistory, notify = () => {}, stillOk = () => null,
     listChildren, restoreHint = () => null, now = () => Date.now(), newId, onStaged = () => {},
+    nativeClean = null,
     dockerStatus = async () => ({ ok: false, running: 0 }),
     cloudCheck = (paths) => cloudReasons(paths),
     fs = nodeFs,
@@ -1048,6 +1060,7 @@ async function runAutoClean(deps) {
   const sel = selectCandidates({
     projects: scan.projects || [], system: scan.system || [], settings, now: t0,
     evidence: ev.evidence, itemEvidence: ev.itemEvidence, procs, aiTools: ai, docker, cloudOf, sameDisk,
+    nativeTargets: typeof nativeClean === 'function' ? NATIVE_AUTO : null,
   });
 
   // ---- dry run: report, touch nothing, wait for approval ----
@@ -1105,9 +1118,13 @@ async function runAutoClean(deps) {
   const userExcludes = settings.excludes;
   let stopped = null;
   const movedBy = new Map(); // candidate path -> entries still staged
+  const nativeDone = new Set(); // target ids already handed to their tool
+  let nativeFreed = 0;
+  let nativeCount = 0;
   for (const c of sel.candidates) {
     const job = allowedBy.get(c.path);
     if (!job) continue;
+    if (c.native && nativeDone.has(c.target)) continue;
     if (stopped) { items.push({ ...describe(c), outcome: 'failed', bytes: 0, reason: 'Not moved: ' + stopped }); continue; }
     const why = stillOk();
     if (why) { stopped = why; items.push({ ...describe(c), outcome: 'failed', bytes: 0, reason: 'Not moved: ' + why }); continue; }
@@ -1121,6 +1138,22 @@ async function runAutoClean(deps) {
     } else {
       const fam = TARGET_FAMILY[c.target];
       if (!fam || familyRunning(fresh, fam)) { leave(c, `A ${fam === 'node' ? 'package manager' : (fam || 'developer') + ' tool'} started running.`); continue; }
+    }
+    if (c.native && typeof nativeClean === 'function') {
+      // Every path of this target in one run of its tool, which checks again
+      // that it is idle. Freed in place: nothing to undo, nothing staged.
+      nativeDone.add(c.target);
+      const mine = sel.candidates.filter((x) => x.target === c.target && allowedBy.has(x.path));
+      let r;
+      try { r = await nativeClean(c.target, mine.map((x) => allowedBy.get(x.path))); }
+      catch (e) { r = { items: mine.map((x) => ({ path: x.path, outcome: 'failed', bytes: 0, reason: (e && e.message) || 'The cleanup did not run.' })) }; }
+      for (const n of (r && Array.isArray(r.items) ? r.items : [])) {
+        const cand = mine.find((x) => x.path === n.path) || c;
+        items.push({ ...describe(cand), ...n, restoreHint: n.restoreHint || undefined });
+        if (n.outcome === 'removed') { nativeFreed += n.bytes || 0; if (n.bytes) nativeCount++; }
+      }
+      if (r && Array.isArray(r.items) && r.items.some((n) => n.outcome === 'failed')) stopped = 'an earlier item failed, so the run stopped.';
+      continue;
     }
     const protect = new Set([...(job.protect || [])].map((x) => String(x).toLowerCase()));
     const excludes = [...(job.excludePaths || []), ...userExcludes];
@@ -1195,16 +1228,19 @@ async function runAutoClean(deps) {
   putHistory(historyLog.finishedEntry({ ...started, finishedAt: now(), status: 'done', items, extra: { autoClean: { ...acMeta, stagedBytes, stagedCount } } }));
   onStaged(heldPaths);
   const partlyNote = items.some((it) => it.partial && it.bytes === 0 && it.outcome === 'trashed') ? ' Part of one item could not be moved back; it is listed in History.' : '';
+  if (nativeFreed > 0) {
+    notify('Auto-clean', `Freed ${fmtBytes(nativeFreed)} with each tool's own cleanup command.${stagedCount ? '' : (stopped ? ' It stopped early: ' + stopped : '')}`);
+  }
   if (stagedCount) {
     notify('Auto-clean', `Moved ${stagedBytes ? fmtBytes(stagedBytes) + ' from ' : ''}${stagedCount} ${stagedCount === 1 ? 'item' : 'items'} aside. The space is freed in 24 hours. Undo it from History until then.${stopped ? ' It stopped early: ' + stopped : ''}${partlyNote}`);
-  } else if (stopped) {
+  } else if (stopped && !nativeFreed) {
     notify('Auto-clean', 'Auto-clean stopped before moving anything: ' + stopped);
   }
-  return { status: stopped ? 'partial' : 'ok', runId, count: stagedCount, bytes: stagedBytes, stopped };
+  return { status: stopped ? 'partial' : 'ok', runId, count: stagedCount + nativeCount, bytes: stagedBytes + nativeFreed, stopped };
 }
 
 module.exports = {
-  DEFAULT_SETTINGS, STAGING_TTL_MS, KEEP_MARKER, AUTO_ARTIFACTS, TOOL_FAMILIES, TARGET_FAMILY, DEV_PROCESS_NAMES, AI_CODING_TOOLS,
+  DEFAULT_SETTINGS, STAGING_TTL_MS, KEEP_MARKER, NATIVE_AUTO, AUTO_ARTIFACTS, TOOL_FAMILIES, TARGET_FAMILY, DEV_PROCESS_NAMES, AI_CODING_TOOLS,
   sanitizeSettings, rulesFingerprint, isApproved, approvalCheck, autoCleanGate, selectCandidates,
   projectEvidence, itemEvidence, gitActivityTimes, snapshotProcesses, parsePs, parseLsofCwd, namesOf, namesFrom,
   projectBusy, familyRunning, argsMention, cloudOrExternal, cloudReason, cloudReasons, envCloudRoots, holdsProtected,

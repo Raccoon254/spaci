@@ -641,3 +641,51 @@ test('a disabled auto-clean never runs', async () => {
   assert.deepEqual(await ac.runAutoClean(h.deps), { status: 'skipped', reason: 'disabled' });
   assert.equal(h.history.length, 0);
 });
+
+test('a tier A cache with a gentle native command is handed to its tool, not staged, and only when idle', async () => {
+  const h = harness();
+  const store = path.join(h.root, 'home', 'Library', 'pnpm', 'store');
+  write(path.join(store, 'v10', 'files', 'aa', 'x'), 'x');
+  h.scan.system = [
+    { id: 'pnpm', name: 'pnpm store', safe: true, reversible: true, size: 4 * GB, existingPaths: [store] },
+    { id: 'npm', name: 'npm cache', safe: true, reversible: true, size: 3 * GB, existingPaths: [h.cache] },
+  ];
+  h.scan.projects = [];
+  h.settings = { enabled: true, approved: { at: NOW, rules: ac.rulesFingerprint({ enabled: true }), previewId: 'p' } };
+  const calls = [];
+  h.deps.nativeClean = async (id, jobs) => {
+    calls.push({ id, jobs });
+    return { items: jobs.map((j, i) => ({ path: j.path, outcome: 'removed', bytes: i === 0 ? GB : 0, command: 'pnpm store prune', exitCode: 0, via: 'native', restoreHint: 'Nothing a project uses was removed.' })) };
+  };
+  const r = await ac.runAutoClean(h.deps);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(calls.map((c) => c.id), ['pnpm'], 'npm has no auto command: it is staged as before');
+  assert.ok(fs.existsSync(path.join(store, 'v10', 'files', 'aa', 'x')), 'Spaci itself moved nothing out of the store');
+  const e = h.history.find((x) => x.id === r.runId);
+  const it = e.items.find((x) => x.path === store);
+  assert.equal(it.outcome, 'removed');
+  assert.equal(it.command, 'pnpm store prune');
+  assert.equal(it.exitCode, 0);
+  assert.equal(it.bytes, GB);
+  assert.equal(it.restoreHint, 'Nothing a project uses was removed.');
+  assert.ok(h.notes.some((n) => /each tool's own cleanup command/.test(n.body)));
+
+  // A package manager running: neither is touched.
+  const h2 = harness();
+  h2.scan = { projects: [], system: h.scan.system };
+  h2.settings = h.settings;
+  h2.deps.snapshot = async () => ({ ok: true, list: [{ pid: 9, names: ['pnpm'], cwd: null, args: 'pnpm install' }] });
+  let ran = false;
+  h2.deps.nativeClean = async () => { ran = true; return { items: [] }; };
+  await ac.runAutoClean(h2.deps);
+  assert.equal(ran, false);
+});
+
+test('auto-clean never runs a native command for a target that is not tier A', () => {
+  for (const id of ac.NATIVE_AUTO) assert.ok(require('../src/clean-tiers').A_TARGETS[id], id + ' must be tier A');
+  const sel = ac.selectCandidates({
+    system: [{ id: 'go-modcache', name: 'Go module cache', safe: true, reversible: true, size: 9 * GB, existingPaths: ['/h/go/pkg/mod'] }],
+    settings: { enabled: true }, now: NOW, procs: { ok: true, list: [] }, nativeTargets: ac.NATIVE_AUTO,
+  });
+  assert.equal(sel.candidates.length, 0);
+});
