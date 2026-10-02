@@ -32,6 +32,9 @@ const FORBIDDEN_ARGS = new Set(['--force', '-f', '--no-lock', '--ignore-lock']);
  * such as `pnpm dev` or `npm run build` do not touch the package cache and do
  * not count. `uv` counts whatever it runs: `uv run` holds the cache lock.
  */
+// `go run` is left out: it compiles first and then only runs the program, so a
+// long-lived `go run ./cmd/server` would otherwise block the clean forever.
+const GO_CACHE_USERS = ['build', 'test', 'install', 'get', 'mod', 'generate', 'vet', 'list', 'clean', 'work', 'tool'];
 const NODE_INSTALLS = ['install', 'i', 'ci', 'add', 'update', 'up', 'upgrade', 'remove', 'rm', 'uninstall', 'un', 'fetch', 'import', 'store', 'dlx', 'rebuild', 'rb', 'prune', 'dedupe', 'deploy', 'create', 'cache', 'exec', 'x', 'link', 'global', 'autoclean', 'self-update'];
 
 /**
@@ -100,7 +103,7 @@ const SPECS = Object.freeze({
     autoRun: ['clean', '-cache'],
     locate: ['env', 'GOCACHE'],
     preview: 'size',
-    busy: { names: ['go'], subcommands: ['build', 'test', 'run', 'install', 'get', 'mod', 'generate', 'vet', 'list', 'clean', 'work', 'tool'] },
+    busy: { names: ['go'], subcommands: GO_CACHE_USERS },
     lockFiles: null,
     lockOutput: null,
     timeoutMs: 10 * MIN,
@@ -117,7 +120,7 @@ const SPECS = Object.freeze({
     autoRun: null,
     locate: ['env', 'GOMODCACHE'],
     preview: 'size',
-    busy: { names: ['go'], subcommands: ['build', 'test', 'run', 'install', 'get', 'mod', 'generate', 'vet', 'list', 'clean', 'work', 'tool'] },
+    busy: { names: ['go'], subcommands: GO_CACHE_USERS },
     lockFiles: null,
     lockOutput: null,
     timeoutMs: 15 * MIN,

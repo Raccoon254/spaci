@@ -159,6 +159,7 @@ test('busy: cache users count, script runners and paths that only mention the to
   assert.equal(busy('uv-cache', ['/Users/e/.local/bin/ruff check']), false);
   assert.equal(busy('go', ['/usr/local/go/bin/go test ./...']), true);
   assert.equal(busy('go', ['/Users/e/go/bin/gopls serve']), false, 'the language server never blocks');
+  assert.equal(busy('go', ['go run ./cmd/server']), false, 'a long-running go run has finished compiling');
   assert.equal(busy('gradle', ['/usr/bin/java -cp x org.gradle.wrapper.GradleWrapperMain build']), true);
   assert.equal(busy('gradle', ['/usr/bin/java -cp x org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.10']), false, 'an idle daemon is stopped, not a build');
   assert.equal(busy('pip', ['/usr/bin/python3.12 -m pip install requests']), true);

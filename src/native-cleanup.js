@@ -433,7 +433,7 @@ async function preview(target, o = {}) {
     out.estimate = await m(existing(target.paths));
     return out;
   };
-  if (spec.via === 'folder') return folder(spec.why);
+  if (spec.via === 'folder') { await folder(spec.why); out.label = specs.describe(target.id).label; return out; }
   const bin = await resolveBin(spec.bins, o);
   if (!bin) return folder(`${spec.tool} was not found, so Spaci empties the folder instead.`);
   out.available = true;
