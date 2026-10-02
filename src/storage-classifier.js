@@ -6,6 +6,7 @@ const path = require('path');
 const { buildBrowserTargets } = require('./browsers');
 const { buildAiToolTargets } = require('./aitools');
 const { describe: describeCleanup } = require('./native-cleanup-specs');
+const { safeEnvPath } = require('./cache-path-guard');
 
 const CATEGORY_META = {
   developer: { label: 'Developer', icon: 'code', hint: 'Code, build caches and SDKs' },
@@ -57,20 +58,27 @@ function makeTarget(id, name, category, icon, paths, description, options = {}) 
 // pkg/mod, else ~/go/pkg/mod. Removing the whole tree is what
 // `go clean -modcache` does, so it is safe; the files are read-only on disk,
 // which the cleaner handles.
+// Every env-derived cache path must be absolute and must not be the root,
+// the home folder or a folder holding it (cache-path-guard): GOCACHE=$HOME
+// would otherwise make "empty the Go cache" empty the home folder. An unsafe
+// value falls back to the tool's default folder.
+function envPath(ctx, value, fallback) {
+  return safeEnvPath(value, fallback, { home: ctx.home, platform: ctx.platform });
+}
+
 function goModCache(ctx, fallback) {
   const { env, pathApi } = ctx;
-  if (env.GOMODCACHE) return env.GOMODCACHE;
+  if (env.GOMODCACHE) return envPath(ctx, env.GOMODCACHE, fallback);
   const sep = ctx.platform === 'win32' ? ';' : ':';
   const gopath = String(env.GOPATH || '').split(sep).find(Boolean);
-  if (gopath) return pathApi.join(gopath, 'pkg', 'mod');
+  if (gopath && pathApi.isAbsolute(gopath)) return envPath(ctx, pathApi.join(gopath, 'pkg', 'mod'), fallback);
   return fallback;
 }
 
 // The build cache is GOCACHE when that is an absolute path ("off" disables
 // it), else the OS cache folder's go-build.
 function goBuildCache(ctx, fallback) {
-  const v = ctx.env.GOCACHE;
-  return v && ctx.pathApi.isAbsolute(v) ? v : fallback;
+  return envPath(ctx, ctx.env.GOCACHE, fallback);
 }
 
 // Split so each can be cleaned the way Go means: `go clean -cache` for the
@@ -81,7 +89,7 @@ const GO_MOD_DESCRIPTION = 'Source of every module Go downloaded. Each project f
 // Hugging Face stores downloaded models and datasets at HF_HOME, else
 // ~/.cache/huggingface. Regenerable, but a re-download can be many GB.
 function huggingFaceHome(ctx, fallback) {
-  return ctx.env.HF_HOME || fallback;
+  return envPath(ctx, ctx.env.HF_HOME, fallback);
 }
 
 const HF_DESCRIPTION = 'Downloaded AI models and datasets. Safe to remove, but re-downloading large models can take a long time.';
@@ -89,8 +97,7 @@ const HF_DESCRIPTION = 'Downloaded AI models and datasets. Safe to remove, but r
 // Linux cache root: XDG_CACHE_HOME when it is an absolute path (relative
 // values are invalid per the XDG spec and ignored), else ~/.cache.
 function xdgCache(ctx, ...parts) {
-  const env = ctx.env.XDG_CACHE_HOME;
-  const base = env && ctx.pathApi.isAbsolute(env) ? env : ctx.join('.cache');
+  const base = envPath(ctx, ctx.env.XDG_CACHE_HOME, ctx.join('.cache'));
   return ctx.pathApi.join(base, ...parts);
 }
 
@@ -187,8 +194,7 @@ function buildDeveloperTargets(ctx) {
 // Download caches the developer tool sweep found missing (docs/devtools-sources.md).
 // Each honours its tool's own override, and only an absolute one.
 function absOr(ctx, name, fallback) {
-  const v = ctx.env[name];
-  return v && ctx.pathApi.isAbsolute(v) ? v : fallback;
+  return envPath(ctx, ctx.env[name], fallback);
 }
 
 function toolCacheTargets(ctx) {

@@ -235,3 +235,31 @@ test('cache targets with a native cleanup say which command runs', () => {
     assert.equal(byId.maven.cleanup, undefined);
   }
 });
+
+test('finding 7: env cache paths that are root, home, an ancestor of home or the users folder fall back to the default', () => {
+  const pathsOf = (platform, home, env) => {
+    const t = buildSystemTargets({ platform, home, env });
+    return (id) => (t.find((x) => x.id === id) || { paths: [] }).paths;
+  };
+  const home = '/Users/example';
+  for (const bad of ['/', home, home + '/', '/Users', '/users/Example']) {
+    const p = pathsOf('darwin', home, { GOCACHE: bad, GOMODCACHE: bad, UV_CACHE_DIR: bad, HOMEBREW_CACHE: bad, HF_HOME: bad, PUPPETEER_CACHE_DIR: bad, CYPRESS_CACHE_FOLDER: bad, electron_config_cache: bad });
+    assert.deepEqual(p('go'), [home + '/Library/Caches/go-build'], 'GOCACHE=' + bad);
+    assert.deepEqual(p('go-modcache'), [home + '/go/pkg/mod'], 'GOMODCACHE=' + bad);
+    assert.deepEqual(p('uv-cache'), [home + '/.cache/uv'], 'UV_CACHE_DIR=' + bad);
+    assert.deepEqual(p('homebrew-cache'), [home + '/Library/Caches/Homebrew'], 'HOMEBREW_CACHE=' + bad);
+    assert.deepEqual(p('huggingface'), [home + '/.cache/huggingface'], 'HF_HOME=' + bad);
+    assert.deepEqual(p('puppeteer'), [home + '/.cache/puppeteer']);
+    assert.deepEqual(p('cypress'), [home + '/Library/Caches/Cypress']);
+  }
+  // XDG_CACHE_HOME=$HOME would make "Other user cache" the whole home folder.
+  const lin = pathsOf('linux', '/home/e', { XDG_CACHE_HOME: '/home/e', GOCACHE: '/home', GOPATH: '/' });
+  assert.deepEqual(lin('user-cache'), ['/home/e/.cache']);
+  assert.deepEqual(lin('go'), ['/home/e/.cache/go-build']);
+  const win = pathsOf('win32', 'C:\\Users\\e', { LOCALAPPDATA: 'C:\\Users\\e\\AppData\\Local', USERPROFILE: 'C:\\Users\\e', GOCACHE: 'C:\\', GOMODCACHE: 'C:\\Users', UV_CACHE_DIR: 'D:\\' });
+  assert.deepEqual(win('go'), ['C:\\Users\\e\\AppData\\Local\\go-build']);
+  assert.deepEqual(win('go-modcache'), ['C:\\Users\\e\\go\\pkg\\mod']);
+  assert.deepEqual(win('uv-cache'), ['C:\\Users\\e\\AppData\\Local\\uv\\cache']);
+  // A safe override still wins.
+  assert.deepEqual(pathsOf('darwin', home, { GOCACHE: '/fast/go-build' })('go'), ['/fast/go-build']);
+});
