@@ -25,6 +25,8 @@
  * guard would refuse.
  */
 
+const { describe: describeCleanup } = require('./native-cleanup-specs');
+
 const TIERS = Object.freeze({ A: 'A', B: 'B', C: 'C' });
 
 /** The badge each tier shows, the same three the app already uses. */
@@ -133,6 +135,7 @@ const B_REASONS = Object.freeze({
   puppeteer: 'Test browsers, large to download again.',
   cypress: 'Cypress app binaries, large to download again.',
   // `mvn install` puts your own builds here, and they exist nowhere else.
+  'go-modcache': 'Downloaded Go modules. Every project fetches its modules again on its next build.',
   maven: 'Maven repository. Also holds artifacts you installed locally with mvn install, which nothing re-downloads.',
   thumbnails: 'App cache. Regenerated on demand.',
   'local-temp': 'Temporary files. Some may be in use by running apps.',
@@ -236,10 +239,12 @@ function pickFlags(t) {
  * Only what `classifyScan` put in A is included, and only with a size.
  * count is things (a project folder or a cache), not jobs: one cache can have
  * several paths.
- * @returns {{jobs:object[], groups:object[], count:number, bytes:number, projects:number}}
+ * commands: the tier A caches cleaned by their tool's own command, for the confirm.
+ * @returns {{jobs:object[], groups:object[], count:number, bytes:number, projects:number, commands:object[]}}
  */
 function planTierA(shown = {}, tiers = classifyScan(shown)) {
   const jobs = [];
+  const commands = [];
   const groups = new Map();
   const touchedProjects = new Set();
   let count = 0;
@@ -275,10 +280,13 @@ function planTierA(shown = {}, tiers = classifyScan(shown)) {
     // The size belongs to the target; spread nothing, so the total stays exact.
     paths.forEach((path, i) => jobs.push({ path, mode: 'contents', size: i === 0 ? bytes : 0, kind: 'cache', target: t.id, name: t.name }));
     add(g.group, g.hint, bytes);
+    // Cleaned by the tool's own command: the confirm names it.
+    const c = describeCleanup(t.id);
+    if (c && c.command) commands.push({ target: t.id, name: t.name, command: c.command, label: c.label });
   }
   const list = [...groups.values()].sort((a, b) => b.bytes - a.bytes);
   const bytes = list.reduce((s, g) => s + g.bytes, 0);
-  return { jobs, groups: list, count, bytes, projects: touchedProjects.size };
+  return { jobs, groups: list, count, bytes, projects: touchedProjects.size, commands };
 }
 
 module.exports = {

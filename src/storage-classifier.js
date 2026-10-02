@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { buildBrowserTargets } = require('./browsers');
 const { buildAiToolTargets } = require('./aitools');
+const { describe: describeCleanup } = require('./native-cleanup-specs');
 
 const CATEGORY_META = {
   developer: { label: 'Developer', icon: 'code', hint: 'Code, build caches and SDKs' },
@@ -45,6 +46,10 @@ function makeTarget(id, name, category, icon, paths, description, options = {}) 
   // What the History screen tells the user about getting this back, when the
   // generic "regenerates when the owning app runs" would overstate it.
   if (options.restoreHint) target.restoreHint = options.restoreHint;
+  // Cleaned by the tool's own command (native-cleanup-specs.js): what the row
+  // says it runs. Paths are still the target's; the command comes from the spec.
+  const cleanup = describeCleanup(id);
+  if (cleanup) target.cleanup = cleanup;
   return target;
 }
 
@@ -60,6 +65,18 @@ function goModCache(ctx, fallback) {
   if (gopath) return pathApi.join(gopath, 'pkg', 'mod');
   return fallback;
 }
+
+// The build cache is GOCACHE when that is an absolute path ("off" disables
+// it), else the OS cache folder's go-build.
+function goBuildCache(ctx, fallback) {
+  const v = ctx.env.GOCACHE;
+  return v && ctx.pathApi.isAbsolute(v) ? v : fallback;
+}
+
+// Split so each can be cleaned the way Go means: `go clean -cache` for the
+// build cache (tier A), `go clean -modcache` for downloaded modules (Review).
+const GO_BUILD_DESCRIPTION = 'Compiled packages and test results Go caches. Rebuilds on the next build.';
+const GO_MOD_DESCRIPTION = 'Source of every module Go downloaded. Each project fetches its modules again on its next build, which takes a while offline or on a slow network.';
 
 // Hugging Face stores downloaded models and datasets at HF_HOME, else
 // ~/.cache/huggingface. Regenerable, but a re-download can be many GB.
@@ -118,7 +135,8 @@ function buildDeveloperTargets(ctx) {
       makeTarget('pub', 'Dart/Flutter pub', 'Developer', 'flutter', [join('.pub-cache', 'hosted')], 'Dart/Flutter downloaded packages.'),
       makeTarget('dart-server', 'Dart analysis server', 'Developer', 'flutter', [join('.dartServer')], 'Dart and Flutter analysis cache. Rebuilds the next time your editor analyses code.'),
       makeTarget('pip', 'pip cache', 'Developer', 'python', [lib('Caches', 'pip')], 'Python pip download cache.'),
-      makeTarget('go', 'Go build/mod cache', 'Developer', 'go', [lib('Caches', 'go-build'), goModCache(ctx, join('go', 'pkg', 'mod'))], 'Go build cache and downloaded modules. Re-downloads on the next build.'),
+      makeTarget('go', 'Go build cache', 'Developer', 'go', [goBuildCache(ctx, lib('Caches', 'go-build'))], GO_BUILD_DESCRIPTION),
+      makeTarget('go-modcache', 'Go module cache', 'Developer', 'go', [goModCache(ctx, join('go', 'pkg', 'mod'))], GO_MOD_DESCRIPTION),
       makeTarget('deno', 'Deno cache', 'Developer', 'flash', [lib('Caches', 'deno')], 'Deno dependency cache.'),
       makeTarget('huggingface', 'Hugging Face models', 'Developer', 'cpu', [huggingFaceHome(ctx, join('.cache', 'huggingface'))], HF_DESCRIPTION, { safe: false }),
     ];
@@ -135,7 +153,8 @@ function buildDeveloperTargets(ctx) {
       makeTarget('nuget', 'NuGet packages', 'Developer', 'box', [join('.nuget', 'packages')], 'Downloaded NuGet packages. Re-downloads on restore.'),
       makeTarget('cargo', 'Cargo registry', 'Developer', 'rust', [join('.cargo', 'registry', 'cache'), join('.cargo', 'registry', 'src')], 'Rust crate cache.'),
       makeTarget('pip', 'pip cache', 'Developer', 'python', [xdgCache(ctx, 'pip')], 'Python pip download cache.'),
-      makeTarget('go', 'Go build/mod cache', 'Developer', 'go', [xdgCache(ctx, 'go-build'), goModCache(ctx, join('go', 'pkg', 'mod'))], 'Go build cache and downloaded modules. Re-downloads on the next build.'),
+      makeTarget('go', 'Go build cache', 'Developer', 'go', [goBuildCache(ctx, xdgCache(ctx, 'go-build'))], GO_BUILD_DESCRIPTION),
+      makeTarget('go-modcache', 'Go module cache', 'Developer', 'go', [goModCache(ctx, join('go', 'pkg', 'mod'))], GO_MOD_DESCRIPTION),
       makeTarget('pub', 'Dart/Flutter pub', 'Developer', 'flutter', [join('.pub-cache', 'hosted')], 'Dart/Flutter downloaded packages.'),
       makeTarget('dart-server', 'Dart analysis server', 'Developer', 'flutter', [join('.dartServer')], 'Dart and Flutter analysis cache. Rebuilds the next time your editor analyses code.'),
       makeTarget('bun', 'Bun cache', 'Developer', 'flash', [join('.bun', 'install', 'cache')], 'Bun install cache.'),
@@ -154,7 +173,8 @@ function buildDeveloperTargets(ctx) {
     makeTarget('maven', 'Maven repository', 'Developer', 'java', [winJoin('.m2', 'repository')], 'Downloaded Maven artifacts. Re-downloads on build.'),
     makeTarget('cargo', 'Cargo registry', 'Developer', 'rust', [winJoin('.cargo', 'registry', 'cache'), winJoin('.cargo', 'registry', 'src')], 'Rust crate cache.'),
     makeTarget('pip', 'pip cache', 'Developer', 'python', [from(local, 'pip', 'Cache')], 'Python pip download cache.'),
-    makeTarget('go', 'Go build/mod cache', 'Developer', 'go', [from(local, 'go-build'), goModCache(ctx, winJoin('go', 'pkg', 'mod'))], 'Go build cache and downloaded modules. Re-downloads on the next build.'),
+    makeTarget('go', 'Go build cache', 'Developer', 'go', [goBuildCache(ctx, from(local, 'go-build'))], GO_BUILD_DESCRIPTION),
+    makeTarget('go-modcache', 'Go module cache', 'Developer', 'go', [goModCache(ctx, winJoin('go', 'pkg', 'mod'))], GO_MOD_DESCRIPTION),
     makeTarget('nuget', 'NuGet packages', 'Developer', 'box', [winJoin('.nuget', 'packages')], 'Downloaded NuGet packages. Re-downloads on restore.'),
     makeTarget('dart-server', 'Dart analysis server', 'Developer', 'flutter', [from(local, '.dartServer')], 'Dart and Flutter analysis cache. Rebuilds the next time your editor analyses code.'),
     makeTarget('bun', 'Bun cache', 'Developer', 'flash', [winJoin('.bun', 'install', 'cache')], 'Bun install cache.'),
@@ -183,10 +203,10 @@ function toolCacheTargets(ctx) {
     makeTarget('puppeteer', 'Puppeteer browsers', 'Developer', 'browser', [absOr(ctx, 'PUPPETEER_CACHE_DIR', home('.cache', 'puppeteer'))], 'Chrome builds Puppeteer downloaded. Fetched again on the next install.', { safe: false, restoreHint: 'npx puppeteer browsers install chrome' }),
     makeTarget('cypress', 'Cypress binaries', 'Developer', 'play', [absOr(ctx, 'CYPRESS_CACHE_FOLDER', platform === 'win32' ? at('Cypress', 'Cache') : at('Cypress'))], 'Cypress app binaries, one per version. npx cypress install fetches the one a project needs.', { safe: false, restoreHint: 'npx cypress install' }),
     makeTarget('electron-downloads', 'Electron downloads', 'Developer', 'download', [absOr(ctx, 'electron_config_cache', platform === 'win32' ? at('electron', 'Cache') : at('electron'))], 'Electron release zips cached by npm installs. Downloaded again when a project needs that version.', { restoreHint: 'Downloaded again on the next npm install of that Electron version.' }),
-    makeTarget('uv-cache', 'uv cache', 'Developer', 'python', [absOr(ctx, 'UV_CACHE_DIR', platform === 'win32' ? at('uv', 'cache') : (platform === 'darwin' ? join('.cache', 'uv') : xdgCache(ctx, 'uv')))], 'uv package and build cache. The same as uv cache clean; refills on the next install.', { restoreHint: 'Refills on the next uv sync or uv pip install.' }),
+    makeTarget('uv-cache', 'uv cache', 'Developer', 'python', [absOr(ctx, 'UV_CACHE_DIR', platform === 'win32' ? at('uv', 'cache') : (platform === 'darwin' ? join('.cache', 'uv') : xdgCache(ctx, 'uv')))], 'uv package and build cache. Refills on the next install.', { restoreHint: 'Refills on the next uv sync or uv pip install.' }),
   ];
   if (platform !== 'win32') {
-    t.push(makeTarget('homebrew-cache', 'Homebrew downloads', 'Developer', 'download', [absOr(ctx, 'HOMEBREW_CACHE', at('Homebrew'))], 'Bottles and source downloads Homebrew keeps after installing. brew cleanup removes old ones itself.', { restoreHint: 'Downloaded again the next time Homebrew installs or upgrades.' }));
+    t.push(makeTarget('homebrew-cache', 'Homebrew downloads', 'Developer', 'download', [absOr(ctx, 'HOMEBREW_CACHE', at('Homebrew'))], 'Bottles and source downloads Homebrew keeps after installing, plus old formula and cask versions brew cleanup removes.', { restoreHint: 'Downloaded again the next time Homebrew installs or upgrades.' }));
   }
   return t.filter((x) => x.paths.length > 0);
 }

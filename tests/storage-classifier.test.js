@@ -114,7 +114,7 @@ test('Windows developer paths use backslashes and never leak posix separators', 
 
 test('Go module cache honours GOMODCACHE, then the first GOPATH entry, then ~/go', () => {
   const find = (env, platform = 'darwin', home = '/Users/example') =>
-    buildSystemTargets({ platform, home, env }).find((t) => t.id === 'go').paths;
+    buildSystemTargets({ platform, home, env }).find((t) => t.id === 'go-modcache').paths;
   assert.ok(find({ GOMODCACHE: '/opt/gomod' }).includes('/opt/gomod'));
   assert.ok(find({ GOPATH: '/work/go:/other/go' }).includes('/work/go/pkg/mod'));
   assert.ok(find({}).includes('/Users/example/go/pkg/mod'));
@@ -208,4 +208,30 @@ test('the System remainder drills into the home folders no category claims; outs
   assert.deepEqual(systemCategory(5, { platform: 'linux', home: '/home/u' }).dirs, ['/home/u', '/home/u/.local']);
   assert.deepEqual(systemCategory(5, { platform: 'win32', home: 'C:\\Users\\u' }).dirs, ['C:\\Users\\u', 'C:\\Users\\u\\AppData']);
   assert.equal(systemCategory(5, { platform: 'darwin', home: '/Users/u' }).tier, 'D');
+});
+
+test('Go build cache and module cache are separate targets, each cleaned the Go way', () => {
+  const targets = buildSystemTargets({ platform: 'darwin', home: '/Users/example', env: { GOCACHE: '/fast/go-build' } });
+  const go = targets.find((t) => t.id === 'go');
+  const mod = targets.find((t) => t.id === 'go-modcache');
+  assert.deepEqual(go.paths, ['/fast/go-build']);
+  assert.deepEqual(mod.paths, ['/Users/example/go/pkg/mod']);
+  assert.equal(go.cleanup.command, 'go clean -cache');
+  assert.equal(mod.cleanup.command, 'go clean -modcache');
+  // A relative GOCACHE is ignored, like every other override.
+  const rel = buildSystemTargets({ platform: 'linux', home: '/home/e', env: { GOCACHE: 'off' } }).find((t) => t.id === 'go');
+  assert.deepEqual(rel.paths, ['/home/e/.cache/go-build']);
+});
+
+test('cache targets with a native cleanup say which command runs', () => {
+  for (const platform of ['darwin', 'linux']) {
+    const home = platform === 'darwin' ? '/Users/example' : '/home/example';
+    const byId = Object.fromEntries(buildSystemTargets({ platform, home, env: {} }).map((t) => [t.id, t]));
+    assert.equal(byId.pnpm.cleanup.label, 'Runs `pnpm store prune`');
+    assert.equal(byId['uv-cache'].cleanup.command, 'uv cache clean');
+    assert.equal(byId['homebrew-cache'].cleanup.command, 'brew cleanup --prune=all');
+    assert.equal(byId.cargo.cleanup.via, 'folder');
+    assert.equal(byId.npm.cleanup.via, 'folder');
+    assert.equal(byId.maven.cleanup, undefined);
+  }
 });

@@ -151,7 +151,7 @@ test('planTierA skips empty things', () => {
 
 test('planTierA of an empty scan is empty', () => {
   const plan = planTierA({});
-  assert.deepEqual(plan, { jobs: [], groups: [], count: 0, bytes: 0, projects: 0 });
+  assert.deepEqual(plan, { jobs: [], groups: [], count: 0, bytes: 0, projects: 0, commands: [] });
   assert.equal(TIERS.A, 'A');
   assert.deepEqual(Object.keys(tiers.BADGES), ['A', 'B', 'C']);
 });

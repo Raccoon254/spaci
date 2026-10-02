@@ -150,7 +150,7 @@ const TOOL_FAMILIES = Object.freeze({
 const TARGET_FAMILY = Object.freeze({
   npm: 'node', yarn: 'node', pnpm: 'node', bun: 'node', deno: 'node',
   gradle: 'jvm', 'gradle-wrapper': 'jvm',
-  cargo: 'rust', pip: 'python', go: 'go',
+  cargo: 'rust', pip: 'python', 'uv-cache': 'python', go: 'go', 'go-modcache': 'go',
   cocoapods: 'apple', 'xcode-derived': 'apple',
   pub: 'dart', 'dart-server': 'dart', nuget: 'dotnet',
 });
