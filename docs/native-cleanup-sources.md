@@ -120,6 +120,13 @@ These rules apply to every tool:
 - Because `--stop` only stops daemons of its own version, Spaci takes a new
   process snapshot after the stop. If a daemon from another version is still
   running, Spaci refuses and does not delete under it.
+- `--stop` would also kill a daemon that is running a build. So right before
+  it, Spaci runs `gradle --status` (read-only; it lists the daemons of this
+  Gradle version as `PID STATUS INFO` rows, or says "No Gradle daemons are
+  running.") and refuses unless every daemon is `IDLE` or `STOPPED`. `BUSY`,
+  `CANCELED`, `STOPPING`, an unknown status, a non-zero exit or output it
+  cannot read all refuse. Source:
+  https://docs.gradle.org/current/userguide/gradle_daemon.html#sec:status.
 
 ### pip: `pip cache purge`
 - Source: https://pip.pypa.io/en/stable/cli/pip_cache/. `purge` removes all
@@ -159,14 +166,54 @@ These rules apply to every tool:
   process has already locked ...").
 - Old versions are removed from the Cellar and Caskroom as well as the cache,
   so Spaci measures those folders too.
-- Spaci runs it with `HOMEBREW_NO_AUTO_UPDATE=1`, `HOMEBREW_NO_INSTALL_CLEANUP=1`,
-  `HOMEBREW_NO_ENV_HINTS=1` and `HOMEBREW_NO_ANALYTICS=1`.
+- `brew cleanup` also runs `brew autoremove`, which uninstalls formulae that
+  were installed as dependencies and are no longer needed, unless
+  `HOMEBREW_NO_AUTOREMOVE` is set (`Library/Homebrew/cleanup.rb`,
+  `autoremove` call guarded by `EnvConfig.no_autoremove?`;
+  `Library/Homebrew/env_config.rb`, `HOMEBREW_NO_AUTOREMOVE`). Uninstalling
+  formulae is not cleaning a cache, so Spaci always sets it, for the dry run
+  and the run.
+- Belt and braces: right before the run Spaci repeats the dry run, and if it
+  prints "Would autoremove" anyway (a Homebrew that ignores the variable), the
+  run is refused and the row says why.
+- Spaci runs it with `HOMEBREW_NO_AUTOREMOVE=1`, `HOMEBREW_NO_AUTO_UPDATE=1`,
+  `HOMEBREW_NO_INSTALL_CLEANUP=1`, `HOMEBREW_NO_ENV_HINTS=1` and
+  `HOMEBREW_NO_ANALYTICS=1`.
 
 ### Docker: `docker builder prune`
 - Source: https://docs.docker.com/reference/cli/docker/builder/prune/.
   `-f` only skips the confirmation prompt, so it is not a lock bypass. The
   Docker card already uses this command (`src/docker.js`). It is listed here
   for completeness.
+
+## Stopping part way (atomic and non-atomic commands)
+
+Each spec says whether stopping its command part way leaves a cache the tool
+still reads correctly (`atomic`, `atomicAuto` in `src/native-cleanup-specs.js`).
+
+| Command | Atomic | Why |
+|---|---|---|
+| `pnpm store prune` | yes | removes only files no project links to; pnpm verifies the store (`verify-store-integrity`) and refetches a missing file |
+| `go clean -cache` | yes | each build cache entry is checked by size and hash; a missing output is a cache miss (https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching) |
+| `pip cache purge` | yes | independent wheel and HTTP files |
+| `gradle --stop` | yes | only stops daemons |
+| `brew cleanup --prune=all` | yes | old kegs it removes are not linked; downloads are single files |
+| `go clean -modcache` | no | the go command treats an extracted module folder that exists as complete, so a half removed one breaks builds until it is cleaned again (https://go.dev/ref/mod#module-cache) |
+| `uv cache clean`, `uv cache prune` | no | unpacked archives are linked into environments as a whole folder; a half removed one installs broken packages |
+| `yarn cache clean` (Yarn 1) | no | a package folder keeps `.yarn-metadata.json` while its files go, and Yarn 1 trusts the folder |
+| `pod cache clean --all` | no | a half removed pod folder is still used by `pod install` |
+
+For a non-atomic command Spaci:
+
+- never offers or honours cancel once it started, and never kills it on a
+  timeout. After 20 minutes it only says it is still running and keeps
+  waiting (main waits up to 4 hours for the worker);
+- if the command is stopped anyway (killed from outside, the app quit or
+  crashed, or it exits non-zero), reports "Incomplete: run the clean again
+  before building." and records that in History;
+- remembers the unfinished clean (`native-incomplete.json` in the app data
+  folder) until a clean of that target finishes, and shows the same warning
+  with a "Finish cleaning" button on the row once the tool is idle.
 
 ## Finding the CLI
 
@@ -177,6 +224,14 @@ A Finder-launched app gets a minimal PATH. Besides PATH, Spaci looks in:
   `/usr/local/go/bin`, `/usr/local/bin`.
 - Linux: the same, plus the Linuxbrew folders.
 - Windows: `%APPDATA%\npm`, `%LOCALAPPDATA%\pnpm`, `Program Files\Go\bin`.
+- Version managers, so a CLI installed under one is found too: `PNPM_HOME`;
+  nvm (`NVM_BIN`, every `$NVM_DIR/versions/node/*/bin`, newest first); fnm's
+  default alias; volta; asdf and mise shims; pyenv shims; pipx
+  (`PIPX_BIN_DIR`, else `~/.local/bin`). On Windows: nvm-windows
+  (`NVM_SYMLINK`), fnm, Volta, mise and pyenv-win shims.
+- Only tool folders. Relative PATH entries (`.`, `node_modules/.bin`) are
+  dropped, and an env override that is a root or the home folder is ignored,
+  so no project folder ever ends up on the child's PATH.
 
 The child process gets the CLI's own folder first on PATH, so node-script
 CLIs such as pnpm can find `node`. Windows `.cmd` shims run through the shell
