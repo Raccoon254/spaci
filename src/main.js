@@ -75,6 +75,7 @@ const historyLog = require('./history-log');
 const restoreHints = require('./restore-hints');
 const cleanPlan = require('./clean-plan');
 const nativeSpecs = require('./native-cleanup-specs');
+const { createIncompleteStore, incompleteInfo } = require('./native-incomplete');
 const ipcGuards = require('./ipc-guards');
 const dockerVolumes = require('./docker-volumes');
 const recommendations = require('./recommendations');
@@ -1196,7 +1197,15 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
     // Logged before anything is touched, so a crash mid-clean leaves a trace.
     historyId = newHistoryId();
     started = { id: historyId, at: Date.now(), scope, label, requested: list.length };
-    putHistory(historyLog.startedEntry({ ...started, refused: refusedItems, pending: [...toDelete, ...toTrash].map((j) => described.get(j.path)) }));
+    // A non-atomic native command (go clean -modcache ...) cut short by a
+    // crash or quit leaves a cache the tool would trust: say so if it happens.
+    const pendingOf = (j) => {
+      const d = described.get(j.path);
+      const id = nativeGroups.byJob.get(j);
+      if (!id || nativeSpecs.isAtomic(nativeSpecs.specFor(id), 'manual')) return d;
+      return { ...d, incompleteReason: 'Spaci closed before this finished. ' + nativeSpecs.INCOMPLETE_MESSAGE };
+    };
+    putHistory(historyLog.startedEntry({ ...started, refused: refusedItems, pending: [...toDelete, ...toTrash].map(pendingOf) }));
 
     const total = allowed.length;
     const del = plainDelete.length
@@ -1294,31 +1303,57 @@ function nativeJob(j) {
   };
 }
 
+// Non-atomic native commands that started and never finished cleanly
+// (native-incomplete.js): the row warns and offers to finish.
+const NATIVE_INCOMPLETE_PATH = path.join(app.getPath('userData'), 'native-incomplete.json');
+const nativeIncomplete = createIncompleteStore({
+  read: () => JSON.parse(fs.readFileSync(NATIVE_INCOMPLETE_PATH, 'utf8')),
+  write: (v) => writeFileAtomic(NATIVE_INCOMPLETE_PATH, JSON.stringify(v)),
+});
+
 /**
  * Run each group's tool in the worker. Returns { freed, items, refused,
  * errors }: one history item per job (the first carries the bytes and the
  * command), busy tools as refusals the renderer keeps listed, anything else
  * that went wrong as errors.
+ *
+ * A non-atomic command (native-cleanup-specs isAtomic) is never cancelled:
+ * main does not pass the clean's signal and waits NON_ATOMIC_WAIT_MS. Once it
+ * started, anything but a finished clean (the worker died, timed out, the
+ * command failed) is 'incomplete' and stays recorded until a clean finishes.
  */
 async function runNativeGroups(groups, { signal, send, onDone, mode = 'manual' } = {}) {
   const out = { freed: 0, items: [], refused: [], errors: [] };
   for (const g of groups) {
     const spec = nativeSpecs.specFor(g.target.id);
+    const atomic = nativeSpecs.isAtomic(spec, mode);
+    let started = false;
     let r;
     if (signal && signal.aborted) r = { ok: false, code: 'cancelled', freed: 0, message: 'Not cleaned: the clean was stopped first.' };
     else {
+      const onProgress = (p) => {
+        if (p && p.phase === 'native-start' && !started) {
+          started = true;
+          if (!atomic) nativeIncomplete.start(g.target.id, p.command);
+        }
+        if (send) send({ ...p, phase: p.phase || 'native' });
+      };
       try {
         r = await work('nativeClean', [g.target.id, g.jobs.map(nativeJob), { mode }], {
-          signal, onProgress: send ? (p) => send({ ...p, phase: p.phase || 'native' }) : undefined,
+          ...(atomic ? { signal } : { timeoutMs: nativeSpecs.NON_ATOMIC_WAIT_MS }), onProgress,
         });
       } catch (e) { r = { ok: false, code: (e && e.code) || 'failed', freed: 0, message: (e && e.message) || 'The cleanup did not run.' }; }
     }
     r = r || { ok: false, code: 'failed', freed: 0 };
+    if (r.ok && r.code === 'done') nativeIncomplete.finish(g.target.id);
+    else if (!atomic && started && r.code !== 'incomplete') {
+      r = { ...r, ok: false, code: 'incomplete', message: nativeSpecs.INCOMPLETE_MESSAGE + (r.message ? ' ' + r.message : '') };
+    }
     const freed = Math.max(0, Number(r.freed) || 0);
     out.freed += freed;
     const native = r.via === 'native' || r.via === 'stop-then-folder';
     const hint = native ? spec.restoreHint : restoreHints.systemRestoreHint(g.target);
-    const outcome = r.ok ? 'removed' : r.code === 'busy' ? 'refused' : 'failed';
+    const outcome = r.ok ? 'removed' : (r.code === 'busy' || r.code === 'unsafe') ? 'refused' : 'failed';
     const reason = r.ok ? (r.message || undefined) : (r.message || 'The cleanup failed.');
     g.jobs.forEach((j, i) => {
       out.items.push({
@@ -1346,14 +1381,19 @@ ipcMain.handle('cleanup:preview', async (_e, ids, force) => {
   const wanted = Array.from(new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string' && known.has(id) && nativeSpecs.specFor(id)))).sort();
   if (!wanted.length) return [];
   const key = wanted.join(',');
-  if (!force && nativePreviewCache.key === key && Date.now() - nativePreviewCache.at < 60000) return nativePreviewCache.list;
+  // An unfinished non-atomic clean is read fresh every time, never cached.
+  const withIncomplete = (list) => list.map((p) => {
+    const inc = p && p.id ? incompleteInfo(nativeIncomplete.get(p.id)) : null;
+    return inc ? { ...p, incomplete: inc } : p;
+  });
+  if (!force && nativePreviewCache.key === key && Date.now() - nativePreviewCache.at < 60000) return withIncomplete(nativePreviewCache.list);
   try {
     const list = await work('nativePreview', [wanted]);
     nativePreviewCache = { at: Date.now(), key, list: Array.isArray(list) ? list : [] };
   } catch (e) {
-    return wanted.map((id) => ({ id, error: (e && e.message) || 'Preview failed.' }));
+    return withIncomplete(wanted.map((id) => ({ id, error: (e && e.message) || 'Preview failed.' })));
   }
-  return nativePreviewCache.list;
+  return withIncomplete(nativePreviewCache.list);
 });
 // ---- end native cleanup ----
 

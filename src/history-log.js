@@ -86,7 +86,12 @@ function startedEntry({ id, at, scope, label, requested, refused = [], pending =
     requested: Number.isFinite(requested) ? requested : items.length + pend.length,
     ...tally(items),
     ...capItems(items),
-    pending: pend.slice(0, MAX_ITEMS).map(({ path, kind, reversible, project }) => ({ path, kind, reversible, ...(project ? { project } : {}) })),
+    // incompleteReason: what an interruption means for this item (a
+    // non-atomic native command: "Incomplete: run the clean again ...").
+    pending: pend.slice(0, MAX_ITEMS).map(({ path, kind, reversible, project }, i) => {
+      const why = pending[i] && typeof pending[i].incompleteReason === 'string' ? pending[i].incompleteReason.slice(0, 300) : null;
+      return { path, kind, reversible, ...(project ? { project } : {}), ...(why ? { incompleteReason: why } : {}) };
+    }),
   };
   return entry;
 }
@@ -112,7 +117,7 @@ function finishedEntry({ id, at, finishedAt, status = 'done', scope, label, requ
 function interruptEntry(entry, now) {
   const done = Array.isArray(entry.items) ? entry.items : [];
   const pend = (Array.isArray(entry.pending) ? entry.pending : [])
-    .map((p) => buildItem({ ...p, outcome: 'failed', bytes: 0, reason: INTERRUPTED_REASON }));
+    .map((p) => buildItem({ ...p, outcome: 'failed', bytes: 0, reason: p.incompleteReason || INTERRUPTED_REASON }));
   const items = [...done, ...pend];
   const next = { ...entry, status: 'interrupted', finishedAt: entry.finishedAt || now, ...tally(items), ...capItems(items) };
   if (!next.itemsTruncated) delete next.itemsTruncated;

@@ -1104,7 +1104,12 @@ async function runAutoClean(deps) {
     restoreHint: 'Undo from History within 24 hours. ' + (restoreHint(c) || ''),
   });
   const refusedItems = refused.map((r) => ({ ...describe(byPath.get(r.path) || { path: r.path, kind: 'cache' }), outcome: 'refused', bytes: 0, reason: r.reason }));
-  const pending = sel.candidates.filter((c) => allowedBy.has(c.path)).map(describe);
+  // A non-atomic auto command (uv cache prune) cut short by a quit or crash
+  // leaves a cache uv would trust: History says so if that happens.
+  const pending = sel.candidates.filter((c) => allowedBy.has(c.path)).map((c) => (
+    c.native && !nativeSpecs.isAtomic(nativeSpecs.specFor(c.target), 'auto')
+      ? { ...describe(c), incompleteReason: 'Spaci closed before this finished. ' + nativeSpecs.INCOMPLETE_MESSAGE }
+      : describe(c)));
   const stagedUntil = t0 + STAGING_TTL_MS;
   const acMeta = { runId, stagedUntil, rules: rulesFingerprint(settings) };
   const started = { id: runId, at: t0, scope: 'auto-clean', label: 'Auto-clean', requested: sel.candidates.length };

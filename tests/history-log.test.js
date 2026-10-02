@@ -122,3 +122,20 @@ test('a native cleanup item keeps the command, its exit status and the restore h
   assert.equal(odd.exitCode, undefined);
   assert.equal(odd.via, undefined);
 });
+
+test('finding 3: an interrupted non-atomic native clean says it is incomplete', () => {
+  const started = log.startedEntry({
+    id: 'n1', at: 1, scope: 'system', label: '2 system caches', requested: 2,
+    pending: [
+      { path: '/h/go/pkg/mod', kind: 'cache', reversible: 'rebuild', incompleteReason: 'Spaci closed before this finished. Incomplete: run the clean again before building.' },
+      { path: '/h/.npm/_cacache', kind: 'cache', reversible: 'rebuild' },
+    ],
+  });
+  assert.equal(started.pending[0].incompleteReason, 'Spaci closed before this finished. Incomplete: run the clean again before building.');
+  assert.equal(started.pending[1].incompleteReason, undefined);
+  const { history } = log.markInterrupted([started], 9);
+  const [mod, npm] = history[0].items;
+  assert.match(mod.reason, /Incomplete: run the clean again before building\./);
+  assert.match(npm.reason, /It may be partly removed/);
+  assert.equal(mod.incompleteReason, undefined, 'the item keeps only its allowed fields');
+});

@@ -109,13 +109,30 @@
       ? el('code', { style: 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;padding:1px 6px;border-radius:6px;background:var(--panel-2);border:1px solid var(--border);color:var(--text)', text: part })
       : part));
   }
-  function nativeLine(t) {
+  // onFinish: clean this one target again, offered when a non-atomic command
+  // (go clean -modcache ...) was cut short and the tool is idle now.
+  function nativeLine(t, onFinish) {
     if (!t || !t.cleanup) return null;
     const pv = S.nativePreview && S.nativePreview.byId ? S.nativePreview.byId[t.id] : null;
     const label = (pv && pv.label) || t.cleanup.label;
     let status = null;
     let tone = 'var(--text-3)';
-    if (pv && pv.busy) { status = pv.busy; tone = 'var(--warn-fg)'; }
+    let finish = null;
+    if (pv && pv.incomplete) {
+      status = pv.incomplete.message || 'Incomplete: run the clean again before building.';
+      tone = 'var(--warn-fg)';
+      if (pv.busy) status += ' ' + pv.busy;
+      else if (onFinish && !S.systemCleaning) {
+        finish = el('button', {
+          'data-native-finish': t.id,
+          style: 'height:26px;padding:0 10px;border-radius:7px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:650;font-size:12px;cursor:pointer;font-family:inherit',
+          hov: 'border-color:var(--accent)',
+          onclick: (ev) => { if (ev) ev.stopPropagation(); onFinish(); },
+          text: 'Finish cleaning',
+        });
+      }
+    } else if (pv && pv.blocked) { status = pv.blocked; tone = 'var(--warn-fg)'; }
+    else if (pv && pv.busy) { status = pv.busy; tone = 'var(--warn-fg)'; }
     else if (pv && typeof pv.estimate === 'number') {
       const about = (pv.partial ? 'at least ' : 'about ') + fmt(pv.estimate);
       status = pv.estimateKind === 'unreferenced' ? 'Preview: ' + about + ' in packages no project uses'
@@ -126,6 +143,7 @@
     return el('div', { 'data-native-cleanup': t.id, style: 'display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:6px;font-size:12px;color:var(--text-2)' }, [
       el('span', { style: 'display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap' }, commandLabel(label)),
       status ? el('span', { 'data-native-preview': '', style: 'color:' + tone, text: status }) : null,
+      finish,
     ]);
   }
   // ---- end native cleanup ----
@@ -281,7 +299,10 @@
       } catch (err) {
         SP.reportClean({ ok: false, error: (err && err.message) || 'Clean failed' });
       }
-      S.systemCleaning = false; paint();
+      S.systemCleaning = false;
+      // A native clean may have finished or left an incomplete one: ask again.
+      if (chosen.some((t) => t.cleanup)) S.nativePreview = null;
+      paint();
       if (needsRescan) runScan(); // refresh sizes of anything partly cleaned
     }
 
@@ -338,7 +359,7 @@
             })
           ]),
           el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px;line-height:1.5', text: t.description || '' }),
-          nativeLine(t),
+          nativeLine(t, () => cleanTargets([t], { title: 'Finish cleaning ' + t.name + '?', lead: 'The last clean of ' + t.name + ' stopped part way. Running it again completes it.' })),
           permanent ? el('div', { style: 'color:var(--danger-fg);font-size:12px;font-weight:600;margin-top:4px;display:flex;align-items:center;gap:6px' }, [
             ic('lock', 13), 'Cannot be undone. Deleted on its own, never with other items.'
           ]) : null

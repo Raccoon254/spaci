@@ -1391,6 +1391,64 @@ test('AI models and dev tools: listing cached, removal confirmed, allowlisted, r
   } finally { m.cleanup(); }
 });
 
+test('finding 3: a non-atomic native clean cut short is incomplete, recorded, offered to finish, and never cancelled', async () => {
+  const dir = tmpTree('spaci-native-inc-');
+  const mod = path.join(dir, 'gomod');
+  fs.mkdirSync(mod);
+  const GOMOD = { id: 'go-modcache', name: 'Go module cache', category: 'Developer', safe: true, reversible: true, mode: 'contents', paths: [mod] };
+  let next = 'killed';
+  let release = null;
+  const seen = [];
+  const native = {
+    runNative: async (target, o) => {
+      seen.push(o);
+      if (o.onProgress) o.onProgress({ phase: 'native-start', command: 'go clean -modcache', atomic: false });
+      if (next === 'killed') return { ok: false, id: target.id, code: 'incomplete', via: 'native', command: 'go clean -modcache', freed: 10, message: 'Incomplete: run the clean again before building. go clean -modcache was stopped (SIGKILL).' };
+      if (next === 'crash') throw new Error('worker went away');
+      if (next === 'slow') { await new Promise((r) => { release = r; }); return { ok: true, id: target.id, code: 'done', via: 'native', command: 'go clean -modcache', exitCode: 0, freed: 5 }; }
+      return { ok: true, id: target.id, code: 'done', via: 'native', command: 'go clean -modcache', exitCode: 0, freed: 5 };
+    },
+    preview: async (target) => ({ id: target.id, label: 'Runs `go clean -modcache`', estimate: 7 }),
+  };
+  const m = loadMain(undefined, { system: { TARGETS: [GOMOD] }, native });
+  const ev = { sender: { send: () => {}, isDestroyed: () => false } };
+  const marker = () => { try { return JSON.parse(fs.readFileSync(path.join(m.userData, 'native-incomplete.json'), 'utf8')); } catch { return {}; } };
+  try {
+    const res = await m.handlers.clean(ev, [{ path: mod, mode: 'contents' }], { scope: 'system' });
+    assert.equal(res.ok, true, res.error);
+    const it = readHistoryFile(m)[0].items.find((i) => i.path === mod);
+    assert.equal(it.outcome, 'failed');
+    assert.equal(it.code, 'incomplete');
+    assert.match(it.reason, /^Incomplete: run the clean again before building\./);
+    assert.equal(marker()['go-modcache'].command, 'go clean -modcache');
+    let pv = await m.handlers['cleanup:preview']({}, ['go-modcache'], true);
+    assert.equal(pv[0].incomplete.message, 'Incomplete: run the clean again before building.');
+
+    // The worker dying mid-command is incomplete too, never a plain failure.
+    next = 'crash';
+    await m.handlers.clean(ev, [{ path: mod, mode: 'contents' }], { scope: 'system' });
+    const crashed = readHistoryFile(m)[0].items.find((i) => i.path === mod);
+    assert.equal(crashed.code, 'incomplete');
+    assert.match(crashed.reason, /^Incomplete: run the clean again before building\. /);
+
+    // Cancel during a non-atomic run: main never passes it on; the run finishes.
+    next = 'slow';
+    const p = m.handlers.clean(ev, [{ path: mod, mode: 'contents' }], { scope: 'system' });
+    while (!release) await new Promise((r) => setImmediate(r));
+    await m.handlers['scan:cancel']({}, 'clean');
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    release();
+    const done = await p;
+    assert.equal(done.ok, true);
+    assert.equal(seen[seen.length - 1].signal.aborted, false, 'the worker op was never aborted');
+    const fin = readHistoryFile(m)[0].items.find((i) => i.path === mod);
+    assert.equal(fin.outcome, 'removed');
+    assert.deepEqual(marker(), {}, 'a finished clean clears the record');
+    pv = await m.handlers['cleanup:preview']({}, ['go-modcache'], true);
+    assert.equal(pv[0].incomplete, undefined);
+  } finally { m.cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('clean: a cache with a native cleanup runs its tool in the worker; the renderer cannot add a command', async () => {
   const dir = tmpTree('spaci-native-');
   const store = path.join(dir, 'pnpm-store');
