@@ -53,9 +53,20 @@ jobs:
           docker pull -q node:22-bookworm
           docker pull -q python:3.12-bookworm
           docker system df
+      - name: A pnpm store with packages no project uses
+        if: runner.os == 'Linux'
+        # Spaci must clean it with `pnpm store prune`, not a folder delete.
+        run: |
+          npm install -g pnpm@9 >/dev/null
+          d=$(mktemp -d "$HOME/spaci-pnpm-XXXX")
+          cd "$d"
+          echo '{"name":"spaci-e2e","version":"1.0.0","private":true}' > package.json
+          pnpm add is-number@7 left-pad@1.3.0 ms@2.1.3 >/dev/null
+          echo "store: $(pnpm store path)"
+          cd "$HOME" && rm -rf "$d"
       - name: Run E2E (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run -a node scripts/e2e/cdp-e2e.mjs ${{ matrix.bin }} ${{ matrix.docker && '--docker' || '' }}
+        run: xvfb-run -a node scripts/e2e/cdp-e2e.mjs ${{ matrix.bin }} ${{ matrix.docker && '--docker' || '' }} --pnpm
       - name: Run E2E (macOS, Windows)
         if: runner.os != 'Linux'
         shell: bash

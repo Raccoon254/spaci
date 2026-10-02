@@ -10,6 +10,9 @@
 // real space.
 // --screenshots <dir>: also save PNGs of the System Cleaner's AI model and
 // developer tool sections and the Storage drill-down (for review, not checks).
+// --pnpm: pnpm is on PATH and its store holds packages no project uses (the
+// workflow makes some); checks that cleaning the pnpm store runs
+// `pnpm store prune`, frees measured space and logs the command.
 // --read-only: deletes nothing at all: leaves OLLAMA_MODELS and OLLAMA_HOST
 // alone, skips the Ollama fixture and the large-file Trash checks, so it can
 // run on a developer's own machine and screenshot its real stores.
@@ -23,6 +26,7 @@ const BIN = process.argv[2];
 const WITH_DOCKER = process.argv.includes('--docker');
 const SHOTS = process.argv.includes('--screenshots') ? process.argv[process.argv.indexOf('--screenshots') + 1] : null;
 const FIXTURE = !process.argv.includes('--read-only');
+const WITH_PNPM = process.argv.includes('--pnpm') && FIXTURE;
 
 // A throwaway Ollama store with shared blobs, pointed at with OLLAMA_MODELS.
 // keep:latest and gone:latest share the weights blob; gone has its own
@@ -114,6 +118,9 @@ async function screenshots(dir) {
       const found = await evalIn(`const n = document.querySelector('[data-devtools-section="${sec}"]'); if (!n) return false; n.scrollIntoView({ block: 'start' }); await new Promise((r) => setTimeout(r, 600)); return true`);
       if (found) await shot(path.join(dir, `system-${sec}-${theme}.png`));
     }
+    // Developer cache rows that run their tool's own cleanup command.
+    const rows = await evalIn(`await new Promise((r) => setTimeout(r, 4000)); const n = document.querySelector('[data-native-cleanup]'); if (!n) return false; n.closest('.sp-hov').scrollIntoView({ block: 'start' }); window.scrollBy(0, -60); await new Promise((r) => setTimeout(r, 600)); return true`);
+    if (rows) await shot(path.join(dir, `system-native-${theme}.png`));
   }
   const drill = await evalIn(`const S = window.SP.state; S.breakdown = S.breakdown || await window.api.diskBreakdown();
     const c = ((S.breakdown && S.breakdown.categories) || []).find((x) => x.key === 'developer'); if (!c) return false;
@@ -294,6 +301,28 @@ try {
     const h = JSON.parse(fs.readFileSync(path.join(DATA, 'history.json'), 'utf8'));
     check('history records the model with its restore command', h[0]?.scope === 'devtools' && h[0]?.items?.[0]?.restoreHint === 'ollama pull e2e-gone:latest', JSON.stringify(h[0]?.items?.[0]));
   }
+  }
+  // Native cleanup: previews only for catalogued targets with a spec; rows
+  // that have one say which command runs.
+  const pv = await evalIn(`return await window.api.cleanupPreview(['pnpm', 'npm', 'maven', '../etc', 'rm -rf /'])`);
+  check('cleanup previews only answer for catalogued targets with a spec', Array.isArray(pv) && pv.every((x) => ['pnpm', 'npm'].includes(x.id)), JSON.stringify((pv || []).map((x) => [x.id, x.label, x.estimate, x.busy])));
+  if (WITH_PNPM) {
+    const sysNow = await evalIn('return await window.api.scanSystem()');
+    const pt = (sysNow?.targets || []).find((t) => t.id === 'pnpm');
+    const storeFiles = (d) => { let n = 0; const walk = (x) => { for (const e of fs.readdirSync(x, { withFileTypes: true })) { if (e.isDirectory()) walk(path.join(x, e.name)); else n++; } }; try { walk(d); } catch { /* gone */ } return n; };
+    const root = pt?.existingPaths?.[0];
+    const before = root ? storeFiles(root) : 0;
+    const prev = await evalIn(`return await window.api.cleanupPreview(['pnpm'], true)`);
+    check('pnpm row previews pnpm store prune with an estimate', prev?.[0]?.label === 'Runs `pnpm store prune`' && prev[0].available === true && prev[0].estimate > 0, JSON.stringify(prev));
+    // Extra fields a compromised renderer might send: ignored.
+    const jobs = (pt?.existingPaths || []).map((p) => ({ path: p, mode: 'path', command: 'touch', args: ['/tmp/spaci-pwned'], shell: true }));
+    const res = await evalIn(`return await window.api.clean(${JSON.stringify(jobs)}, { scope: 'system', label: 'e2e pnpm', command: 'touch /tmp/spaci-pwned' })`);
+    const after = root ? storeFiles(root) : 0;
+    const h = await evalIn('return await window.api.historyGet()');
+    const it = (h?.[0]?.items || []).find((i) => i.path === root);
+    check('cleaning the pnpm store runs pnpm store prune and frees measured space',
+      res?.ok && it?.command === 'pnpm store prune' && it.exitCode === 0 && it.via === 'native' && it.outcome === 'removed' && res.totalFreed > 0 && after < before && !fs.existsSync('/tmp/spaci-pwned'),
+      JSON.stringify({ root, before, after, freed: res?.totalFreed, refused: res?.refused, errors: res?.errors, item: it }));
   }
   const ui = await evalIn(`window.SP.go('system'); await new Promise((r) => setTimeout(r, 1500));
     return { ai: !!document.querySelector('[data-devtools-section="ai"]'), dev: !!document.querySelector('[data-devtools-section="dev"]'), text: document.body.innerText }`);
