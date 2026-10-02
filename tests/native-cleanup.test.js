@@ -293,14 +293,18 @@ test('gradle: daemons are stopped first; a daemon of another version still runni
   const dir = tmp();
   let snaps = 0;
   const daemon = { pid: 77, args: '/usr/bin/java -cp g org.gradle.launcher.daemon.bootstrap.GradleDaemon 7.6' };
-  const spawn = fakeSpawn((args) => (args[0] === '--stop' ? { out: ['Stopping Daemon(s)', '1 Daemon stopped'] } : { code: 1 }));
+  const spawn = fakeSpawn((args) => {
+    if (args[0] === '--stop') return { out: ['Stopping Daemon(s)', '1 Daemon stopped'] };
+    if (args[0] === '--status') return { out: ['   PID STATUS   INFO', ' 77 IDLE     7.6', '', 'Only Daemons for the current Gradle version are displayed.'] };
+    return { code: 1 };
+  });
   let folder = false;
   const base = { spawn, folderJobs: [{ path: dir, mode: 'contents' }], deleteFolders: async (jobs) => { folder = true; return { results: jobs.map((j) => ({ path: j.path, ok: true })) }; } };
   const stuck = await nc.runNative(target('gradle', [dir]), opts({ ...base, snapshot: async () => { snaps++; return { ok: true, list: [daemon] }; } }));
   assert.equal(stuck.code, 'busy');
   assert.match(stuck.message, /Gradle daemon from another Gradle version/);
   assert.equal(folder, false);
-  assert.equal(snaps, 2);
+  assert.equal(snaps, 3, 'at the start, right before gradle --stop, right before the folder');
   const ok = await nc.runNative(target('gradle', [dir]), opts({ ...base, measure: sizes(300, 0) }));
   assert.equal(ok.ok, true);
   assert.equal(ok.via, 'stop-then-folder');
@@ -370,7 +374,8 @@ test('parseBrewDryRun reads the dry-run total and counts the items', () => {
   const r = nc.parseBrewDryRun(out);
   assert.equal(r.items, 2);
   assert.equal(r.bytes, Math.round(130.3 * 1024 * 1024));
-  assert.deepEqual(nc.parseBrewDryRun(''), { bytes: 0, items: 0 });
+  assert.deepEqual(nc.parseBrewDryRun(''), { bytes: 0, items: 0, autoremove: false });
+  assert.equal(r.autoremove, false);
 });
 
 test('preview: brew runs only its dry run and shows its estimate', async () => {
@@ -437,4 +442,252 @@ test('the child gets the CLI folder on PATH and colour turned off', () => {
   assert.equal(env.PATH.split(':')[0], '/opt/homebrew/bin');
   assert.equal(env.HOMEBREW_NO_AUTO_UPDATE, '1');
   assert.equal(env.NO_COLOR, '1');
+});
+
+// ---- safety critic findings (2.3.2) -------------------------------------------
+
+const del = (log) => async (jobs) => { if (log) log.push(...jobs.map((j) => j.path)); return { results: jobs.map((j) => ({ path: j.path, ok: true })) }; };
+
+test('finding 1: HOMEBREW_NO_AUTOREMOVE=1 reaches spawn for the dry run and for the run', async () => {
+  const spawn = fakeSpawn((args) => {
+    if (args[0] === '--cache') return { out: ['/Users/e/Library/Caches/Homebrew'] };
+    if (args.includes('--dry-run')) return { out: ['==> This operation would free approximately 1MB of disk space.'] };
+    return {};
+  });
+  await nc.preview(target('homebrew-cache', [tmp()]), opts({ spawn, procs: { ok: true, list: [] } }));
+  const r = await nc.runNative(target('homebrew-cache', [tmp()]), opts({ spawn }));
+  assert.equal(r.code, 'done', JSON.stringify(r));
+  const dry = spawn.calls.filter((c) => c.args.includes('--dry-run'));
+  const run = spawn.calls.filter((c) => c.args.join(' ') === 'cleanup --prune=all');
+  assert.equal(dry.length, 2, 'the preview dry run and the dry run checked right before the run');
+  assert.equal(run.length, 1);
+  for (const c of [...dry, ...run]) {
+    assert.equal(c.opts.env.HOMEBREW_NO_AUTOREMOVE, '1', c.args.join(' '));
+    assert.equal(c.opts.env.HOMEBREW_NO_AUTO_UPDATE, '1');
+    assert.equal(c.opts.env.HOMEBREW_NO_INSTALL_CLEANUP, '1');
+  }
+});
+
+test('finding 1: a dry run that would autoremove refuses the run, and the preview says so', async () => {
+  const plan = ['Would remove: /x (5MB)', '==> Would autoremove 2 unneeded formulae:', 'libfoo', 'libbar', '==> This operation would free approximately 1.5GB of disk space.'];
+  assert.equal(nc.parseBrewDryRun(plan.join('\n')).autoremove, true);
+  assert.equal(nc.parseBrewDryRun('==> Autoremoving 1 unneeded formula:\nx').autoremove, true);
+  const spawn = fakeSpawn((args) => (args.includes('--dry-run') ? { out: plan } : args[0] === '--cache' ? { out: ['/Users/e/Library/Caches/Homebrew'] } : {}));
+  const r = await nc.runNative(target('homebrew-cache', [tmp()]), opts({ spawn }));
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'unsafe');
+  assert.match(r.message, /uninstall formulae \(autoremove\)/);
+  assert.ok(!spawn.calls.some((c) => c.args.join(' ') === 'cleanup --prune=all'), 'the cleanup never ran');
+  const p = await nc.preview(target('homebrew-cache', [tmp()]), opts({ spawn, procs: { ok: true, list: [] } }));
+  assert.equal(p.blocked, nc.BREW_AUTOREMOVE_MESSAGE);
+});
+
+test('finding 2: auto mode never falls back to a permanent folder delete (critic repro)', async () => {
+  for (const id of ['yarn', 'pip', 'go', 'pnpm', 'uv-cache']) {
+    const deleted = [];
+    const r = await nc.runNative(target(id, ['/tmp/x-' + id]), {
+      mode: 'auto', env: { PATH: '/nonexistent' }, home: '/nonexistent-home', platform: 'darwin',
+      isExecutable: async () => false, snapshot: async () => ({ ok: true, list: [{ pid: 9, args: 'zsh' }] }),
+      measure: async () => 100, lockHolders: async () => [],
+      folderJobs: [{ path: '/tmp/x-' + id, mode: 'contents' }], deleteFolders: del(deleted),
+    });
+    assert.equal(r.code, 'missing', id);
+    assert.equal(r.ok, false, id);
+    assert.deepEqual(deleted, [], id + ': nothing deleted');
+  }
+  // Yarn 2+ and a CLI that cannot start: also no folder delete in auto mode.
+  const deleted = [];
+  const berry = fakeSpawn((args) => (args[0] === '--version' ? { out: ['4.5.1'] } : {}));
+  const y = await nc.runNative(target('yarn', [tmp()]), opts({ spawn: berry, mode: 'auto', folderJobs: [{ path: '/x' }], deleteFolders: del(deleted) }));
+  assert.equal(y.code, 'not-auto');
+  const enoent = fakeSpawn((args) => (args.join(' ') === 'store prune' ? { error: Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }) } : { code: 1 }));
+  const e = await nc.runNative(target('pnpm', [tmp()]), opts({ spawn: enoent, mode: 'auto', folderJobs: [{ path: '/x' }], deleteFolders: del(deleted) }));
+  assert.equal(e.code, 'missing');
+  // Folder-only and stop-then-folder targets are never run in auto mode.
+  for (const id of ['npm', 'cargo', 'gradle']) {
+    const n = await nc.runNative(target(id, [tmp()]), opts({ mode: 'auto', folderJobs: [{ path: '/x' }], deleteFolders: del(deleted) }));
+    assert.equal(n.code, 'not-auto', id);
+  }
+  assert.deepEqual(deleted, []);
+});
+
+test('finding 2: version managers are searched (nvm, fnm, volta, asdf, mise, pyenv, pipx), never a project folder', async () => {
+  const home = '/Users/e';
+  const listDir = (d) => (d === '/Users/e/.nvm/versions/node' ? ['v18.19.0', 'v20.11.1', 'v9.0.0', 'notes.txt'] : []);
+  const dirs = nc.extraBinDirs({ platform: 'darwin', home, env: { PNPM_HOME: home, PIPX_BIN_DIR: '/Users/e/.pipx-bin', MISE_DATA_DIR: '/' }, listDir });
+  const nvm = dirs.filter((d) => d.includes('.nvm'));
+  assert.deepEqual(nvm, ['/Users/e/.nvm/versions/node/v20.11.1/bin', '/Users/e/.nvm/versions/node/v18.19.0/bin', '/Users/e/.nvm/versions/node/v9.0.0/bin']);
+  for (const d of ['/Users/e/Library/Application Support/fnm/aliases/default/bin', '/Users/e/.volta/bin', '/Users/e/.asdf/shims',
+    '/Users/e/.local/share/mise/shims', '/Users/e/.pyenv/shims', '/Users/e/.local/bin', '/Users/e/.pipx-bin']) {
+    assert.ok(dirs.includes(d), d);
+  }
+  assert.ok(!dirs.includes(home), 'PNPM_HOME set to the home folder is ignored');
+  assert.ok(!dirs.includes('/shims'), 'MISE_DATA_DIR=/ is ignored');
+  assert.ok(dirs.every((d) => !/node_modules|\/projects\//.test(d)));
+  // PATH entries that would resolve against a project folder are dropped.
+  const search = nc.searchDirs({ platform: 'darwin', home, env: { PATH: '.:node_modules/.bin:/usr/bin' }, listDir });
+  assert.ok(!search.includes('.') && !search.includes('node_modules/.bin'));
+  const found = await nc.resolveBin(['pnpm'], { platform: 'darwin', home, env: { PATH: '/usr/bin:/bin' }, listDir, isExecutable: async (p) => p === '/Users/e/.nvm/versions/node/v20.11.1/bin/pnpm' });
+  assert.equal(found, '/Users/e/.nvm/versions/node/v20.11.1/bin/pnpm');
+  const win = nc.extraBinDirs({ platform: 'win32', home: 'C:\\Users\\e', env: { LOCALAPPDATA: 'C:\\Users\\e\\AppData\\Local', APPDATA: 'C:\\Users\\e\\AppData\\Roaming', NVM_SYMLINK: 'C:\\nvm4w\\nodejs' } });
+  for (const d of ['C:\\nvm4w\\nodejs', 'C:\\Users\\e\\AppData\\Roaming\\fnm\\aliases\\default', 'C:\\Users\\e\\AppData\\Local\\Volta\\bin', 'C:\\Users\\e\\AppData\\Local\\mise\\shims', 'C:\\Users\\e\\.pyenv\\pyenv-win\\shims']) {
+    assert.ok(win.includes(d), d);
+  }
+});
+
+test('finding 3: every spec says whether it is atomic; go -modcache, uv, yarn and pod are not', () => {
+  for (const [id, s] of Object.entries(specs.SPECS)) {
+    assert.equal(typeof s.atomic, 'boolean', id);
+    if (s.autoRun) assert.equal(typeof s.atomicAuto, 'boolean', id);
+  }
+  for (const id of ['go-modcache', 'uv-cache', 'yarn', 'cocoapods']) assert.equal(specs.isAtomic(specs.specFor(id)), false, id);
+  assert.equal(specs.isAtomic(specs.specFor('uv-cache'), 'auto'), false);
+  for (const id of ['pnpm', 'go', 'pip', 'gradle', 'homebrew-cache']) assert.equal(specs.isAtomic(specs.specFor(id)), true, id);
+});
+
+test('finding 3: go clean -modcache is never killed on timeout: it reports and waits', async () => {
+  const lines = [];
+  let child;
+  const spawn = fakeSpawn((args, c) => {
+    if (args.join(' ') === 'clean -modcache') { child = c; return { before: () => new Promise((r) => setTimeout(r, 120)) }; }
+    return { code: 1 };
+  });
+  const r = await nc.runNative(target('go-modcache', [tmp()]), opts({ spawn, timeoutMs: 10, reportAfterMs: 20, measure: sizes(100, 0), onProgress: (p) => lines.push(p) }));
+  assert.equal(r.code, 'done', JSON.stringify(r));
+  assert.deepEqual(child.signals, [], 'never signalled');
+  assert.ok(lines.some((p) => p.phase === 'native-start' && p.atomic === false));
+  assert.ok(lines.some((p) => /Still running after .* Spaci waits/.test(p.line || '')));
+});
+
+test('finding 3: cancelling does not stop go clean -modcache', async () => {
+  const ac = new AbortController();
+  let child;
+  const spawn = fakeSpawn((args, c) => {
+    if (args.join(' ') === 'clean -modcache') { child = c; return { before: () => new Promise((r) => setTimeout(r, 80)) }; }
+    return { code: 1 };
+  });
+  const p = nc.runNative(target('go-modcache', [tmp()]), opts({ spawn, signal: ac.signal, measure: sizes(100, 0) }));
+  setTimeout(() => ac.abort(), 20);
+  const r = await p;
+  assert.equal(r.code, 'done');
+  assert.deepEqual(child.signals, []);
+});
+
+test('finding 3: a non-atomic run killed from outside is reported incomplete', async () => {
+  const spawn = fakeSpawn((args, c) => {
+    if (args.join(' ') === 'clean -modcache') {
+      setTimeout(() => { c.exitCode = null; c.emit('close', null, 'SIGKILL'); }, 20);
+      return { hang: true };
+    }
+    return { code: 1 };
+  });
+  const r = await nc.runNative(target('go-modcache', [tmp()]), opts({ spawn, measure: sizes(100, 60) }));
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'incomplete');
+  assert.match(r.message, /^Incomplete: run the clean again before building\. go clean -modcache was stopped \(SIGKILL\)\.$/);
+  assert.equal(r.freed, 40);
+  const failed = fakeSpawn((args) => (args.join(' ') === 'cache clean' ? { err: ['error: failed to remove file'], code: 2 } : { code: 1 }));
+  const u = await nc.runNative(target('uv-cache', [tmp()]), opts({ spawn: failed }));
+  assert.equal(u.code, 'incomplete');
+  assert.match(u.message, /^Incomplete: run the clean again before building\./);
+});
+
+test('finding 4: Windows command lines with quotes, spaces and npm cmd-shim scripts are read right (critic repro)', () => {
+  const shim = '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\bob\\AppData\\Roaming\\npm\\node_modules\\pnpm\\bin\\pnpm.cjs" install';
+  assert.deepEqual(nc.commandOf(shim), { name: 'pnpm', sub: 'install' });
+  assert.deepEqual(nc.commandOf('"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\bob\\AppData\\Roaming\\npm\\node_modules\\pnpm\\bin\\pnpm.cjs install'), { name: 'pnpm', sub: 'install' });
+  assert.deepEqual(nc.commandOf('"C:\\Program Files\\nodejs\\node.exe" "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js" ci'), { name: 'npm', sub: 'ci' });
+  assert.deepEqual(nc.commandOf('"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Bob Smith\\AppData\\Roaming\\npm\\node_modules\\pnpm\\bin\\pnpm.js" add x'), { name: 'pnpm', sub: 'add' });
+  assert.deepEqual(nc.commandOf('node C:\\Users\\Bob Smith\\AppData\\Roaming\\npm\\node_modules\\yarn\\bin\\yarn.js install'), { name: 'yarn', sub: 'install' });
+  assert.deepEqual(nc.commandOf('node /Users/Bob Smith/.nvm/versions/node/v20.1.0/lib/node_modules/pnpm/bin/pnpm.cjs add react'), { name: 'pnpm', sub: 'add' });
+  assert.deepEqual(nc.commandOf('/Users/Bob Smith/.local/bin/uv cache clean'), { name: 'uv', sub: 'cache' });
+  assert.deepEqual(nc.commandOf('node --max-old-space-size 4096 /opt/homebrew/bin/pnpm install'), { name: 'pnpm', sub: 'install' });
+  assert.deepEqual(nc.commandOf('node /Users/b/proj/.yarn/releases/yarn-4.5.0.cjs install'), { name: 'yarn', sub: 'install' });
+  // Unchanged: paths after the command are arguments, not part of it.
+  assert.deepEqual(nc.commandOf('/usr/bin/go build ./x.sh'), { name: 'go', sub: 'build' });
+  assert.deepEqual(nc.commandOf('/usr/local/bin/node /usr/local/bin/npm run dev'), { name: 'npm', sub: 'run' });
+  const procs = (a) => ({ ok: true, list: [{ pid: 5, args: a }] });
+  assert.equal(nc.checkBusy(specs.SPECS.pnpm, procs(shim), 1).busy, true);
+  assert.equal(nc.checkBusy(specs.SPECS.npm, procs('"C:\\Program Files\\nodejs\\node.exe" "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js" install'), 1).busy, true);
+  assert.equal(nc.checkBusy(specs.SPECS.yarn, procs('node /Users/b/proj/.yarn/releases/yarn-4.5.0.cjs install'), 1).busy, true);
+});
+
+const GRADLE_IDLE = ['   PID STATUS   INFO', ' 82033 IDLE     8.5', ' 81852 STOPPED  (by user or operating system)', '', 'Only Daemons for the current Gradle version are displayed. See https://docs.gradle.org/8.5/userguide/gradle_daemon.html#sec:status'];
+const GRADLE_BUSY = ['   PID STATUS   INFO', ' 82033 IDLE     8.5', ' 82190 BUSY     8.5', '', 'Only Daemons for the current Gradle version are displayed.'];
+
+test('finding 5: parseGradleStatus reads idle, busy, none and unreadable output', () => {
+  assert.deepEqual(nc.parseGradleStatus(GRADLE_IDLE.join('\n')), { ok: true, daemons: [{ pid: 82033, status: 'IDLE' }, { pid: 81852, status: 'STOPPED' }], busy: [] });
+  assert.deepEqual(nc.parseGradleStatus(GRADLE_BUSY.join('\n')).busy, [82190]);
+  assert.deepEqual(nc.parseGradleStatus('   PID STATUS   INFO\n 1 CANCELED 8.5\n').busy, [1]);
+  assert.deepEqual(nc.parseGradleStatus('No Gradle daemons are running.\n'), { ok: true, daemons: [], busy: [] });
+  assert.equal(nc.parseGradleStatus('').ok, false);
+  assert.equal(nc.parseGradleStatus('FAILURE: Build failed with an exception.').ok, false);
+});
+
+test('finding 5: gradle --stop never runs while a daemon is BUSY, or when its status cannot be read', async () => {
+  const dir = tmp();
+  for (const [status, why] of [[{ out: GRADLE_BUSY }, /running a build/], [{ code: 1, err: ['boom'] }, /could not read gradle --status/], [{ out: ['garbage'] }, /could not read gradle --status/]]) {
+    const deleted = [];
+    const spawn = fakeSpawn((args) => (args[0] === '--status' ? status : {}));
+    const r = await nc.runNative(target('gradle', [dir]), opts({ spawn, folderJobs: [{ path: dir }], deleteFolders: del(deleted) }));
+    assert.equal(r.code, 'busy');
+    assert.match(r.message, why);
+    assert.ok(!spawn.calls.some((c) => c.args[0] === '--stop'), 'gradle --stop never ran');
+    assert.deepEqual(deleted, []);
+  }
+  const spawn = fakeSpawn((args) => (args[0] === '--status' ? { out: GRADLE_IDLE } : {}));
+  const ok = await nc.runNative(target('gradle', [dir]), opts({ spawn, folderJobs: [{ path: dir }], deleteFolders: del([]) }));
+  assert.equal(ok.code, 'done');
+  const order = spawn.calls.map((c) => c.args[0]);
+  assert.ok(order.indexOf('--status') < order.indexOf('--stop'));
+});
+
+test('finding 6: a tool that starts while Spaci measures is caught right before its command', async () => {
+  let n = 0;
+  const snapshot = async () => (++n === 1 ? { ok: true, list: [] } : { ok: true, list: [{ pid: 8, args: '/opt/homebrew/bin/pnpm install' }] });
+  const spawn = fakeSpawn((args) => (args.join(' ') === 'store path' ? { out: [tmp()] } : {}));
+  const r = await nc.runNative(target('pnpm', [tmp()]), opts({ spawn, snapshot }));
+  assert.equal(r.code, 'busy');
+  assert.match(r.message, /pnpm is busy/);
+  assert.ok(!spawn.calls.some((c) => c.args.join(' ') === 'store prune'));
+  // A lock taken while measuring counts too.
+  let l = 0;
+  const cache = tmp();
+  const uvSpawn = fakeSpawn((args) => (args.join(' ') === 'cache dir' ? { out: [cache] } : {}));
+  const u = await nc.runNative(target('uv-cache', [cache]), opts({ spawn: uvSpawn, lockHolders: async () => (++l === 1 ? [] : [999]) }));
+  assert.equal(u.code, 'busy');
+  assert.match(u.message, /holds its cache lock/);
+  assert.ok(!uvSpawn.calls.some((c) => c.args.join(' ') === 'cache clean'));
+});
+
+test('finding 6: and again right before a folder is emptied', async () => {
+  const dir = tmp();
+  const deleted = [];
+  let n = 0;
+  const snapshot = async () => (++n === 1 ? { ok: true, list: [] } : { ok: true, list: [{ pid: 8, args: 'npm install' }, { pid: 9, args: '/Users/e/.local/bin/uv sync' }] });
+  const r = await nc.runNative(target('npm', [dir]), opts({ snapshot, folderJobs: [{ path: dir }], deleteFolders: del(deleted) }));
+  assert.equal(r.code, 'busy');
+  assert.deepEqual(deleted, []);
+  // Missing CLI fallback: the same.
+  n = 0;
+  const u = await nc.runNative(target('uv-cache', [dir]), opts({ bins: [], snapshot, folderJobs: [{ path: dir }], deleteFolders: del(deleted) }));
+  assert.equal(u.code, 'busy');
+  assert.deepEqual(deleted, []);
+  assert.equal(n, 2);
+});
+
+test('finding 7: a located or target folder that is root, home, an ancestor of home or /Users is never used', async () => {
+  const mac = { platform: 'darwin', home: '/Users/e' };
+  for (const bad of ['/', '/Users', '/Users/e', '/users/E/', '/Users/e/..']) assert.equal(nc.pickLocated(bad + '\n', mac), null, bad);
+  assert.equal(nc.pickLocated('/Users/e/Library/Caches/go-build\n', mac), '/Users/e/Library/Caches/go-build');
+  const win = { platform: 'win32', home: 'C:\\Users\\e' };
+  for (const bad of ['C:\\', 'D:\\', 'C:\\Users', 'c:\\users\\E']) assert.equal(nc.pickLocated(bad, win), null, bad);
+  // Target paths: a GOCACHE pointing at home would have the folder step empty home.
+  const home = tmp();
+  const deleted = [];
+  const r = await nc.runNative(target('npm', [home]), opts({ home, folderJobs: [{ path: home, mode: 'contents' }], deleteFolders: del(deleted) }));
+  assert.equal(r.ok, false);
+  assert.match(r.message, /will not empty .*: it is your home folder/);
+  assert.deepEqual(deleted, []);
+  assert.deepEqual(nc.safePaths(['/', '/Users', '/Users/e', '/Users/e/.npm'], mac), ['/Users/e/.npm']);
 });

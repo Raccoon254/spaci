@@ -56,7 +56,15 @@ const NODE_INSTALLS = ['install', 'i', 'ci', 'add', 'update', 'up', 'upgrade', '
  *   timeoutMs   for the run; locate and preview get PREVIEW_TIMEOUT_MS
  *   duration    how long it can take, for the docs and the row
  *   fallback    'folder' when the CLI is missing and deleting the folder is
- *               safe once the busy check passed; 'none' otherwise
+ *               safe once the busy check passed; 'none' otherwise (a manual
+ *               clean only: auto-clean never deletes a folder this way)
+ *   atomic      true when stopping `run` part way leaves a cache the tool still
+ *               reads correctly; false when a half-done run leaves entries the
+ *               tool treats as complete. A non-atomic command is never
+ *               cancelled or killed on timeout (see ATOMICITY below)
+ *   atomicAuto  the same for `autoRun` (required when autoRun is set)
+ *   status      read-only argv run right before `run`, whose output must say
+ *               the tool is idle (Gradle: gradle --status), or null
  *   restoreHint History line
  */
 const SPECS = Object.freeze({
@@ -72,6 +80,8 @@ const SPECS = Object.freeze({
     lockFiles: ['index.db'],
     lockOutput: null,
     timeoutMs: 15 * MIN,
+    atomic: true,
+    atomicAuto: true,
     duration: 'Seconds to a few minutes on a large store.',
     fallback: 'folder',
     why: 'Removes only packages no project uses. Packages your projects use are hard links, so deleting the folder frees little and forces downloads.',
@@ -90,6 +100,8 @@ const SPECS = Object.freeze({
     // uv waits up to 5 minutes for other uv processes; Spaci stops instead.
     lockOutput: /currently in-use|waiting for other uv processes|waiting to acquire lock/i,
     timeoutMs: 10 * MIN,
+    atomic: false,
+    atomicAuto: false,
     duration: 'Seconds; minutes for a cache of many GB.',
     fallback: 'folder',
     why: 'uv takes its cache lock first, so a running uv never sees its cache vanish. Spaci never passes --force.',
@@ -107,6 +119,8 @@ const SPECS = Object.freeze({
     lockFiles: null,
     lockOutput: null,
     timeoutMs: 10 * MIN,
+    atomic: true,
+    atomicAuto: true,
     duration: 'Seconds; up to a minute for a large build cache.',
     fallback: 'folder',
     why: 'Removes the build cache where Go keeps it (GOCACHE), whatever it is set to.',
@@ -124,6 +138,7 @@ const SPECS = Object.freeze({
     lockFiles: null,
     lockOutput: null,
     timeoutMs: 15 * MIN,
+    atomic: false,
     duration: 'Up to a few minutes: every module file is read-only and removed one by one.',
     fallback: 'folder',
     why: 'Go makes module files read-only; go clean -modcache removes them the supported way.',
@@ -135,6 +150,9 @@ const SPECS = Object.freeze({
     via: 'stop-then-folder',
     run: ['--stop'],
     autoRun: null,
+    // A daemon that is BUSY runs a build right now: --stop would kill it mid
+    // build, so Spaci asks first and refuses unless every daemon is idle.
+    status: ['--status'],
     locate: null,
     preview: 'size',
     // Clients (a build or the wrapper) make Gradle busy. Daemons are stopped
@@ -144,6 +162,7 @@ const SPECS = Object.freeze({
     lockFiles: null,
     lockOutput: /timeout waiting to lock/i,
     timeoutMs: 2 * MIN,
+    atomic: true,
     duration: 'A few seconds to stop daemons, then the folder delete.',
     fallback: 'folder',
     why: 'Gradle has no command that empties its caches. Stopping its daemons first keeps a running daemon from writing into a half-deleted cache.',
@@ -162,6 +181,8 @@ const SPECS = Object.freeze({
     lockFiles: null,
     lockOutput: null,
     timeoutMs: 5 * MIN,
+    atomic: true,
+    atomicAuto: true,
     duration: 'Seconds.',
     fallback: 'folder',
     why: 'Purges the cache pip actually uses (pip cache dir), wheels and HTTP responses.',
@@ -182,6 +203,8 @@ const SPECS = Object.freeze({
     lockFiles: null,
     lockOutput: null,
     timeoutMs: 10 * MIN,
+    atomic: false,
+    atomicAuto: false,
     duration: 'Seconds to a minute.',
     fallback: 'folder',
     why: 'Yarn 1 cleans its own cache folder, wherever yarn cache dir points.',
@@ -199,6 +222,8 @@ const SPECS = Object.freeze({
     lockFiles: null,
     lockOutput: null,
     timeoutMs: 5 * MIN,
+    atomic: false,
+    atomicAuto: false,
     duration: 'Seconds.',
     fallback: 'folder',
     why: 'CocoaPods removes every cached pod and spec itself, without asking per pod.',
@@ -215,13 +240,19 @@ const SPECS = Object.freeze({
     locate: ['--cache'],
     preview: 'brew-dry-run',
     previewArgs: ['cleanup', '--prune=all', '--dry-run'],
-    env: { HOMEBREW_NO_AUTO_UPDATE: '1', HOMEBREW_NO_INSTALL_CLEANUP: '1', HOMEBREW_NO_ENV_HINTS: '1', HOMEBREW_NO_ANALYTICS: '1' },
+    // brew cleanup --prune=all also runs `brew autoremove`, which UNINSTALLS
+    // formulae nothing depends on, unless HOMEBREW_NO_AUTOREMOVE is set
+    // (Library/Homebrew/cleanup.rb, env_config.rb). The env reaches the dry run
+    // and the run alike, and the dry run is checked for "Would autoremove"
+    // before every run in case a Homebrew version ignores it.
+    env: { HOMEBREW_NO_AUTOREMOVE: '1', HOMEBREW_NO_AUTO_UPDATE: '1', HOMEBREW_NO_INSTALL_CLEANUP: '1', HOMEBREW_NO_ENV_HINTS: '1', HOMEBREW_NO_ANALYTICS: '1' },
     busy: { names: ['brew'] },
     lockFiles: null,
     lockOutput: /has already locked|another active homebrew/i,
     // Old versions are removed from the Cellar and Caskroom too: measured.
     measureFromBin: ['Cellar', 'Caskroom'],
     timeoutMs: 15 * MIN,
+    atomic: true,
     duration: 'Under a minute usually; several minutes with many old versions.',
     fallback: 'folder',
     why: 'Removes every download and old formula and cask version Homebrew no longer needs. It keeps pinned and linked versions.',
@@ -242,6 +273,7 @@ const SPECS = Object.freeze({
     lockFiles: null,
     lockOutput: null,
     timeoutMs: 0,
+    atomic: true,
     duration: 'The folder delete only.',
     fallback: 'folder',
     why: 'npm cache clean deletes this same folder, and only with --force. Spaci empties the folder itself and never passes --force.',
@@ -260,6 +292,7 @@ const SPECS = Object.freeze({
     lockFiles: null,
     lockOutput: null,
     timeoutMs: 0,
+    atomic: true,
     duration: 'The folder delete only.',
     fallback: 'folder',
     why: 'Cargo has no stable command to clear its registry cache (cargo clean gc is unstable). Cargo restores deleted archives and sources itself.',
@@ -268,6 +301,35 @@ const SPECS = Object.freeze({
 });
 
 const PREVIEW_TIMEOUT_MS = 30 * 1000;
+// A non-atomic command is never killed: after this long Spaci only says it is
+// still running and keeps waiting (main waits NON_ATOMIC_WAIT_MS in all).
+const NON_ATOMIC_REPORT_MS = 20 * MIN;
+const NON_ATOMIC_WAIT_MS = 4 * 60 * MIN;
+const INCOMPLETE_MESSAGE = 'Incomplete: run the clean again before building.';
+
+/**
+ * ATOMICITY. Whether stopping a command part way leaves a cache its tool still
+ * reads correctly (sources: docs/native-cleanup-sources.md, "Stopping part way"):
+ *
+ *   atomic      pnpm store prune  removes only unreferenced files; pnpm checks
+ *                                 store integrity and refetches a missing file
+ *               go clean -cache   each entry is checked by size and hash; a
+ *                                 missing output is a cache miss
+ *               pip cache purge   independent wheel and HTTP files
+ *               gradle --stop     only stops daemons
+ *               brew cleanup      old kegs are unlinked; downloads are files
+ *   non-atomic  go clean -modcache  an extracted module folder half removed is
+ *                                 still read as complete by the go command
+ *               uv cache clean/prune  archive folders are linked into venvs
+ *                                 as a whole; a half removed one breaks them
+ *               yarn cache clean  a package folder keeps its metadata file
+ *                                 while its files go, and Yarn 1 trusts it
+ *               pod cache clean   a half removed pod folder is still used
+ */
+function isAtomic(spec, mode = 'manual') {
+  if (!spec) return true;
+  return mode === 'auto' ? spec.atomicAuto === true : spec.atomic === true;
+}
 
 function specFor(id) {
   return typeof id === 'string' && Object.prototype.hasOwnProperty.call(SPECS, id) ? SPECS[id] : null;
@@ -316,8 +378,13 @@ function describe(id) {
 
 // Every spec must pass its own rules, checked once at load.
 for (const [id, spec] of Object.entries(SPECS)) {
-  for (const a of [spec.run, spec.autoRun, spec.locate, spec.previewArgs, spec.versionArgs]) if (a) validateArgs(a);
+  for (const a of [spec.run, spec.autoRun, spec.locate, spec.previewArgs, spec.versionArgs, spec.status]) if (a) validateArgs(a);
   if (spec.via !== 'folder' && (!spec.bins.length || !spec.run)) throw new Error('Native cleanup spec ' + id + ' has no command.');
+  if (typeof spec.atomic !== 'boolean') throw new Error('Native cleanup spec ' + id + ' does not say whether it is atomic.');
+  if (spec.autoRun && typeof spec.atomicAuto !== 'boolean') throw new Error('Native cleanup spec ' + id + ' does not say whether its auto command is atomic.');
 }
 
-module.exports = { SPECS, MIN, PREVIEW_TIMEOUT_MS, SAFE_ARG, FORBIDDEN_ARGS, NODE_INSTALLS, specFor, argsFor, validateArgs, commandLine, describe };
+module.exports = {
+  SPECS, MIN, PREVIEW_TIMEOUT_MS, NON_ATOMIC_REPORT_MS, NON_ATOMIC_WAIT_MS, INCOMPLETE_MESSAGE, SAFE_ARG, FORBIDDEN_ARGS, NODE_INSTALLS,
+  specFor, argsFor, validateArgs, commandLine, describe, isAtomic,
+};

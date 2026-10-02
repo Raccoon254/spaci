@@ -26,6 +26,7 @@ const { spawn: nodeSpawn, execFile } = require('child_process');
 const specs = require('./native-cleanup-specs');
 const { processList } = require('./devtools/processes');
 const util = require('./devtools/util');
+const { unsafeCachePath } = require('./cache-path-guard');
 
 const OUTPUT_TAIL = 4000;
 const KILL_GRACE_MS = 3000;
@@ -40,38 +41,88 @@ function baseCtx(o = {}) {
     env: o.env || process.env,
     home: o.home || require('os').homedir(),
     selfPid: o.selfPid || process.pid,
+    listDir: o.listDir || defaultListDir,
   };
 }
 
 // ---- finding the CLI --------------------------------------------------------
 
+function defaultListDir(dir) {
+  try { return fs.readdirSync(dir); } catch { return []; }
+}
+
+// "v20.11.1" -> [20, 11, 1]; newest first.
+function byVersionDesc(a, b) {
+  const v = (s) => String(s).replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const x = v(a);
+  const y = v(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (y[i] || 0) - (x[i] || 0);
+  return 0;
+}
+
 /**
  * Folders a GUI app's PATH usually lacks. A Finder-launched app gets only
  * /usr/bin:/bin:/usr/sbin:/sbin, so pnpm from Homebrew or uv from ~/.local/bin
- * would read as missing without these.
+ * would read as missing without these. Version managers too: nvm and fnm keep
+ * node (and npm-installed pnpm, yarn) per version; volta, asdf, mise, pyenv
+ * and pipx put shims or links in one folder each.
+ *
+ * Only tool folders under home or the system: never a project folder, never
+ * the home folder or a root itself, even when an env variable says so.
  */
-function extraBinDirs({ platform, env, home }) {
+function extraBinDirs({ platform, env, home, listDir = defaultListDir }) {
   const api = apiFor(platform);
   const h = (...p) => api.join(home, ...p);
+  // An env override counts only when it is absolute and not a root or home.
+  const envDir = (name, ...p) => {
+    const v = env[name];
+    if (!v || !api.isAbsolute(v) || unsafeCachePath(v, { home, platform })) return null;
+    return p.length ? api.join(v, ...p) : v;
+  };
+  const nvmBins = (dir) => {
+    const root = api.join(dir, 'versions', 'node');
+    return listDir(root).filter((n) => /^v?\d+\.\d+/.test(n)).sort(byVersionDesc).map((n) => api.join(root, n, 'bin'));
+  };
   if (platform === 'win32') {
     const local = env.LOCALAPPDATA;
     const roaming = env.APPDATA;
     const pf = env.ProgramFiles || 'C:\\Program Files';
     return [
+      envDir('PNPM_HOME'),
       roaming && api.join(roaming, 'npm'), local && api.join(local, 'pnpm'), h('.cargo', 'bin'), h('.local', 'bin'),
       api.join(pf, 'Go', 'bin'), h('go', 'bin'), local && api.join(local, 'Yarn', 'bin'), h('scoop', 'shims'),
+      // nvm-windows links the active version here; fnm, volta, mise, pyenv-win.
+      envDir('NVM_SYMLINK'),
+      envDir('FNM_DIR', 'aliases', 'default'), roaming && api.join(roaming, 'fnm', 'aliases', 'default'),
+      envDir('VOLTA_HOME', 'bin'), local && api.join(local, 'Volta', 'bin'),
+      envDir('MISE_DATA_DIR', 'shims'), local && api.join(local, 'mise', 'shims'),
+      envDir('PYENV_ROOT', 'pyenv-win', 'shims'), h('.pyenv', 'pyenv-win', 'shims'),
+      envDir('PIPX_BIN_DIR'),
     ].filter(Boolean);
   }
-  const common = [h('.local', 'bin'), h('.cargo', 'bin'), h('go', 'bin'), h('.volta', 'bin'), h('.bun', 'bin'), '/usr/local/go/bin', '/usr/local/bin'];
-  if (platform === 'darwin') return ['/opt/homebrew/bin', h('Library', 'pnpm'), ...common, '/opt/local/bin', '/usr/bin'];
-  return [h('.local', 'share', 'pnpm'), ...common, '/home/linuxbrew/.linuxbrew/bin', h('.linuxbrew', 'bin'), '/snap/bin', '/usr/bin', '/bin'];
+  const dataHome = envDir('XDG_DATA_HOME') || h('.local', 'share');
+  const managers = [
+    envDir('NVM_BIN'), ...nvmBins(envDir('NVM_DIR') || h('.nvm')),
+    envDir('FNM_DIR', 'aliases', 'default', 'bin'),
+    platform === 'darwin' ? h('Library', 'Application Support', 'fnm', 'aliases', 'default', 'bin') : api.join(dataHome, 'fnm', 'aliases', 'default', 'bin'),
+    h('.fnm', 'aliases', 'default', 'bin'),
+    envDir('VOLTA_HOME', 'bin'),
+    envDir('ASDF_DATA_DIR', 'shims'), h('.asdf', 'shims'),
+    envDir('MISE_DATA_DIR', 'shims'), api.join(dataHome, 'mise', 'shims'),
+    envDir('PYENV_ROOT', 'shims'), h('.pyenv', 'shims'),
+    envDir('PIPX_BIN_DIR'),
+  ];
+  const common = [h('.local', 'bin'), h('.cargo', 'bin'), h('go', 'bin'), h('.volta', 'bin'), h('.bun', 'bin'), ...managers, '/usr/local/go/bin', '/usr/local/bin'];
+  if (platform === 'darwin') return ['/opt/homebrew/bin', envDir('PNPM_HOME'), h('Library', 'pnpm'), ...common, '/opt/local/bin', '/usr/bin'].filter(Boolean);
+  return [envDir('PNPM_HOME'), h('.local', 'share', 'pnpm'), ...common, '/home/linuxbrew/.linuxbrew/bin', h('.linuxbrew', 'bin'), '/snap/bin', '/usr/bin', '/bin'].filter(Boolean);
 }
 
 function searchDirs(ctx) {
   const sep = ctx.platform === 'win32' ? ';' : ':';
   const fromEnv = String(ctx.env.PATH || ctx.env.Path || '').split(sep);
   const api = apiFor(ctx.platform);
-  return uniq([...fromEnv, ...extraBinDirs(ctx)]).filter((d) => api.isAbsolute(d));
+  // Relative entries ('.', node_modules/.bin) would resolve against a project.
+  return uniq([...fromEnv, ...extraBinDirs({ ...ctx, listDir: ctx.listDir })]).filter((d) => api.isAbsolute(d));
 }
 
 async function defaultIsExecutable(p) {
@@ -106,19 +157,80 @@ async function resolveBin(names, o = {}) {
 
 // ---- busy detection ---------------------------------------------------------
 
-function base(p) { return String(p || '').split(/[\\/]/).pop(); }
+function base(p) { return String(p || '').replace(/["']/g, '').split(/[\\/]/).pop(); }
+
+/** A command line split into arguments: double quotes group, and are removed. */
+function tokenize(text) {
+  const toks = [];
+  let cur = '';
+  let quoted = false;
+  let has = false;
+  for (const ch of String(text || '')) {
+    if (ch === '"') { quoted = !quoted; has = true; continue; }
+    if (!quoted && /\s/.test(ch)) { if (has) toks.push(cur); cur = ''; has = false; continue; }
+    cur += ch;
+    has = true;
+  }
+  if (has) toks.push(cur);
+  return toks;
+}
+
+const isAbsPath = (t) => /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(t);
+const SCRIPT_EXT = /\.(?:exe|cmd|bat|c?js|mjs|rb|sh|py)$/i;
+
+/**
+ * ps prints arguments joined by spaces without quotes, so a path with a space
+ * (/Users/Bob Smith/.local/bin/uv) arrives as several tokens. From an absolute
+ * path token, glue on the following tokens while they continue a path: they
+ * hold a separator and are not a flag or a new path; or, when a later token
+ * ends in an executable or script extension, up to that token.
+ */
+function joinPath(toks, i) {
+  if (i >= toks.length || !isAbsPath(toks[i])) return toks;
+  if (SCRIPT_EXT.test(toks[i])) return toks;
+  let k = i;
+  // Within a few tokens, a path piece ending in .exe/.cjs/.py...: the whole
+  // path. Only for a script after a host, or a Windows executable.
+  const ext = toks.findIndex((t, j) => j > i && j <= i + 4 && SCRIPT_EXT.test(t) && /[\\/]/.test(t) && !/^[-.]/.test(t));
+  const extOk = ext > i && (i > 0 || /^[A-Za-z]:/.test(toks[i]))
+    && toks.slice(i + 1, ext + 1).every((t) => !t.startsWith('-') && !isAbsPath(t));
+  if (extOk) k = ext;
+  else {
+    while (k + 1 < toks.length && /[\\/]/.test(toks[k + 1]) && !/^[-./\\]/.test(toks[k + 1]) && !isAbsPath(toks[k + 1])) k++;
+  }
+  if (k === i) return toks;
+  return [...toks.slice(0, i), toks.slice(i, k + 1).join(' '), ...toks.slice(k + 1)];
+}
+
+// Host flags whose value is the next argument (node -r x, java -cp x).
+const VALUE_FLAGS = new Set(['-r', '--require', '--import', '--loader', '--experimental-loader', '-cp', '-classpath', '--class-path', '-W', '-X']);
+
+// The script a package manager's launcher runs, by its file name.
+function scriptName(n) {
+  if (/^npm-cli$/.test(n)) return 'npm';
+  if (/^npx-cli$/.test(n)) return 'npx';
+  if (/^pnpm(?:-\d[\w.-]*)?$/.test(n)) return 'pnpm';
+  if (/^pnpx$/.test(n)) return 'pnpx';
+  // Yarn berry's checked-in release (.yarn/releases/yarn-4.5.0.cjs), yarn.js.
+  if (/^yarn(?:-\d[\w.-]*)?$/.test(n)) return 'yarn';
+  return n;
+}
 
 /**
  * The command a process runs: { name, sub } where name is the executable, or
  * the script a node/python/ruby/bash host runs, without extension, and sub is
- * its first non-flag argument.
+ * its first non-flag argument. Windows command lines quote paths with spaces
+ * ("C:\Program Files\nodejs\node.exe" "C:\...\pnpm.cjs" install) and npm's
+ * cmd-shim launches node on npm-cli.js, pnpm.cjs or yarn.js: all read as the
+ * package manager.
  */
 function commandOf(args) {
-  let text = String(args || '').trim();
-  // A Windows executable path may hold spaces (C:\Program Files\Go\bin\go.exe).
-  const win = /^"?([A-Za-z]:\\.*?\.(?:exe|cmd|bat))"?(?=\s|$)/i.exec(text);
-  if (win) text = win[1].replace(/\s/g, '_') + text.slice(win[0].length);
-  const toks = text.split(/\s+/).filter(Boolean);
+  const text = String(args || '').trim();
+  let toks = tokenize(text);
+  // An unquoted Windows executable path with spaces: C:\Program Files\Go\bin\go.exe build
+  const win = /^([A-Za-z]:\\[^"]*?\.(?:exe|cmd|bat))(?=\s|$)/i.exec(text);
+  if (win && !text.startsWith('"')) toks = [win[1], ...tokenize(text.slice(win[0].length))];
+  else toks = joinPath(toks, 0);
   if (!toks.length) return { name: '', sub: null };
   let i = 0;
   let name = base(toks[0]).replace(/\.exe$/i, '');
@@ -127,11 +239,15 @@ function commandOf(args) {
     while (i < toks.length && toks[i].startsWith('-')) {
       // `python -m pip`: the module is the command.
       if (toks[i] === '-m' && toks[i + 1]) { i++; break; }
+      if (VALUE_FLAGS.has(toks[i])) i++;
       i++;
+      // `--max-old-space-size 4096`: a bare number is a flag's value, not a script.
+      while (i < toks.length && /^\d+$/.test(toks[i])) i++;
     }
+    toks = joinPath(toks, i);
     name = i < toks.length ? base(toks[i]) : name;
   }
-  name = name.replace(/\.(exe|cmd|bat|c?js|mjs|rb|sh|py)$/i, '').toLowerCase();
+  name = scriptName(name.replace(SCRIPT_EXT, '').toLowerCase());
   let sub = null;
   for (let k = i + 1; k < toks.length; k++) {
     if (!toks[k].startsWith('-')) { sub = toks[k].toLowerCase(); break; }
@@ -276,7 +392,40 @@ function parseBrewDryRun(stdout) {
   const units = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4 };
   const bytes = m ? Math.round(parseFloat(m[1]) * (units[m[2].toUpperCase()] || 1)) : 0;
   const items = (text.match(/^Would remove: /gm) || []).length;
-  return { bytes, items };
+  // brew cleanup runs `brew autoremove` too (uninstalls formulae), unless
+  // HOMEBREW_NO_AUTOREMOVE is set. Its dry run says "==> Would autoremove N
+  // unneeded formulae:". Spaci sets the variable; this catches a Homebrew that
+  // ignores it.
+  const autoremove = /^(?:==>\s*)?Would autoremove\b/im.test(text) || /^(?:==>\s*)?Autoremoving\b/im.test(text);
+  return { bytes, items, autoremove };
+}
+
+const BREW_AUTOREMOVE_MESSAGE = 'Homebrew said its cleanup would also uninstall formulae (autoremove), so Spaci left it alone. Run brew cleanup yourself to choose.';
+
+/**
+ * `gradle --status`:
+ *      PID STATUS   INFO
+ *    82033 IDLE     8.5
+ *    81852 BUSY     8.5
+ * or "No Gradle daemons are running." -> { ok, daemons:[{pid,status}], busy:[pid] }.
+ * ok is false when the output cannot be read: the caller then refuses.
+ * Only IDLE and STOPPED daemons are safe to stop; BUSY, CANCELED (a build
+ * still winding down), STOPPING and anything unknown are not.
+ */
+function parseGradleStatus(stdout) {
+  const text = util.stripAnsi(stdout);
+  const daemons = [];
+  let header = false;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (/^PID\s+STATUS\b/i.test(line)) { header = true; continue; }
+    const m = /^(\d+)\s+([A-Z_]+)\b/.exec(line);
+    if (header && m) daemons.push({ pid: Number(m[1]), status: m[2] });
+  }
+  const none = /No Gradle daemons are running/i.test(text);
+  if (!header && !none) return { ok: false, daemons: [], busy: [] };
+  const busy = daemons.filter((d) => d.status !== 'IDLE' && d.status !== 'STOPPED').map((d) => d.pid);
+  return { ok: true, daemons, busy };
 }
 
 // ---- running a command ------------------------------------------------------
@@ -306,6 +455,11 @@ function killTree(child, platform, exec) {
 /**
  * Spawn bin with constant args. Resolves { exitCode, signal, timedOut,
  * cancelled, lockWait, missing, output } and never rejects.
+ *
+ * `o.atomic === false` (a command that must not stop part way): the signal is
+ * ignored and the timeout only calls `o.onSlow(ms)`; the command is never
+ * killed by Spaci, except when it says it waits for a lock, which happens
+ * before it removes anything.
  */
 function runCommand(bin, args, o = {}) {
   const ctx = baseCtx(o);
@@ -325,6 +479,7 @@ function runCommand(bin, args, o = {}) {
       if (o.signal) o.signal.removeEventListener('abort', onAbort);
       resolve({ timedOut, cancelled, lockWait, missing: false, output: output.slice(-OUTPUT_TAIL), ...r });
     };
+    const atomic = o.atomic !== false;
     const onAbort = () => { cancelled = true; killTree(child, ctx.platform, o.exec); };
     // .cmd and .bat need a shell on Windows (Node refuses them otherwise). The
     // arguments are validated constants, so the shell sees no user input.
@@ -341,8 +496,11 @@ function runCommand(bin, args, o = {}) {
       resolve({ exitCode: null, signal: null, timedOut: false, cancelled: false, lockWait: false, missing: e && e.code === 'ENOENT', output: String((e && e.message) || e) });
       return;
     }
-    const timer = setTimeout(() => { timedOut = true; killTree(child, ctx.platform, o.exec); }, o.timeoutMs || 10 * 60 * 1000);
-    if (o.signal) {
+    const timeoutMs = o.timeoutMs || 10 * 60 * 1000;
+    const timer = atomic
+      ? setTimeout(() => { timedOut = true; killTree(child, ctx.platform, o.exec); }, timeoutMs)
+      : setTimeout(() => { if (o.onSlow) { try { o.onSlow(timeoutMs); } catch { /* best effort */ } } }, timeoutMs);
+    if (o.signal && atomic) {
       if (o.signal.aborted) onAbort();
       else o.signal.addEventListener('abort', onAbort, { once: true });
     }
@@ -375,8 +533,8 @@ function pickLocated(stdout, ctx) {
   const line = String(stdout || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop();
   if (!line || !api.isAbsolute(line)) return null;
   const norm = api.resolve(line);
-  // Never the root or the home folder itself: those are not a cache.
-  if (norm === api.parse(norm).root || norm === api.resolve(ctx.home)) return null;
+  // Never a root, the home folder, a folder holding it, or /Users: not a cache.
+  if (unsafeCachePath(norm, { home: ctx.home, platform: ctx.platform })) return null;
   return norm;
 }
 
@@ -401,9 +559,14 @@ function existing(paths) {
   return (paths || []).filter((p) => typeof p === 'string' && p && fs.existsSync(p));
 }
 
-function measureDirs(spec, target, located, bin, platform) {
+/** Target paths that may be treated as a cache folder (cache-path-guard). */
+function safePaths(paths, ctx) {
+  return (paths || []).filter((p) => typeof p === 'string' && !unsafeCachePath(p, { home: ctx.home, platform: ctx.platform }));
+}
+
+function measureDirs(spec, target, located, bin, platform, home) {
   const api = apiFor(platform);
-  const dirs = [...existing(target.paths), ...(located ? [located] : [])];
+  const dirs = [...existing(safePaths(target.paths, { platform, home })), ...(located ? [located] : [])];
   if (bin && Array.isArray(spec.measureFromBin)) {
     const prefix = api.dirname(api.dirname(bin));
     for (const name of spec.measureFromBin) dirs.push(api.join(prefix, name));
@@ -430,7 +593,7 @@ async function preview(target, o = {}) {
     out.via = 'folder';
     out.label = 'Empties the folder';
     out.note = note;
-    out.estimate = await m(existing(target.paths));
+    out.estimate = await m(existing(safePaths(target.paths, ctx)));
     return out;
   };
   if (spec.via === 'folder') { await folder(spec.why); out.label = specs.describe(target.id).label; return out; }
@@ -464,9 +627,10 @@ async function preview(target, o = {}) {
       out.estimate = p.bytes;
       out.estimateKind = 'dry-run';
       out.note = `brew cleanup --dry-run lists ${p.items} ${p.items === 1 ? 'item' : 'items'}.`;
+      if (p.autoremove) out.blocked = BREW_AUTOREMOVE_MESSAGE;
     }
   }
-  if (out.estimate === null) out.estimate = await m(measureDirs(spec, target, out.located, null, ctx.platform));
+  if (out.estimate === null) out.estimate = await m(measureDirs(spec, target, out.located, null, ctx.platform, ctx.home));
   return out;
 }
 
@@ -476,11 +640,19 @@ async function preview(target, o = {}) {
  * Clean one target with its tool. `opts.folderJobs` are the guarded clean jobs
  * for the target's folders, used for 'stop-then-folder', 'folder' and the
  * missing-CLI fallback; `opts.deleteFolders(jobs, onProgress)` empties them
- * (cleaner.clean in the worker).
+ * (cleaner.clean in the worker). Mode 'auto' never empties a folder: anything
+ * but the tool's own auto command answers 'missing' or 'not-auto', and
+ * auto-clean stages the folder instead.
+ *
+ * The tool is checked for busy at the start, again with a fresh process list
+ * and lock check right before its command, and again right before a folder is
+ * emptied: measuring can take minutes.
  *
  * Resolves { ok, id, code, via, command, exitCode, before, after, freed,
  * message, output } and never rejects. code: 'done' | 'busy' | 'missing' |
- * 'timeout' | 'cancelled' | 'failed' | 'not-auto' | 'invalid'.
+ * 'timeout' | 'cancelled' | 'failed' | 'incomplete' | 'unsafe' | 'not-auto' |
+ * 'invalid'. 'incomplete': a non-atomic command stopped part way (killed from
+ * outside or failed); the cache must be cleaned again before the tool uses it.
  */
 async function runNative(target, o = {}) {
   const spec = specs.specFor(target && target.id);
@@ -489,10 +661,16 @@ async function runNative(target, o = {}) {
   const ctx = baseCtx(o);
   const mode = o.mode === 'auto' ? 'auto' : 'manual';
   const args = specs.argsFor(spec, mode);
-  if (mode === 'auto' && !args && spec.via !== 'folder') return res({ code: 'not-auto', message: 'Auto-clean leaves this to you.' });
+  // Auto-clean runs a tool's own gentle command or nothing: never a permanent
+  // folder delete. A folder-only target is staged by auto-clean itself.
+  if (mode === 'auto' && (!args || spec.via !== 'native')) return res({ code: 'not-auto', message: 'Auto-clean leaves this to you.' });
+  const atomic = specs.isAtomic(spec, mode);
   const progress = (p) => { if (o.onProgress) { try { o.onProgress({ target: target.id, ...p }); } catch { /* best effort */ } } };
   const m = o.measure || ((dirs) => measure(dirs, o));
   const snapshot = o.snapshot || (() => processList({ platform: ctx.platform, exec: o.exec }));
+  const holdersOf = o.lockHolders || lockHolders;
+  const run = o.runCommand || runCommand;
+  const paths = safePaths(target.paths, ctx);
 
   // 1. Busy: a running process of the tool. Fails closed.
   const procs = await snapshot();
@@ -505,80 +683,130 @@ async function runNative(target, o = {}) {
   const bin = via === 'folder' ? null : await resolveBin(spec.bins, o);
   const env = bin ? childEnv(spec, bin, ctx) : null;
   if (bin && spec.versionArgs && (await yarnVariant(spec, bin, { ...o, env })) === 'berry') {
+    if (mode === 'auto') return res({ code: 'not-auto', message: 'Yarn 2 and later clean only inside a project, so auto-clean did not run it.' });
     via = 'folder';
     note = 'Yarn 2 and later clean only inside a project, so Spaci emptied the global cache folder.';
   }
   if (via !== 'folder' && !bin) {
+    if (mode === 'auto') return res({ code: 'missing', message: `${spec.tool} was not found, so auto-clean did not run it.` });
     if (spec.fallback !== 'folder') return res({ code: 'missing', message: `${spec.tool} was not found, so nothing was cleaned.` });
     via = 'folder';
     note = `${spec.tool} was not found, so Spaci emptied the folder instead.`;
   }
   const located = via !== 'folder' ? await locate(spec, bin, { ...o, env }) : null;
 
-  // 3. Busy: another process holds the cache lock open.
-  if (spec.lockFiles) {
-    const dirs = located ? [located] : existing(target.paths);
+  const lockBusy = async () => {
+    if (!spec.lockFiles) return false;
+    const dirs = located ? [located] : existing(paths);
     const files = dirs.flatMap((d) => spec.lockFiles.map((f) => path.join(d, f)));
-    const holders = await (o.lockHolders || lockHolders)(files, o);
-    if (holders.length) return res({ code: 'busy', message: busyMessage(spec, 'lock') });
-  }
+    return (await holdersOf(files, o)).length > 0;
+  };
+  // Busy again, now: a fresh process list, the lock file, and (before a folder
+  // is emptied) any Gradle daemon. Returns the reason, or null when idle.
+  const recheck = async ({ daemons = false } = {}) => {
+    let p;
+    try { p = await snapshot(); } catch { p = null; }
+    const b = checkBusy(spec, p, ctx.selfPid);
+    if (b.busy) return b.reason;
+    if (await lockBusy()) return busyMessage(spec, 'lock');
+    if (daemons && spec.daemonRe && daemonPids(spec, p, ctx.selfPid).length) {
+      return via === 'stop-then-folder' ? busyMessage(spec, 'daemon') : `${spec.tool} is busy (a Gradle daemon is running). Try again when it stops.`;
+    }
+    return null;
+  };
+
+  // 3. Busy: another process holds the cache lock open.
+  if (await lockBusy()) return res({ code: 'busy', message: busyMessage(spec, 'lock') });
   // Gradle without its CLI: daemons cannot be stopped, so any running one is busy.
   if (spec.daemonRe && (via === 'folder' || !bin) && daemonPids(spec, procs, ctx.selfPid).length) {
     return res({ code: 'busy', message: `${spec.tool} is busy (a Gradle daemon is running). Try again when it stops.` });
   }
 
-  const dirs = measureDirs(spec, target, located, via === 'folder' ? null : bin, ctx.platform);
+  const dirs = measureDirs(spec, target, located, via === 'folder' ? null : bin, ctx.platform, ctx.home);
   const before = await m(dirs);
   const command = via === 'folder' ? null : [base(bin).replace(/\.(exe|cmd|bat)$/i, ''), ...args].join(' ');
   let exitCode = null;
   let output = '';
+  const partly = async (fields) => { const a = await m(dirs); return res({ via, command, exitCode, before, after: a, freed: Math.max(0, before - a), output, ...fields }); };
+  const refuse = (fields) => res({ via, command, before, after: before, ...fields });
 
   // 4. The tool's own command.
   if (via === 'native' || via === 'stop-then-folder') {
-    progress({ phase: 'native-start', command });
-    const r = await (o.runCommand || runCommand)(bin, args, {
-      ...o, env, cwd: ctx.home, timeoutMs: o.timeoutMs || spec.timeoutMs, lockOutput: spec.lockOutput,
+    // Measuring may have taken minutes: is the tool still idle, right now?
+    const now = await recheck();
+    if (now) return refuse({ code: 'busy', message: now });
+    const quiet = { ...o, env, cwd: ctx.home, timeoutMs: specs.PREVIEW_TIMEOUT_MS, lockOutput: spec.lockOutput || null, onLine: null, atomic: true };
+    // Gradle: gradle --stop would kill a daemon mid build. Ask first, read only.
+    if (spec.status) {
+      const st = await run(bin, spec.status, quiet);
+      const g = st.exitCode === 0 ? parseGradleStatus(st.output) : { ok: false, busy: [] };
+      if (!g.ok) return refuse({ code: 'busy', message: `Spaci could not read ${[base(bin).replace(/\.(exe|cmd|bat)$/i, ''), ...spec.status].join(' ')}, so it left ${spec.tool} alone.` });
+      if (g.busy.length) return refuse({ code: 'busy', message: `${spec.tool} is busy (a Gradle daemon is running a build). Try again when the build finishes.` });
+    }
+    // Homebrew: the dry run must not plan an autoremove, even with the env set.
+    if (spec.preview === 'brew-dry-run' && spec.previewArgs) {
+      const dr = await run(bin, spec.previewArgs, { ...quiet, timeoutMs: 2 * 60 * 1000 });
+      if (dr.lockWait) return refuse({ code: 'busy', message: busyMessage(spec, 'process') });
+      if (dr.exitCode !== 0) return refuse({ code: 'failed', message: `${[base(bin), ...spec.previewArgs].join(' ')} failed, so Spaci did not run the cleanup.` });
+      if (parseBrewDryRun(dr.output).autoremove) return refuse({ code: 'unsafe', message: BREW_AUTOREMOVE_MESSAGE });
+    }
+    if (o.signal && o.signal.aborted) return refuse({ code: 'cancelled', message: `Stopped before ${command} started.` });
+    const reportMs = o.reportAfterMs || specs.NON_ATOMIC_REPORT_MS;
+    progress({ phase: 'native-start', command, atomic });
+    const r = await run(bin, args, {
+      ...o, env, cwd: ctx.home, lockOutput: spec.lockOutput, atomic,
+      // A non-atomic command is never cancelled or killed on timeout.
+      timeoutMs: atomic ? (o.timeoutMs || spec.timeoutMs) : reportMs,
+      signal: atomic ? o.signal : undefined,
+      onSlow: (ms) => {
+        const mins = Math.max(1, Math.round(ms / 60000));
+        progress({ phase: 'native', command, line: `Still running after ${mins} ${mins === 1 ? 'minute' : 'minutes'}. Spaci waits for it: stopping it part way would leave a broken cache.` });
+      },
       onLine: (line) => progress({ phase: 'native', command, line }),
     });
     exitCode = r.exitCode;
     output = r.output || '';
-    const after = async () => m(dirs);
-    const partly = async (fields) => { const a = await after(); return res({ via, command, exitCode, before, after: a, freed: Math.max(0, before - a), output, ...fields }); };
+    const last = output.trim().split(/\r?\n/).filter(Boolean).pop() || '';
     if (r.missing) {
+      if (mode === 'auto') return res({ code: 'missing', command, message: `${spec.tool} could not be started, so auto-clean did not run it.` });
       if (spec.fallback !== 'folder') return res({ code: 'missing', command, message: `${spec.tool} could not be started.` });
       via = 'folder';
       note = `${spec.tool} could not be started, so Spaci emptied the folder instead.`;
     } else if (r.lockWait) {
+      // Said before it removed anything: it was waiting for the lock.
       return partly({ code: 'busy', message: busyMessage(spec, 'process') });
+    } else if (!atomic && (r.cancelled || r.timedOut || r.signal || exitCode !== 0)) {
+      const why = r.signal ? `${command} was stopped (${r.signal})` : `${command} exited with ${exitCode === null ? 'a signal' : 'status ' + exitCode}${last ? ': ' + last.slice(0, 300) : ''}`;
+      return partly({ code: 'incomplete', message: `${specs.INCOMPLETE_MESSAGE} ${why}.` });
     } else if (r.cancelled) {
       return partly({ code: 'cancelled', message: `Stopped: ${command} was cancelled.` });
     } else if (r.timedOut) {
       const mins = Math.max(1, Math.round((o.timeoutMs || spec.timeoutMs) / 60000));
       return partly({ code: 'timeout', message: `${command} did not finish in ${mins} ${mins === 1 ? 'minute' : 'minutes'}, so Spaci stopped it.` });
     } else if (exitCode !== 0) {
-      const last = output.trim().split(/\r?\n/).filter(Boolean).pop() || '';
       return partly({ code: 'failed', message: `${command} exited with ${exitCode === null ? 'a signal' : 'status ' + exitCode}${last ? ': ' + last.slice(0, 300) : '.'}` });
-    }
-    if (via === 'stop-then-folder') {
-      // Daemons of other Gradle versions survive gradle --stop.
-      const again = await snapshot();
-      if (!again || !again.ok) return partly({ code: 'busy', message: busyMessage(spec, 'unknown') });
-      if (checkBusy(spec, again, ctx.selfPid).busy) return partly({ code: 'busy', message: busyMessage(spec, 'process') });
-      if (daemonPids(spec, again, ctx.selfPid).length) return partly({ code: 'busy', message: busyMessage(spec, 'daemon') });
     }
   }
 
-  // 5. The folder, when that is the plan or the fallback.
+  // 5. The folder, when that is the plan or the fallback (never in auto mode).
   let folderError = null;
   if (via === 'folder' || via === 'stop-then-folder') {
-    const jobs = Array.isArray(o.folderJobs) ? o.folderJobs : [];
-    if (!jobs.length || typeof o.deleteFolders !== 'function') {
+    if (mode === 'auto') return res({ code: 'not-auto', message: 'Auto-clean leaves this to you.' });
+    const all = Array.isArray(o.folderJobs) ? o.folderJobs : [];
+    const unsafe = all.map((j) => ({ j, why: unsafeCachePath(j && j.path, { home: ctx.home, platform: ctx.platform }) })).find((x) => x.why);
+    if (unsafe) {
+      folderError = `Spaci will not empty ${unsafe.j && unsafe.j.path}: ${unsafe.why}.`;
+    } else if (!all.length || typeof o.deleteFolders !== 'function') {
       folderError = 'Spaci had no folder to empty.';
     } else {
+      // The last word before anything is deleted: idle now, no daemon left
+      // (daemons of other Gradle versions survive gradle --stop).
+      const now = await recheck({ daemons: true });
+      if (now) return partly({ code: 'busy', message: now });
       progress({ phase: 'folder-start' });
       if (o.signal && o.signal.aborted) folderError = 'Stopped before the folder was emptied.';
       else {
-        const d = await o.deleteFolders(jobs, (p) => progress({ phase: 'folder', ...p }));
+        const d = await o.deleteFolders(all, (p) => progress({ phase: 'folder', ...p }));
         const bad = (d && Array.isArray(d.results) ? d.results : []).find((x) => !x.ok && !x.missing);
         if (bad) folderError = bad.error || 'Part of the folder could not be removed.';
       }
@@ -592,7 +820,7 @@ async function runNative(target, o = {}) {
 }
 
 module.exports = {
-  extraBinDirs, searchDirs, resolveBin, commandOf, busyProcesses, checkBusy, busyMessage, daemonPids, lockHolders,
-  outermost, parseDuTotal, measure, pnpmUnreferenced, parseBrewDryRun, childEnv, runCommand, pickLocated, locate,
-  yarnVariant, measureDirs, preview, runNative,
+  extraBinDirs, searchDirs, resolveBin, tokenize, commandOf, busyProcesses, checkBusy, busyMessage, daemonPids, lockHolders,
+  outermost, parseDuTotal, measure, pnpmUnreferenced, parseBrewDryRun, parseGradleStatus, BREW_AUTOREMOVE_MESSAGE, childEnv,
+  runCommand, pickLocated, locate, yarnVariant, measureDirs, safePaths, preview, runNative,
 };
