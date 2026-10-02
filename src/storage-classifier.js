@@ -65,10 +65,16 @@ function makeTarget(id, name, category, icon, paths, description, options = {}) 
 function envPath(ctx, value, fallback) {
   return safeEnvPath(value, fallback, { home: ctx.home, platform: ctx.platform });
 }
+// GOMODCACHE and HF_HOME were always taken as given, relative or not: keep
+// that, and only refuse an absolute value that is a root or home.
+function envPathAsGiven(ctx, value, fallback) {
+  if (!value) return fallback;
+  return ctx.pathApi.isAbsolute(value) ? envPath(ctx, value, fallback) : value;
+}
 
 function goModCache(ctx, fallback) {
   const { env, pathApi } = ctx;
-  if (env.GOMODCACHE) return envPath(ctx, env.GOMODCACHE, fallback);
+  if (env.GOMODCACHE) return envPathAsGiven(ctx, env.GOMODCACHE, fallback);
   const sep = ctx.platform === 'win32' ? ';' : ':';
   const gopath = String(env.GOPATH || '').split(sep).find(Boolean);
   if (gopath && pathApi.isAbsolute(gopath)) return envPath(ctx, pathApi.join(gopath, 'pkg', 'mod'), fallback);
@@ -89,7 +95,7 @@ const GO_MOD_DESCRIPTION = 'Source of every module Go downloaded. Each project f
 // Hugging Face stores downloaded models and datasets at HF_HOME, else
 // ~/.cache/huggingface. Regenerable, but a re-download can be many GB.
 function huggingFaceHome(ctx, fallback) {
-  return envPath(ctx, ctx.env.HF_HOME, fallback);
+  return envPathAsGiven(ctx, ctx.env.HF_HOME, fallback);
 }
 
 const HF_DESCRIPTION = 'Downloaded AI models and datasets. Safe to remove, but re-downloading large models can take a long time.';
