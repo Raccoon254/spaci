@@ -191,6 +191,11 @@
       lines.push('• ' + g.label + ': ' + g.count + ' (' + fmt(g.bytes) + ')');
       if (g.hint) lines.push('   Comes back: ' + String(g.hint).replace(/\.$/, '') + '.');
     });
+    if (Array.isArray(plan.commands) && plan.commands.length) {
+      lines.push('');
+      lines.push('Cleaned by their own tools (skipped while the tool is busy):');
+      plan.commands.forEach((c) => lines.push('• ' + c.name + ': ' + c.command));
+    }
     lines.push('');
     lines.push('Everything rebuilds on the next install or build. App caches, the Maven repository, AI tool history, the Trash and anything unverified are not included.');
     return lines.join('\n');

@@ -560,6 +560,10 @@
       const note = itemNote(it, e);
       const rk = it.outcome === 'removed' || it.outcome === 'trashed' ? it.reversible : null;
       if (note) box.appendChild(el('div', { title: note.raw, style: 'color:var(--text-3);font-size:12px;margin-top:3px;line-height:1.5', text: note.text }));
+      if (typeof it.command === 'string' && it.command) {
+        const exit = typeof it.exitCode === 'number' ? ' (exit ' + it.exitCode + ')' : '';
+        box.appendChild(el('div', { 'data-history-command': '', class: 'mono', style: 'color:var(--text-2);font-size:12px;margin-top:3px;word-break:break-word', text: 'Ran ' + it.command + exit }));
+      }
       if (rk && REV_TEXT[rk] && it.outcome !== 'trashed') box.appendChild(el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:3px', text: REV_TEXT[rk] }));
       if (it.restoreHint && (it.outcome === 'removed' || (isAuto(e) && it.outcome === 'trashed'))) {
         box.appendChild(el('div', { class: 'mono', style: 'color:var(--text-2);font-size:12px;margin-top:4px;white-space:pre-wrap;word-break:break-word', text: String(it.restoreHint) }));

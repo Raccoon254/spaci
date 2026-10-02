@@ -82,6 +82,54 @@
     if (tech && SP.tic) return SP.tic(tech, size, { label: t.name });
     return ic(t.icon || 'database', size);
   }
+  // ---- native cleanup ----
+  // Caches cleaned by their tool's own command say which, with a read-only
+  // preview from main (dry runs and sizes; nothing is changed). The command
+  // itself is decided in main from the target id, never here.
+  function loadNativePreview(force) {
+    if (!window.api || !api.cleanupPreview || S.nativePreviewLoading) return;
+    const ids = targetsNow().filter((t) => t && t.cleanup).map((t) => t.id);
+    if (!ids.length) return;
+    const key = ids.slice().sort().join(',');
+    const cur = S.nativePreview;
+    if (!force && cur && cur.key === key && Date.now() - cur.at < 60000) return;
+    S.nativePreviewLoading = true;
+    api.cleanupPreview(ids, Boolean(force))
+      .then((list) => {
+        const byId = {};
+        (Array.isArray(list) ? list : []).forEach((p) => { if (p && p.id) byId[p.id] = p; });
+        S.nativePreview = { key, at: Date.now(), byId };
+      })
+      .catch(() => { S.nativePreview = { key, at: Date.now(), byId: {} }; })
+      .finally(() => { S.nativePreviewLoading = false; paint(); });
+  }
+  // "Runs `pnpm store prune`" with the command in mono.
+  function commandLabel(label) {
+    return String(label || '').split('`').map((part, i) => (i % 2
+      ? el('code', { style: 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;padding:1px 6px;border-radius:6px;background:var(--panel-2);border:1px solid var(--border);color:var(--text)', text: part })
+      : part));
+  }
+  function nativeLine(t) {
+    if (!t || !t.cleanup) return null;
+    const pv = S.nativePreview && S.nativePreview.byId ? S.nativePreview.byId[t.id] : null;
+    const label = (pv && pv.label) || t.cleanup.label;
+    let status = null;
+    let tone = 'var(--text-3)';
+    if (pv && pv.busy) { status = pv.busy; tone = 'var(--warn-fg)'; }
+    else if (pv && typeof pv.estimate === 'number') {
+      const about = (pv.partial ? 'at least ' : 'about ') + fmt(pv.estimate);
+      status = pv.estimateKind === 'unreferenced' ? 'Preview: ' + about + ' in packages no project uses'
+        : pv.estimateKind === 'dry-run' ? 'Preview: ' + about + ' (from its dry run)'
+          : 'Preview: ' + about;
+      if (pv.available === false && pv.note) status += '. ' + pv.note;
+    } else if (S.nativePreviewLoading) status = 'Checking…';
+    return el('div', { 'data-native-cleanup': t.id, style: 'display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:6px;font-size:12px;color:var(--text-2)' }, [
+      el('span', { style: 'display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap' }, commandLabel(label)),
+      status ? el('span', { 'data-native-preview': '', style: 'color:' + tone, text: status }) : null,
+    ]);
+  }
+  // ---- end native cleanup ----
+
   function groupByCategory(targets) {
     const order = [];
     const map = new Map();
@@ -132,6 +180,7 @@
             if (SP.tiers) await SP.tiers.load();
             preselect(targets);
           }
+          S.nativePreview = null; // sizes changed: preview again
         } else {
           S.systemError = (res && res.error) || 'Scan failed';
         }
@@ -191,6 +240,9 @@
           + (reviewList.length > 4 ? '\nand ' + (reviewList.length - 4) + ' more.' : '')
         : undefined;
       if (opts.lead) note = opts.lead + (note ? '\n\n' + note : '');
+      // Caches their own tool cleans: the confirm says which command runs.
+      const tools = chosen.filter((t) => t.cleanup && t.cleanup.command).map((t) => t.name + ': ' + String(t.cleanup.label).replace(/`/g, ''));
+      if (tools.length) note = (note ? note + '\n\n' : '') + 'Cleaned by their own tools, which refuse while the tool is busy:\n' + tools.join('\n');
       const cf = await SP.confirmClean({
         title: opts.title,
         force: risky.length > 0 || reviewList.length > 0 || !!opts.title,
@@ -286,6 +338,7 @@
             })
           ]),
           el('div', { style: 'color:var(--text-3);font-size:12px;margin-top:2px;line-height:1.5', text: t.description || '' }),
+          nativeLine(t),
           permanent ? el('div', { style: 'color:var(--danger-fg);font-size:12px;font-weight:600;margin-top:4px;display:flex;align-items:center;gap:6px' }, [
             ic('lock', 13), 'Cannot be undone. Deleted on its own, never with other items.'
           ]) : null
@@ -824,6 +877,7 @@
       // progress shows the shared scan card above the list (centered), not a
       // blocking spinner.
       if (targets.length) {
+        loadNativePreview(false);
         if (loading) host.appendChild(scanBlock());
         if (S.systemError) host.appendChild(el('div', {
           style: 'display:flex;align-items:center;gap:10px;padding:13px 16px;border-radius:12px;background:var(--danger-soft);color:var(--danger-fg);font-size:13px;font-weight:600;margin:0 0 4px'
