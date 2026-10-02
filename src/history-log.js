@@ -37,6 +37,10 @@ function buildItem(src = {}) {
   if (src.project) item.project = String(src.project);
   if (src.reason) item.reason = String(src.reason);
   if (src.code) item.code = String(src.code);
+  // Cleaned by the tool's own command: what ran and how it exited.
+  if (typeof src.command === 'string' && src.command) item.command = src.command.slice(0, 200);
+  if (Number.isInteger(src.exitCode)) item.exitCode = src.exitCode;
+  if (src.via === 'native' || src.via === 'stop-then-folder' || src.via === 'folder') item.via = src.via;
   // Only part of it moved (an auto-clean roll back that could not finish).
   if (src.partial === true) item.partial = true;
   // Refused items were never touched, so there is nothing to restore. A failed

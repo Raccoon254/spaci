@@ -109,3 +109,16 @@ test('trashed bytes are tallied apart and never counted as freed', () => {
   assert.equal(e.trashedBytes, 5000);
   assert.equal(e.count, 3);
 });
+
+test('a native cleanup item keeps the command, its exit status and the restore hint', () => {
+  const { buildItem } = require('../src/history-log');
+  const it = buildItem({ path: '/h/Library/pnpm/store', kind: 'cache', outcome: 'removed', bytes: 1200, reversible: 'rebuild', command: 'pnpm store prune', exitCode: 0, via: 'native', restoreHint: 'Nothing a project uses was removed.' });
+  assert.equal(it.command, 'pnpm store prune');
+  assert.equal(it.exitCode, 0);
+  assert.equal(it.via, 'native');
+  assert.equal(it.restoreHint, 'Nothing a project uses was removed.');
+  const odd = buildItem({ path: '/x', command: 42, exitCode: 'zero', via: 'shell' });
+  assert.equal(odd.command, undefined);
+  assert.equal(odd.exitCode, undefined);
+  assert.equal(odd.via, undefined);
+});

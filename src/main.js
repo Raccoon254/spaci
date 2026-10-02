@@ -74,6 +74,7 @@ const { createMediaCache } = require('./notice-media');
 const historyLog = require('./history-log');
 const restoreHints = require('./restore-hints');
 const cleanPlan = require('./clean-plan');
+const nativeSpecs = require('./native-cleanup-specs');
 const ipcGuards = require('./ipc-guards');
 const dockerVolumes = require('./docker-volumes');
 const recommendations = require('./recommendations');
@@ -178,6 +179,7 @@ function applyCurrentTargetFlags(list) {
     t.reversible = cur.reversible;
     t.description = cur.description;
     if (cur.restoreHint) t.restoreHint = cur.restoreHint; else delete t.restoreHint;
+    if (cur.cleanup) t.cleanup = cur.cleanup; else delete t.cleanup;
   }
 }
 applyCurrentTargetFlags(cache.system);
@@ -253,6 +255,9 @@ const WORKER_TIMEOUTS = {
   docker: 10 * MIN, // prune and Docker Desktop restart can be slow
   revalidateArtifact: MIN,
   aiToolStatus: 15 * 1000,
+  // A tool's own cleanup: its spec timeout (15 min at most) plus measuring.
+  nativeClean: 30 * MIN,
+  nativePreview: 3 * MIN,
 };
 function spawnScanWorker() {
   if (!electronUtility || typeof electronUtility.fork !== 'function') throw new Error('Scanning is unavailable: this Electron build has no utilityProcess.');
@@ -1131,6 +1136,8 @@ async function describeJob(jobPath, plan, memo) {
 // target? }], trashed: [paths], historyId }. meta.reversible is ignored.
 ipcMain.handle('clean', async (e, jobs, meta) => {
   const ac = new AbortController();
+  // scan:cancel('clean') stops a running clean (a native command is killed).
+  aborts.clean = ac;
   const send = progressTo(e.sender, 'clean:progress');
   const m = meta && typeof meta === 'object' ? meta : {};
   const scope = typeof m.scope === 'string' && m.scope ? m.scope : 'projects';
@@ -1172,6 +1179,11 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
     const plans = new Map(allowed.map((j) => [j, cleanPlan.classifyJob(j.path, planCtx)]));
     const toTrash = allowed.filter((j) => plans.get(j).kind === 'file');
     const toDelete = allowed.filter((j) => plans.get(j).kind !== 'file');
+    // Caches whose tool cleans better than a folder delete go to that tool,
+    // one target at a time. Main picks only the target id; the command and its
+    // arguments come from the spec catalog in the worker, never the renderer.
+    const nativeGroups = nativeGroupsOf(toDelete, plans);
+    const plainDelete = toDelete.filter((j) => !nativeGroups.byJob.has(j));
 
     const memo = new Map();
     const described = new Map();
@@ -1187,11 +1199,21 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
     putHistory(historyLog.startedEntry({ ...started, refused: refusedItems, pending: [...toDelete, ...toTrash].map((j) => described.get(j.path)) }));
 
     const total = allowed.length;
-    const del = toDelete.length
-      ? await cleaner.clean(toDelete, (p) => send({ ...p, total }), ac.signal)
+    const del = plainDelete.length
+      ? await cleaner.clean(plainDelete, (p) => send({ ...p, total }), ac.signal)
       : { totalFreed: 0, errors: [], results: [] };
     let running = del.totalFreed;
-    let done = toDelete.length;
+    let done = plainDelete.length;
+    const nat = await runNativeGroups(nativeGroups.list, {
+      signal: ac.signal,
+      send: (p) => send({ ...p, done, total }),
+      onDone: (g, r) => {
+        done += g.jobs.length;
+        running += r.freed || 0;
+        send({ phase: 'item-done', path: g.jobs[0].path, target: g.target.id, freed: r.freed || 0, totalFreed: running, done, total });
+      },
+    });
+    del.totalFreed += nat.freed;
     const tr = toTrash.length
       ? await trashFiles(toTrash.map((j) => j.path), {
         trashItem: (p) => shell.trashItem(p),
@@ -1215,6 +1237,12 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
       ran.add(r.path);
       items.push({ ...described.get(r.path), outcome: r.ok ? 'trashed' : 'failed', bytes: r.freed, reason: r.ok ? undefined : r.error, code: r.code });
     }
+    for (const n of nat.items) {
+      ran.add(n.path);
+      items.push({ ...described.get(n.path), ...n });
+    }
+    refused.push(...nat.refused);
+    del.errors.push(...nat.errors);
     // Anything that never ran (the clean was stopped) is a failure, not a success.
     for (const j of allowed) {
       if (!ran.has(j.path)) items.push({ ...described.get(j.path), outcome: 'failed', bytes: 0, reason: 'Not cleaned: the clean was stopped first.' });
@@ -1235,8 +1263,99 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
       } catch (_) { /* the next launch marks it interrupted */ }
     }
     return { ok: false, error: err.message, historyId };
+  } finally {
+    if (aborts.clean === ac) delete aborts.clean;
   }
 });
+
+// ---- native cleanup ----
+// Allowed clean jobs grouped by the cache target whose tool cleans it
+// (native-cleanup-specs.js). A job is in a group only when main's own target
+// index says its path is that target's.
+function nativeGroupsOf(jobs, plans) {
+  const byId = new Map();
+  const byJob = new Map();
+  for (const j of jobs) {
+    const t = plans.get(j) && plans.get(j).target;
+    if (!t || !nativeSpecs.specFor(t.id)) continue;
+    if (!byId.has(t.id)) byId.set(t.id, { target: t, jobs: [] });
+    byId.get(t.id).jobs.push(j);
+    byJob.set(j, t.id);
+  }
+  return { list: [...byId.values()], byJob };
+}
+
+/** What the worker gets for a job: the path and the guard's own rules, nothing else. */
+function nativeJob(j) {
+  return {
+    path: j.path, mode: 'contents',
+    ...(Array.isArray(j.protect) ? { protect: j.protect } : {}),
+    ...(Array.isArray(j.excludePaths) ? { excludePaths: j.excludePaths } : {}),
+  };
+}
+
+/**
+ * Run each group's tool in the worker. Returns { freed, items, refused,
+ * errors }: one history item per job (the first carries the bytes and the
+ * command), busy tools as refusals the renderer keeps listed, anything else
+ * that went wrong as errors.
+ */
+async function runNativeGroups(groups, { signal, send, onDone, mode = 'manual' } = {}) {
+  const out = { freed: 0, items: [], refused: [], errors: [] };
+  for (const g of groups) {
+    const spec = nativeSpecs.specFor(g.target.id);
+    let r;
+    if (signal && signal.aborted) r = { ok: false, code: 'cancelled', freed: 0, message: 'Not cleaned: the clean was stopped first.' };
+    else {
+      try {
+        r = await work('nativeClean', [g.target.id, g.jobs.map(nativeJob), { mode }], {
+          signal, onProgress: send ? (p) => send({ ...p, phase: p.phase || 'native' }) : undefined,
+        });
+      } catch (e) { r = { ok: false, code: (e && e.code) || 'failed', freed: 0, message: (e && e.message) || 'The cleanup did not run.' }; }
+    }
+    r = r || { ok: false, code: 'failed', freed: 0 };
+    const freed = Math.max(0, Number(r.freed) || 0);
+    out.freed += freed;
+    const native = r.via === 'native' || r.via === 'stop-then-folder';
+    const hint = native ? spec.restoreHint : restoreHints.systemRestoreHint(g.target);
+    const outcome = r.ok ? 'removed' : r.code === 'busy' ? 'refused' : 'failed';
+    const reason = r.ok ? (r.message || undefined) : (r.message || 'The cleanup failed.');
+    g.jobs.forEach((j, i) => {
+      out.items.push({
+        path: j.path, outcome, bytes: i === 0 ? freed : 0, reason, code: r.ok ? undefined : r.code,
+        ...(r.command ? { command: r.command } : {}),
+        ...(Number.isInteger(r.exitCode) ? { exitCode: r.exitCode } : {}),
+        ...(r.via ? { via: r.via } : {}),
+        ...(hint ? { restoreHint: hint } : {}),
+      });
+      if (outcome === 'refused') out.refused.push({ path: j.path, target: g.target.id, reason });
+      else if (outcome === 'failed') out.errors.push({ path: j.path, error: reason, code: r.code, target: g.target.id });
+    });
+    crashLog.info(`native cleanup ${g.target.id}: ${r.code} via=${r.via || '-'} cmd=${r.command || '-'} exit=${r.exitCode == null ? '-' : r.exitCode} freed=${freed}`);
+    if (onDone) onDone(g, { ...r, freed });
+  }
+  return out;
+}
+
+// api.cleanupPreview(ids) -> [{ id, via, command, label, available, busy,
+// estimate, estimateKind, partial, note }]. Read-only (dry runs and sizes),
+// cached a minute; only ids of known targets with a spec reach the worker.
+let nativePreviewCache = { at: 0, key: '', list: [] };
+ipcMain.handle('cleanup:preview', async (_e, ids, force) => {
+  const known = new Set(system.TARGETS.map((t) => t.id));
+  const wanted = Array.from(new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string' && known.has(id) && nativeSpecs.specFor(id)))).sort();
+  if (!wanted.length) return [];
+  const key = wanted.join(',');
+  if (!force && nativePreviewCache.key === key && Date.now() - nativePreviewCache.at < 60000) return nativePreviewCache.list;
+  try {
+    const list = await work('nativePreview', [wanted]);
+    nativePreviewCache = { at: Date.now(), key, list: Array.isArray(list) ? list : [] };
+  } catch (e) {
+    return wanted.map((id) => ({ id, error: (e && e.message) || 'Preview failed.' }));
+  }
+  return nativePreviewCache.list;
+});
+// ---- end native cleanup ----
 
 // ---------- git worktrees ----------
 // Removing a linked worktree is `git worktree remove` (never --force), run by
@@ -1680,6 +1799,14 @@ function acDeps(overrides = {}) {
       : restoreHints.systemRestoreHint(TARGET_INDEX.get(c.path))),
     newId: () => 'ac-' + newHistoryId(),
     onStaged: acForget,
+    // Tier A caches whose tool has a gentle auto command (pnpm store prune,
+    // uv cache prune ...) are cleaned by it, after its own busy check.
+    nativeClean: async (id, jobs) => {
+      const t = system.TARGETS.find((x) => x.id === id);
+      if (!t) return { ok: false, code: 'invalid', freed: 0 };
+      const res = await runNativeGroups([{ target: t, jobs }], { mode: 'auto' });
+      return res;
+    },
     ...overrides,
   };
 }

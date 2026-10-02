@@ -150,3 +150,29 @@ test('scanProjects seeds the language cache from main and hands the snapshot bac
   h.d.handle({ id: 2, op: 'scanProjects', args: ['/r', { techSeed: [1] }] });
   assert.equal((await h.reply(2)).ok, true);
 });
+
+test('nativeClean: only a catalogued target id runs, with its own paths, never a command from the caller', async () => {
+  const calls = [];
+  const native = { runNative: async (target, o) => { calls.push({ target, o }); return { ok: true, code: 'done', freed: 5 }; } };
+  const system = { TARGETS: [{ id: 'pnpm', paths: ['/h/Library/pnpm/store', '/h/.pnpm-store'] }, { id: 'maven', paths: ['/h/.m2/repository'] }] };
+  const h = harness({ native, system, cleaner: { clean: async () => ({ results: [] }) } });
+  h.d.handle({ id: 1, op: 'nativeClean', args: ['pnpm', [
+    { path: '/h/Library/pnpm/store', mode: 'path', command: 'rm', args: ['-rf', '/'], protect: ['keep'] },
+    { path: '/etc', mode: 'contents' },
+  ], { mode: 'manual', command: 'touch /tmp/pwned' }] });
+  const r = await h.reply(1);
+  assert.equal(r.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].target.id, 'pnpm');
+  assert.deepEqual(calls[0].o.folderJobs, [{ path: '/h/Library/pnpm/store', mode: 'contents', protect: ['keep'] }]);
+  assert.equal(calls[0].o.mode, 'manual');
+  assert.equal(calls[0].o.command, undefined);
+  for (const id of ['maven', 'rm -rf /', '__proto__', null]) {
+    h.d.handle({ id: 10, op: 'nativeClean', args: [id, []] });
+    const bad = await h.reply(10);
+    h.out.length = 0;
+    assert.equal(bad.ok, false, String(id));
+    assert.equal(bad.error.code, 'EUNKNOWNOP');
+  }
+  assert.equal(calls.length, 1);
+});

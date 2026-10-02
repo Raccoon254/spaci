@@ -18,6 +18,8 @@
 // child_process.fork IPC channel in tests).
 
 const { dockerFigures } = require('./reclaimable');
+const { specFor: nativeSpecFor } = require('./native-cleanup-specs');
+const { keyOf } = require('./clean-guard');
 
 // Loaded lazily so a test that injects every module never loads the real ones.
 const LOADERS = {
@@ -32,6 +34,7 @@ const LOADERS = {
   devtools: () => require('./devtools'),
   cleaner: () => require('./cleaner'),
   // ---- end ai models and dev tools ----
+  native: () => require('./native-cleanup'),
 };
 
 /**
@@ -160,6 +163,14 @@ async function dockerVolumes(mod, options = {}) {
   return { status, volumes, groups };
 }
 
+/** A cache target from this process's catalog that has a native cleanup spec. */
+function nativeTarget(mod, id) {
+  const spec = nativeSpecFor(id);
+  const target = spec ? (mod('system').TARGETS || []).find((t) => t && t.id === id) : null;
+  if (!target) throw unknownOp('nativeClean.' + String(id));
+  return target;
+}
+
 function buildOps(mod) {
   return {
     ping: async () => ({ pid: process.pid, at: Date.now() }),
@@ -220,6 +231,46 @@ function buildOps(mod) {
       deletePath: (p, onProgress) => mod('cleaner').deletePath(p, onProgress, ctx.signal),
     }),
     // ---- end ai models and dev tools ----
+
+    // ---- native cleanup ----
+    // A tool's own cleanup command for one cache target. Only the target id
+    // crosses over: the command and its arguments come from the spec catalog
+    // here, the target from this process's own catalog, and the folder jobs
+    // are kept only when they are that target's own paths.
+    nativeClean: (ctx, targetId, jobs, opts = {}) => {
+      const target = nativeTarget(mod, targetId);
+      const own = new Set(target.paths.map(keyOf));
+      const folderJobs = (Array.isArray(jobs) ? jobs : [])
+        .filter((j) => j && typeof j.path === 'string' && own.has(keyOf(j.path)))
+        .map((j) => ({
+          path: j.path, mode: 'contents',
+          ...(Array.isArray(j.protect) ? { protect: j.protect.filter((x) => typeof x === 'string') } : {}),
+          ...(Array.isArray(j.excludePaths) ? { excludePaths: j.excludePaths.filter((x) => typeof x === 'string') } : {}),
+        }));
+      return mod('native').runNative(target, {
+        mode: opts && opts.mode === 'auto' ? 'auto' : 'manual',
+        folderJobs,
+        deleteFolders: (list, onProgress) => mod('cleaner').clean(list, onProgress, ctx.signal),
+        signal: ctx.signal,
+        onProgress: ctx.progress || undefined,
+      });
+    },
+    // Read-only previews for the rows: one process snapshot for all of them.
+    nativePreview: async (ctx, ids) => {
+      const native = mod('native');
+      const wanted = Array.from(new Set((Array.isArray(ids) ? ids : []).filter((id) => nativeSpecFor(id))));
+      if (!wanted.length) return [];
+      const procs = await require('./devtools/processes').processList();
+      const out = [];
+      for (const id of wanted) {
+        if (ctx.signal.aborted) break;
+        let target;
+        try { target = nativeTarget(mod, id); } catch { continue; }
+        try { out.push(await native.preview(target, { procs, signal: ctx.signal })); }
+        catch (e) { out.push({ id, error: (e && e.message) || 'Preview failed.' }); }
+      }
+      return out;
+    },
 
     // Generic routing for Docker: any allowlisted export, called by name.
     docker: async (ctx, name, args = []) => {

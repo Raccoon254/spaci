@@ -23,7 +23,7 @@ for (const name of ['setTimeout', 'setInterval']) {
   global[name] = (...args) => { const h = real(...args); if (h && h.unref) h.unref(); return h; };
 }
 
-function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-')), { lock = true, shell = {}, dialog = {}, scanner = {}, system = {}, docker = {}, notification = null, updater = null, largefiles = null, devtools = null } = {}) {
+function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-')), { lock = true, shell = {}, dialog = {}, scanner = {}, system = {}, docker = {}, notification = null, updater = null, largefiles = null, devtools = null, native = null } = {}) {
   const counts = { windows: 0, trays: 0, quits: 0, shows: 0, focuses: 0, restores: 0 };
   const windows = [];
   const trays = [];
@@ -113,7 +113,8 @@ function loadMain(userData = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-main-'
       revalidateArtifact: async (p) => { calls.worker.push(['revalidateArtifact', p]); return { ok: false, reason: 'Stub refused.' }; },
       ...scanner,
     },
-    system: { scanSystem: mk('system') },
+    system: { scanSystem: mk('system'), TARGETS: system.TARGETS || [] },
+    ...(native ? { native } : {}),
     docker: { desktopDisk: async () => null, ...docker },
     diskbreakdown: { diskBreakdown: async () => ({ categories: [] }), topChildren: async () => [{ path: '/x', bytes: 1 }] },
     largefiles: largefiles || { scanLargeFiles: async (root, min, onProgress) => { onProgress && onProgress({ phase: 'done' }); return { files: [], scanned: 0 }; } },
@@ -1388,4 +1389,54 @@ test('AI models and dev tools: listing cached, removal confirmed, allowlisted, r
     for (const ch of ['devtools:inventory', 'devtools:remove']) assert.ok(pre.includes(`'${ch}'`), ch);
     m.appEvents.emit('before-quit');
   } finally { m.cleanup(); }
+});
+
+test('clean: a cache with a native cleanup runs its tool in the worker; the renderer cannot add a command', async () => {
+  const dir = tmpTree('spaci-native-');
+  const store = path.join(dir, 'pnpm-store');
+  const uv = path.join(dir, 'uv');
+  fs.mkdirSync(store); fs.mkdirSync(uv);
+  const PNPM = { id: 'pnpm', name: 'pnpm store', category: 'Developer', safe: true, reversible: true, mode: 'contents', paths: [store] };
+  const UV = { id: 'uv-cache', name: 'uv cache', category: 'Developer', safe: true, reversible: true, mode: 'contents', paths: [uv] };
+  const ran = [];
+  const native = {
+    runNative: async (target, o) => {
+      ran.push({ id: target.id, folderJobs: o.folderJobs, mode: o.mode, keys: Object.keys(o).sort() });
+      if (o.onProgress) o.onProgress({ phase: 'native', target: target.id, line: 'Removed 3 packages' });
+      if (target.id === 'uv-cache') return { ok: false, id: target.id, code: 'busy', freed: 0, message: 'uv is busy (another uv process is running). Try again when it finishes.' };
+      return { ok: true, id: target.id, code: 'done', via: 'native', command: 'pnpm store prune', exitCode: 0, before: 5000, after: 1000, freed: 4000 };
+    },
+    preview: async (target) => ({ id: target.id, label: 'Runs `pnpm store prune`', estimate: 7 }),
+  };
+  const m = loadMain(undefined, { system: { TARGETS: [PNPM, UV] }, native });
+  const progress = [];
+  const ev = { sender: { send: (ch, p) => progress.push([ch, p]), isDestroyed: () => false } };
+  try {
+    const res = await m.handlers.clean(ev, [
+      { path: store, mode: 'path', command: 'rm', args: ['-rf', '/'], shell: true },
+      { path: uv, mode: 'contents' },
+    ], { scope: 'system', command: 'touch /tmp/pwned', args: ['x'] });
+    assert.equal(res.ok, true, res.error);
+    assert.deepEqual(ran.map((r) => r.id).sort(), ['pnpm', 'uv-cache']);
+    const p = ran.find((r) => r.id === 'pnpm');
+    assert.deepEqual(p.folderJobs, [{ path: store, mode: 'contents' }], 'only the path and the guard rules cross over');
+    assert.equal(p.mode, 'manual');
+    assert.ok(!p.keys.includes('command') && !p.keys.includes('args'));
+    assert.equal(res.totalFreed, 4000, 'measured freed, from the worker');
+    assert.deepEqual(res.refused.map((r) => [r.path, r.target, r.reason]), [[uv, 'uv-cache', 'uv is busy (another uv process is running). Try again when it finishes.']]);
+    assert.ok(progress.some(([ch, x]) => ch === 'clean:progress' && x.line === 'Removed 3 packages'));
+    const [entry] = readHistoryFile(m);
+    const it = entry.items.find((i) => i.path === store);
+    assert.deepEqual({ outcome: it.outcome, bytes: it.bytes, command: it.command, exitCode: it.exitCode, via: it.via },
+      { outcome: 'removed', bytes: 4000, command: 'pnpm store prune', exitCode: 0, via: 'native' });
+    assert.match(it.restoreHint, /Nothing a project uses was removed/);
+    const u = entry.items.find((i) => i.path === uv);
+    assert.equal(u.outcome, 'refused');
+    assert.match(u.reason, /uv is busy/);
+
+    // Previews: only known targets with a spec reach the worker.
+    const pv = await m.handlers['cleanup:preview']({}, ['pnpm', 'maven', '../../etc', 42]);
+    assert.deepEqual(pv.map((x) => x.id), ['pnpm']);
+    assert.deepEqual(await m.handlers['cleanup:preview']({}, ['maven']), []);
+  } finally { m.cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
 });

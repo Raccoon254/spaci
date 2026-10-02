@@ -53,6 +53,8 @@ contextBridge.exposeInMainWorld('api', {
 
   // cleaning
   clean: (jobs, meta) => ipcRenderer.invoke('clean', jobs, meta),
+  // Read-only: what each cache's own cleanup command would do (dry runs, sizes).
+  cleanupPreview: (ids, force) => ipcRenderer.invoke('cleanup:preview', ids, force),
   removeWorktrees: (jobs, meta) => ipcRenderer.invoke('worktrees:remove', jobs, meta),
   pruneWorktrees: (mainPath, paths, meta) => ipcRenderer.invoke('worktrees:prune', mainPath, paths, meta),
 
