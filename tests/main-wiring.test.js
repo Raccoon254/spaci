@@ -1449,6 +1449,52 @@ test('finding 3: a non-atomic native clean cut short is incomplete, recorded, of
   } finally { m.cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('clean: a non-atomic command that stopped for a lock or never spawned removed nothing, so it is not incomplete', async () => {
+  const dir = tmpTree('spaci-native-nothing-');
+  const mod = path.join(dir, 'gomod');
+  fs.mkdirSync(mod);
+  const GOMOD = { id: 'go-modcache', name: 'Go module cache', category: 'Developer', safe: true, reversible: true, mode: 'contents', paths: [mod] };
+  let next = 'busy';
+  const native = {
+    runNative: async (target, o) => {
+      if (o.onProgress) o.onProgress({ phase: 'native-start', command: 'go clean -modcache', atomic: false });
+      if (next === 'busy') return { ok: false, id: target.id, code: 'busy', via: 'native', command: 'go clean -modcache', freed: 0, removedNothing: true, message: 'Go is busy (another Go process is running).' };
+      return { ok: false, id: target.id, code: 'missing', command: 'go clean -modcache', freed: 0, removedNothing: true, message: 'Go could not be started.' };
+    },
+    preview: async (target) => ({ id: target.id, label: 'Runs `go clean -modcache`', estimate: 7 }),
+  };
+  const m = loadMain(undefined, { system: { TARGETS: [GOMOD] }, native });
+  const ev = { sender: { send: () => {}, isDestroyed: () => false } };
+  const markerFile = path.join(m.userData, 'native-incomplete.json');
+  const marker = () => { try { return JSON.parse(fs.readFileSync(markerFile, 'utf8')); } catch { return {}; } };
+  try {
+    await m.handlers.clean(ev, [{ path: mod, mode: 'contents' }], { scope: 'system' });
+    let it = readHistoryFile(m)[0].items.find((i) => i.path === mod);
+    assert.equal(it.outcome, 'refused');
+    assert.equal(it.code, 'busy');
+    assert.match(it.reason, /^Go is busy/);
+    assert.deepEqual(marker(), {}, 'nothing was removed: no incomplete record');
+    let pv = await m.handlers['cleanup:preview']({}, ['go-modcache'], true);
+    assert.equal(pv[0].incomplete, undefined);
+
+    next = 'missing';
+    await m.handlers.clean(ev, [{ path: mod, mode: 'contents' }], { scope: 'system' });
+    it = readHistoryFile(m)[0].items.find((i) => i.path === mod);
+    assert.equal(it.outcome, 'failed');
+    assert.equal(it.code, 'missing');
+    assert.doesNotMatch(it.reason, /^Incomplete/);
+    assert.deepEqual(marker(), {});
+
+    // A record an earlier cut-short clean left is kept, not erased by a busy retry.
+    fs.writeFileSync(markerFile, JSON.stringify({ 'go-modcache': { at: 1000, command: 'go clean -modcache' } }));
+    next = 'busy';
+    await m.handlers.clean(ev, [{ path: mod, mode: 'contents' }], { scope: 'system' });
+    assert.ok(marker()['go-modcache'], 'the earlier incomplete record stays');
+    pv = await m.handlers['cleanup:preview']({}, ['go-modcache'], true);
+    assert.ok(pv[0].incomplete);
+  } finally { m.cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('clean: a cache with a native cleanup runs its tool in the worker; the renderer cannot add a command', async () => {
   const dir = tmpTree('spaci-native-');
   const store = path.join(dir, 'pnpm-store');

@@ -673,11 +673,16 @@ async function preview(target, o = {}) {
  * Resolves { ok, id, code, via, command, exitCode, before, after, freed,
  * message, output } and never rejects. code: 'done' | 'busy' | 'missing' |
  * 'timeout' | 'cancelled' | 'failed' | 'incomplete' | 'unsafe' | 'not-auto' |
- * 'invalid'. 'incomplete': a non-atomic command stopped part way (killed from
+ * 'invalid'. removedNothing is set when the command never started or stopped
+ * for a lock or a failed spawn before it removed anything. 'incomplete': a
+ * non-atomic command stopped part way (killed from
  * outside or failed); the cache must be cleaned again before the tool uses it.
  */
 async function runNative(target, o = {}) {
   const spec = specs.specFor(target && target.id);
+  // removedNothing: the command never started, or stopped for a lock or a
+  // failed spawn before it removed anything. A non-atomic clean that did this
+  // is not incomplete (main reads the flag).
   const res = (r) => ({ ok: false, id: target && target.id, via: null, command: null, exitCode: null, before: 0, after: 0, freed: 0, message: null, output: '', ...r });
   if (!spec) return res({ code: 'invalid', message: 'Spaci has no cleanup command for this.' });
   const ctx = baseCtx(o);
@@ -685,7 +690,7 @@ async function runNative(target, o = {}) {
   const args = specs.argsFor(spec, mode);
   // Auto-clean runs a tool's own gentle command or nothing: never a permanent
   // folder delete. A folder-only target is staged by auto-clean itself.
-  if (mode === 'auto' && (!args || spec.via !== 'native')) return res({ code: 'not-auto', message: 'Auto-clean leaves this to you.' });
+  if (mode === 'auto' && (!args || spec.via !== 'native')) return res({ removedNothing: true, code: 'not-auto', message: 'Auto-clean leaves this to you.' });
   const atomic = specs.isAtomic(spec, mode);
   const progress = (p) => { if (o.onProgress) { try { o.onProgress({ target: target.id, ...p }); } catch { /* best effort */ } } };
   const m = o.measure || ((dirs) => measure(dirs, o));
@@ -697,7 +702,7 @@ async function runNative(target, o = {}) {
   // 1. Busy: a running process of the tool. Fails closed.
   const procs = await snapshot();
   const busy = checkBusy(spec, procs, ctx.selfPid);
-  if (busy.busy) return res({ code: 'busy', message: busy.reason });
+  if (busy.busy) return res({ removedNothing: true, code: 'busy', message: busy.reason });
 
   // 2. The CLI, its variant and its real cache folder.
   let via = spec.via;
@@ -705,13 +710,13 @@ async function runNative(target, o = {}) {
   const bin = via === 'folder' ? null : await resolveBin(spec.bins, o);
   const env = bin ? childEnv(spec, bin, ctx) : null;
   if (bin && spec.versionArgs && (await yarnVariant(spec, bin, { ...o, env })) === 'berry') {
-    if (mode === 'auto') return res({ code: 'not-auto', message: 'Yarn 2 and later clean only inside a project, so auto-clean did not run it.' });
+    if (mode === 'auto') return res({ removedNothing: true, code: 'not-auto', message: 'Yarn 2 and later clean only inside a project, so auto-clean did not run it.' });
     via = 'folder';
     note = 'Yarn 2 and later clean only inside a project, so Spaci emptied the global cache folder.';
   }
   if (via !== 'folder' && !bin) {
-    if (mode === 'auto') return res({ code: 'missing', message: `${spec.tool} was not found, so auto-clean did not run it.` });
-    if (spec.fallback !== 'folder') return res({ code: 'missing', message: `${spec.tool} was not found, so nothing was cleaned.` });
+    if (mode === 'auto') return res({ removedNothing: true, code: 'missing', message: `${spec.tool} was not found, so auto-clean did not run it.` });
+    if (spec.fallback !== 'folder') return res({ removedNothing: true, code: 'missing', message: `${spec.tool} was not found, so nothing was cleaned.` });
     via = 'folder';
     note = `${spec.tool} was not found, so Spaci emptied the folder instead.`;
   }
@@ -738,10 +743,10 @@ async function runNative(target, o = {}) {
   };
 
   // 3. Busy: another process holds the cache lock open.
-  if (await lockBusy()) return res({ code: 'busy', message: busyMessage(spec, 'lock') });
+  if (await lockBusy()) return res({ removedNothing: true, code: 'busy', message: busyMessage(spec, 'lock') });
   // Gradle without its CLI: daemons cannot be stopped, so any running one is busy.
   if (spec.daemonRe && (via === 'folder' || !bin) && daemonPids(spec, procs, ctx.selfPid).length) {
-    return res({ code: 'busy', message: `${spec.tool} is busy (a Gradle daemon is running). Try again when it stops.` });
+    return res({ removedNothing: true, code: 'busy', message: `${spec.tool} is busy (a Gradle daemon is running). Try again when it stops.` });
   }
 
   const dirs = measureDirs(spec, target, located, via === 'folder' ? null : bin, ctx.platform, ctx.home);
@@ -750,7 +755,7 @@ async function runNative(target, o = {}) {
   let exitCode = null;
   let output = '';
   const partly = async (fields) => { const a = await m(dirs); return res({ via, command, exitCode, before, after: a, freed: Math.max(0, before - a), output, ...fields }); };
-  const refuse = (fields) => res({ via, command, before, after: before, ...fields });
+  const refuse = (fields) => res({ via, command, before, after: before, removedNothing: true, ...fields });
 
   // 4. The tool's own command.
   if (via === 'native' || via === 'stop-then-folder') {
@@ -790,13 +795,13 @@ async function runNative(target, o = {}) {
     output = r.output || '';
     const last = output.trim().split(/\r?\n/).filter(Boolean).pop() || '';
     if (r.missing) {
-      if (mode === 'auto') return res({ code: 'missing', command, message: `${spec.tool} could not be started, so auto-clean did not run it.` });
-      if (spec.fallback !== 'folder') return res({ code: 'missing', command, message: `${spec.tool} could not be started.` });
+      if (mode === 'auto') return res({ removedNothing: true, code: 'missing', command, message: `${spec.tool} could not be started, so auto-clean did not run it.` });
+      if (spec.fallback !== 'folder') return res({ removedNothing: true, code: 'missing', command, message: `${spec.tool} could not be started.` });
       via = 'folder';
       note = `${spec.tool} could not be started, so Spaci emptied the folder instead.`;
     } else if (r.lockWait) {
       // Said before it removed anything: it was waiting for the lock.
-      return partly({ code: 'busy', message: busyMessage(spec, 'process') });
+      return partly({ removedNothing: true, code: 'busy', message: busyMessage(spec, 'process') });
     } else if (!atomic && (r.cancelled || r.timedOut || r.signal || exitCode !== 0)) {
       const why = r.signal ? `${command} was stopped (${r.signal})` : `${command} exited with ${exitCode === null ? 'a signal' : 'status ' + exitCode}${last ? ': ' + last.slice(0, 300) : ''}`;
       return partly({ code: 'incomplete', message: `${specs.INCOMPLETE_MESSAGE} ${why}.` });

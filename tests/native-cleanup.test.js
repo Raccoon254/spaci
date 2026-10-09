@@ -607,6 +607,24 @@ test('finding 3: a non-atomic run killed from outside is reported incomplete', a
   assert.match(u.message, /^Incomplete: run the clean again before building\./);
 });
 
+test('a lock wait or a failed spawn marks the result removedNothing, a cut short run does not', async () => {
+  const waiting = fakeSpawn((args) => (args.join(' ') === 'cache clean' ? { out: ['Blocking, waiting for other uv processes to finish'], hang: true } : { code: 1 }));
+  const b = await nc.runNative(target('uv-cache', [tmp()]), opts({ spawn: waiting, measure: sizes(100, 100) }));
+  assert.equal(b.code, 'busy', JSON.stringify(b));
+  assert.equal(b.removedNothing, true);
+  const enoent = fakeSpawn((args) => (args.join(' ') === 'cache prune' ? { error: Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }) } : { code: 1 }));
+  const m = await nc.runNative(target('uv-cache', [tmp()]), opts({ spawn: enoent, mode: 'auto' }));
+  assert.equal(m.code, 'missing');
+  assert.equal(m.removedNothing, true);
+  const busyNow = await nc.runNative(target('uv-cache', [tmp()]), opts({ snapshot: async () => ({ ok: true, list: [{ pid: 9, args: 'uv sync' }] }) }));
+  assert.equal(busyNow.code, 'busy');
+  assert.equal(busyNow.removedNothing, true);
+  const failed = fakeSpawn((args) => (args.join(' ') === 'cache clean' ? { err: ['error: failed to remove file'], code: 2 } : { code: 1 }));
+  const f = await nc.runNative(target('uv-cache', [tmp()]), opts({ spawn: failed }));
+  assert.equal(f.code, 'incomplete');
+  assert.ok(!f.removedNothing);
+});
+
 test('finding 4: Windows command lines with quotes, spaces and npm cmd-shim scripts are read right (critic repro)', () => {
   const shim = '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\bob\\AppData\\Roaming\\npm\\node_modules\\pnpm\\bin\\pnpm.cjs" install';
   assert.deepEqual(nc.commandOf(shim), { name: 'pnpm', sub: 'install' });

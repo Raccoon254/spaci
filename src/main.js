@@ -1328,6 +1328,7 @@ async function runNativeGroups(groups, { signal, send, onDone, mode = 'manual' }
     const spec = nativeSpecs.specFor(g.target.id);
     const atomic = nativeSpecs.isAtomic(spec, mode);
     let started = false;
+    const prior = nativeIncomplete.get(g.target.id);
     let r;
     if (signal && signal.aborted) r = { ok: false, code: 'cancelled', freed: 0, message: 'Not cleaned: the clean was stopped first.' };
     else {
@@ -1346,7 +1347,12 @@ async function runNativeGroups(groups, { signal, send, onDone, mode = 'manual' }
     }
     r = r || { ok: false, code: 'failed', freed: 0 };
     if (r.ok && r.code === 'done') nativeIncomplete.finish(g.target.id);
-    else if (!atomic && started && r.code !== 'incomplete') {
+    else if (r.removedNothing) {
+      // Busy (a lock wait) or a failed spawn: the command removed nothing, so
+      // it is not incomplete. Drop the record this attempt wrote, but keep one
+      // an earlier cut-short clean left.
+      if (started && !atomic && !prior) nativeIncomplete.finish(g.target.id);
+    } else if (!atomic && started && r.code !== 'incomplete') {
       r = { ...r, ok: false, code: 'incomplete', message: nativeSpecs.INCOMPLETE_MESSAGE + (r.message ? ' ' + r.message : '') };
     }
     const freed = Math.max(0, Number(r.freed) || 0);

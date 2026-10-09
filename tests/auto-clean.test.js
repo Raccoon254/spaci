@@ -705,6 +705,26 @@ test('finding 2: a missing or declined tool sends its cache through staging, nev
   assert.ok(h.notes.some((n) => /Undo it from History/.test(n.body)));
 });
 
+test('a busy native tool is refused for that target only: the run goes on and does not end as stopped', async () => {
+  const h = harness();
+  const store = path.join(h.root, 'home', 'Library', 'pnpm', 'store');
+  write(path.join(store, 'v10', 'files', 'aa', 'x'), 'x');
+  h.scan.system = [
+    { id: 'pnpm', name: 'pnpm store', safe: true, reversible: true, size: 4 * GB, existingPaths: [store] },
+    { id: 'npm', name: 'npm cache', safe: true, reversible: true, size: 3 * GB, existingPaths: [h.cache] },
+  ];
+  h.scan.projects = [];
+  h.settings = { enabled: true, approved: { at: NOW, rules: ac.rulesFingerprint({ enabled: true }), previewId: 'p' } };
+  // What main returns for a busy result in auto mode (outcome 'refused', no incomplete rewrite).
+  h.deps.nativeClean = async (id, jobs) => ({ items: jobs.map((j) => ({ path: j.path, outcome: 'refused', bytes: 0, code: 'busy', reason: 'pnpm is busy (another pnpm process is running). Try again when it finishes.' })) });
+  const r = await ac.runAutoClean(h.deps);
+  assert.equal(r.status, 'ok', JSON.stringify(r));
+  assert.equal(r.stopped, null);
+  const e = h.history.find((x) => x.id === r.runId);
+  assert.equal(e.items.find((x) => x.path === store).outcome, 'refused');
+  assert.equal(e.items.find((x) => x.path === h.cache).outcome, 'trashed', 'the next target still ran');
+});
+
 test('finding 2: approvals given before native auto-clean need a new preview', () => {
   const s = { enabled: true };
   const x = ac.sanitizeSettings(s);
