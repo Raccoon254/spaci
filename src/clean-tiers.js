@@ -119,7 +119,6 @@ const A_TARGETS = Object.freeze({
   // ---- ai models and dev tools ----
   'uv-cache': { group: 'Package caches', hint: 'Refills on the next uv install' },
   'electron-downloads': { group: 'Package caches', hint: 'Downloaded again on the next install' },
-  'homebrew-cache': { group: 'Package caches', hint: 'Downloaded again on the next brew install' },
   // ---- end ai models and dev tools ----
 });
 
@@ -137,6 +136,8 @@ const B_REASONS = Object.freeze({
   // `mvn install` puts your own builds here, and they exist nowhere else.
   'go-modcache': 'Downloaded Go modules. Every project fetches its modules again on its next build.',
   maven: 'Maven repository. Also holds artifacts you installed locally with mvn install, which nothing re-downloads.',
+  // brew cleanup is the only way Spaci cleans it, and that also uninstalls old versions.
+  'homebrew-cache': 'Runs brew cleanup, which also removes old installed formula and cask versions. Homebrew does not download those again.',
   thumbnails: 'App cache. Regenerated on demand.',
   'local-temp': 'Temporary files. Some may be in use by running apps.',
   'windows-temp': 'Temporary files. Some may be in use by running apps.',

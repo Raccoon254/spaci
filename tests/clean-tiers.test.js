@@ -149,6 +149,20 @@ test('planTierA skips empty things', () => {
   assert.equal(plan.count, 0);
 });
 
+test('homebrew-cache is B: brew cleanup also removes old installed versions, so no one-click run', () => {
+  assert.equal(tiers.A_TARGETS['homebrew-cache'], undefined);
+  const brew = { id: 'homebrew-cache', name: 'Homebrew downloads', safe: true, reversible: true, size: 5e9, existingPaths: ['/h/Library/Caches/Homebrew'] };
+  const r = tierOfTarget(brew);
+  assert.equal(r.tier, 'B');
+  assert.match(r.reason, /old installed formula and cask versions/);
+  const plan = planTierA({ sysTargets: [brew] });
+  assert.equal(plan.jobs.length, 0);
+  assert.deepEqual(plan.commands, []);
+  const t = buildSystemTargets({ platform: 'darwin', home: '/Users/a', env: {} }).find((x) => x.id === 'homebrew-cache');
+  assert.match(t.restoreHint, /not downloaded again/);
+  assert.match(require('../src/native-cleanup-specs').specFor('homebrew-cache').why, /old installed formula and cask versions/);
+});
+
 test('planTierA of an empty scan is empty', () => {
   const plan = planTierA({});
   assert.deepEqual(plan, { jobs: [], groups: [], count: 0, bytes: 0, projects: 0, commands: [] });

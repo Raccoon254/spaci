@@ -235,7 +235,8 @@ const SPECS = Object.freeze({
     via: 'native',
     run: ['cleanup', '--prune=all'],
     // brew cleanup also removes old formula versions, which is more than a
-    // cache: auto-clean leaves it to the user.
+    // cache: auto-clean leaves it to the user, and the target is tier B (not in
+    // the one-click Safe clean or the dashboard) for the same reason.
     autoRun: null,
     locate: ['--cache'],
     preview: 'brew-dry-run',
@@ -255,8 +256,8 @@ const SPECS = Object.freeze({
     atomic: true,
     duration: 'Under a minute usually; several minutes with many old versions.',
     fallback: 'folder',
-    why: 'Removes every download and old formula and cask version Homebrew no longer needs. It keeps pinned and linked versions.',
-    restoreHint: 'Downloaded again the next time Homebrew installs or upgrades.',
+    why: 'Removes every download, and also old installed formula and cask versions, which Homebrew does not download again. It keeps pinned and linked versions.',
+    restoreHint: 'Downloads come back the next time Homebrew installs or upgrades. Old installed versions that were removed are not downloaded again.',
   },
   // No better command than the folder delete. Listed so the busy check and the
   // before/after measurement still apply.

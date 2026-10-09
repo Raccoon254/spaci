@@ -218,7 +218,7 @@ function toolCacheTargets(ctx) {
     makeTarget('uv-cache', 'uv cache', 'Developer', 'python', [absOr(ctx, 'UV_CACHE_DIR', platform === 'win32' ? at('uv', 'cache') : (platform === 'darwin' ? join('.cache', 'uv') : xdgCache(ctx, 'uv')))], 'uv package and build cache. Refills on the next install.', { restoreHint: 'Refills on the next uv sync or uv pip install.' }),
   ];
   if (platform !== 'win32') {
-    t.push(makeTarget('homebrew-cache', 'Homebrew downloads', 'Developer', 'download', [absOr(ctx, 'HOMEBREW_CACHE', at('Homebrew'))], 'Bottles and source downloads Homebrew keeps after installing, plus old formula and cask versions brew cleanup removes.', { restoreHint: 'Downloaded again the next time Homebrew installs or upgrades.' }));
+    t.push(makeTarget('homebrew-cache', 'Homebrew downloads', 'Developer', 'download', [absOr(ctx, 'HOMEBREW_CACHE', at('Homebrew'))], 'Bottles and source downloads Homebrew keeps after installing, plus old formula and cask versions brew cleanup removes. Cleaning it also removes old installed versions, which Homebrew does not download again.', { restoreHint: 'Downloads come back the next time Homebrew installs or upgrades. Old installed versions that were removed are not downloaded again.' }));
   }
   return t.filter((x) => x.paths.length > 0);
 }
