@@ -110,14 +110,20 @@ async function collect(ctx) {
     push(item({ key: 'ext4-reserved', label: 'Reserved for root (ext4)', bytes: facts.reserved, tier: 'D', group: 'info', additive: false, icon: 'lock', hint: 'Blocks ext4 keeps free for the root user (5% by default). They are not part of used space, but you cannot use them either.', command: 'sudo tune2fs -l $(findmnt -no SOURCE /) | grep -i "reserved block"', commandNote: 'Shows the reserve. tune2fs -m changes it (root).' }));
   }
 
-  // 2. OS software and logs.
+  // 2. OS software and logs. A category folder inside one of these roots
+  // (ANDROID_HOME=/usr/local/lib/android/sdk, /usr/share/applications) is
+  // counted by its category, so du skips it here instead of counting it twice.
+  const inner = (root, extra = []) => {
+    const ex = [...extra, ...categoryDirs.filter((d) => typeof d === 'string' && isStrictlyInside(root, d)).map(globEscape)];
+    return ex.length ? { exclude: ex } : {};
+  };
   const [usr, boot, varLog, varCache, varLib, usrLocal] = await Promise.all([
-    measure('/usr', { timeoutMs: 180000, exclude: ['local'] }),
-    measure('/boot', { timeoutMs: 60000 }),
-    measure('/var/log', { timeoutMs: 60000 }),
-    measure('/var/cache', { timeoutMs: 120000 }),
-    measure('/var/lib', { timeoutMs: 180000 }),
-    measure('/usr/local', { timeoutMs: 60000 }),
+    measure('/usr', { timeoutMs: 180000, ...inner('/usr', ['local']) }),
+    measure('/boot', { timeoutMs: 60000, ...inner('/boot') }),
+    measure('/var/log', { timeoutMs: 60000, ...inner('/var/log') }),
+    measure('/var/cache', { timeoutMs: 120000, ...inner('/var/cache') }),
+    measure('/var/lib', { timeoutMs: 180000, ...inner('/var/lib') }),
+    measure('/usr/local', { timeoutMs: 60000, ...inner('/usr/local') }),
   ]);
   if (usr) push(item({ key: 'usr', label: 'Installed system software (/usr)', bytes: usr.bytes, tier: 'D', group: 'area', paths: ['/usr'], confidence: usr.confidence, icon: 'cpu', hint: 'Programs and libraries installed by your package manager.', command: 'sudo apt autoremove --purge', commandNote: 'Debian and Ubuntu. Fedora: sudo dnf autoremove. Arch: sudo pacman -Rns $(pacman -Qdtq).', children: topList(usr.children) }));
   if (boot && boot.bytes > 0) push(item({ key: 'boot', label: 'Kernels and boot files', bytes: boot.bytes, tier: 'D', group: 'area', paths: ['/boot'], confidence: boot.confidence, icon: 'cpu', hint: 'Installed kernels and initramfs images. Old kernels are removed by the package manager.', command: 'sudo apt autoremove --purge', commandNote: 'Fedora keeps installonly_limit kernels (dnf.conf).' }));
@@ -181,19 +187,7 @@ async function collect(ctx) {
     const rest = Math.max(0, varLib.bytes - varLib.children.filter(skip).reduce((a, c) => a + c.bytes, 0));
     if (rest > 0) push(item({ key: 'var-lib', label: 'System service data (/var/lib)', bytes: rest, tier: 'D', group: 'area', paths: ['/var/lib'], confidence: varLib.confidence, icon: 'database', hint: 'Databases and state of system services.' + (varLib.denied ? ' ' + varLib.denied + ' folders need root to measure.' : '') + (known ? ' Docker is listed separately.' : ''), commandNote: 'Owned by system services; remove a service with the package manager to free its data.', children: topList(varLib.children) }));
   }
-  // Category folders inside /usr/local (the Android SDK at ANDROID_HOME on CI
-  // images, /usr/local/share/applications) are already counted by their
-  // category: take them out, or the disk adds up to more than it holds.
-  let localCounted = 0;
-  if (usrLocal && usrLocal.bytes > 0) {
-    const inside = categoryDirs.filter((d) => typeof d === 'string' && d.startsWith('/usr/local/'));
-    const outer = inside.filter((d) => !inside.some((o) => o !== d && d.startsWith(o + '/')));
-    for (const d of outer) {
-      const r = await measure(d, { timeoutMs: 60000 });
-      if (r && r.bytes > 0) localCounted += r.bytes;
-    }
-  }
-  const usrLocalRest = usrLocal ? Math.max(0, usrLocal.bytes - localCounted) : 0;
+  const usrLocalRest = usrLocal ? usrLocal.bytes : 0;
   if (usrLocal && usrLocalRest > 0 && !categoryDirs.includes('/usr/local')) push(item({ key: 'usr-local', label: 'Locally installed software (/usr/local)', bytes: usrLocalRest, tier: 'C', group: 'area', paths: ['/usr/local'], confidence: usrLocal.confidence, icon: 'code', hint: 'Software installed outside the package manager.', children: topList(usrLocal.children) }));
 
   // 7. Named remainder.
@@ -217,9 +211,20 @@ async function otherHomes(fsp, home) {
   } catch { return []; }
 }
 
+/** True when `p` is a folder below `root` (not `root` itself). POSIX paths. */
+function isStrictlyInside(root, p) {
+  const rel = path.posix.relative(root, path.posix.normalize(p));
+  return !!rel && !rel.startsWith('..') && !path.posix.isAbsolute(rel);
+}
+
+/** GNU du --exclude takes a glob matched against the whole path: escape it to a literal. */
+function globEscape(p) {
+  return path.posix.normalize(p).replace(/[\\*?[\]]/g, '\\$&');
+}
+
 function topList(children, limit = 12) {
   return (children || []).filter((c) => c && c.bytes > 0).sort((a, b) => b.bytes - a.bytes).slice(0, limit)
     .map((c) => ({ name: path.basename(c.path), path: c.path, bytes: c.bytes }));
 }
 
-module.exports = { collect, parseSize, parseJournalUsage, parseDockerDf, parseSnapList, parseFlatpakList, parseProcSwaps, rootFsType, reservedBytes };
+module.exports = { collect, isStrictlyInside, globEscape, parseSize, parseJournalUsage, parseDockerDf, parseSnapList, parseFlatpakList, parseProcSwaps, rootFsType, reservedBytes };

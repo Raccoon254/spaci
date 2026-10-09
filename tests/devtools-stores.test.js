@@ -805,6 +805,22 @@ test('simulators: a runtime that shut-down simulators use is kept, saying how ma
   assert.equal(by('iOS 16.4 runtime').blocked, null);
 });
 
+test('simulators: device order follows simctl, not which data folder finished sizing first', async () => {
+  // The first device's folder takes many awaits to size, the second is missing
+  // and answers at once. Names must still read in simctl's order.
+  const slow = tmp('sim-slow');
+  for (let i = 0; i < 40; i++) write(path.join(slow, 'd' + i, 'e', 'f.bin'), 'x');
+  const rt = 'com.apple.CoreSimulator.SimRuntime.iOS-17-5';
+  const devicesJson = JSON.stringify({ devices: { [rt]: [
+    { udid: 'AAAAAAAA-2222-3333-4444-555555555555', name: 'iPhone 15', state: 'Shutdown', isAvailable: true, dataPath: path.join(slow, 'data') },
+    { udid: 'BBBBBBBB-2222-3333-4444-555555555555', name: 'iPad Air', state: 'Shutdown', isAvailable: true, dataPath: path.join(tmp('sim-gone'), 'missing', 'data') },
+  ] } });
+  const runtimes = JSON.stringify({ R1: { identifier: 'R1', runtimeIdentifier: rt, version: '17.5', build: '21F79', sizeBytes: 7e9, deletable: true, platformIdentifier: 'com.apple.platform.iphonesimulator' } });
+  const exec = execStub({ 'xcrun simctl list -j devices': devicesJson, 'xcrun simctl runtime list -j': runtimes });
+  const [g] = await simulators.inventory({ platform: 'darwin', home: tmp('home'), env: {}, exec, procs: quietProcs });
+  assert.match(g.items.find((i) => i.label === 'iOS 17.5 runtime').blocked, /\(iPhone 15, iPad Air\)/);
+});
+
 test('Android NDK: ndkVersion, ndk.dir and the AGP default NDK pin an older NDK; no scan keeps them all', async () => {
   const sdk = tmp('sdk');
   for (const v of ['23.1.7779620', '25.1.8937393', '25.2.9519653', '26.3.11579264', '27.1.12297006']) write(path.join(sdk, 'ndk', v, 'source.properties'), 'x');

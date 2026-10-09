@@ -264,7 +264,10 @@ try {
   const remainder = sysCat?.remainder || { bytes: 0, parts: [] };
   const named = (remainder.bytes <= (bd?.used || 0) * 0.02 || (remainder.parts || []).length > 0) && (!bd?.reconcile || (bd.reconcile.upperBound || []).length > 0);
   check('storage adds up to used within 2%, or names the remainder', (within || !!bd?.reconcile) && named,
-    JSON.stringify({ used: bd?.used, sum, explained: bd?.explained, unexplained: bd?.unexplained, parts: (remainder.parts || []).map((p) => p.key), reconcile: bd?.reconcile }));
+    JSON.stringify({ used: bd?.used, sum, explained: bd?.explained, unexplained: bd?.unexplained, parts: (remainder.parts || []).map((p) => p.key), reconcile: bd?.reconcile,
+      // Sizes behind the sum, so a mismatch says which folder counted what.
+      categories: cats.map((c) => [c.key, c.bytes, c.confidence || null]),
+      areas: [...(sysCat?.os || []), ...(sysCat?.areas || [])].map((a) => [a.key, a.bytes, a.confidence || null]) }));
   const sysItems = [...(sysCat?.os || []), ...(sysCat?.areas || []), ...(remainder.parts || []), ...(sysCat?.info || [])];
   check('System drill lists items, each with a tier, tier D with its OS command',
     sysItems.length > 0 && sysItems.every((i) => ['A', 'B', 'C', 'D'].includes(i.tier)) && sysItems.filter((i) => i.tier === 'D').every((i) => i.command || i.commandNote),
