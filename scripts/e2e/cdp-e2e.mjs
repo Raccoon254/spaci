@@ -85,14 +85,19 @@ async function connect(url) {
     const msg = JSON.parse(m.data);
     if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
   };
+  // The app can quit before it answers (quitApp): settle what is waiting
+  // instead of leaving it hanging, which ends Node with exit code 13.
+  ws.onclose = () => { for (const r of pending.values()) r({ closed: true }); pending.clear(); };
 }
 function send(method, params) {
+  if (ws.readyState !== WebSocket.OPEN) return Promise.resolve({ closed: true });
   const id = ++seq;
   ws.send(JSON.stringify({ id, method, params }));
   return new Promise((r) => pending.set(id, r));
 }
 async function evalIn(expr) {
   const r = await send('Runtime.evaluate', { expression: `(async () => { ${expr} })()`, awaitPromise: true, returnByValue: true });
+  if (r.closed) throw new Error('the app closed the connection');
   if (r.result.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description || 'eval failed');
   return r.result.result.value;
 }
