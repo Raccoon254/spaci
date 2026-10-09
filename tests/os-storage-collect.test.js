@@ -212,6 +212,23 @@ test('linux collector: journald, package caches, snaps, flatpak, docker, swap, e
   assert.equal(by['ext4-reserved'], undefined, 'no ext4 reserve on btrfs');
 });
 
+test('linux collector: a category folder inside a system root is skipped by that root\'s du, not counted twice', async () => {
+  // GitHub's Ubuntu runner: ANDROID_HOME=/usr/local/lib/android/sdk (Developer)
+  // and /usr/share/applications (Applications) sit inside /usr/local and /usr.
+  const linux = require('../src/os-storage/linux');
+  const fsp = fakeFs({ files: { '/proc/mounts': fx('linux-proc-mounts.txt'), '/proc/swaps': '' } });
+  const measure = fakeMeasure({ '/usr': { bytes: 9 * GB }, '/usr/local': { bytes: 2 * GB } });
+  const categoryDirs = ['/usr/local/lib/android/sdk', '/usr/share/applications', '/usr/local/share/applications', '/var/lib/flatpak', '/opt', '/home/me/.config', '/usr/local/odd[1]'];
+  await linux.collect({ home: '/home/me', run: async () => fail(), measure, fs: fsp, statfs: fsp.statfs, categoryDirs });
+  const opts = Object.fromEntries(measure.calls.map(([p, o]) => [p, o]));
+  assert.deepEqual(opts['/usr/local'].exclude, ['/usr/local/lib/android/sdk', '/usr/local/share/applications', '/usr/local/odd\\[1\\]']);
+  assert.deepEqual(opts['/usr'].exclude, ['local', '/usr/local/lib/android/sdk', '/usr/share/applications', '/usr/local/share/applications', '/usr/local/odd\\[1\\]']);
+  assert.deepEqual(opts['/var/lib'].exclude, ['/var/lib/flatpak']);
+  assert.equal(opts['/boot'].exclude, undefined);
+  assert.equal(linux.isStrictlyInside('/usr/local', '/usr/local'), false);
+  assert.equal(linux.isStrictlyInside('/usr/local', '/usr/localx'), false);
+});
+
 test('linux collector: ext4 reserve is reported (not part of used)', async () => {
   const linux = require('../src/os-storage/linux');
   const fsp = fakeFs({ files: { '/proc/mounts': fx('linux-proc-mounts.txt'), '/proc/swaps': '' } });
@@ -365,6 +382,23 @@ test('real: du streams children and reports a timeout as partial bytes, not zero
     };
     const p = await duTree('/x', { timeoutMs: 50, spawnFn });
     assert.deepEqual([p.bytes, p.confidence], [2048 * 1024, 'partial']);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('real: GNU du skips an excluded folder given by its full path', { skip: process.platform !== 'linux' }, async () => {
+  const { duTree } = require('../src/os-storage/du');
+  const { globEscape } = require('../src/os-storage/linux');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'spaci-du-ex-'));
+  try {
+    const sdk = path.join(root, 'lib', 'and[roid]', 'sdk');
+    fs.mkdirSync(sdk, { recursive: true });
+    fs.writeFileSync(path.join(sdk, 'big'), Buffer.alloc(4 * 1024 * 1024, 1));
+    fs.writeFileSync(path.join(root, 'lib', 'small'), Buffer.alloc(64 * 1024, 1));
+    const all = await duTree(root, { timeoutMs: 20000 });
+    const ex = await duTree(root, { timeoutMs: 20000, exclude: [globEscape(sdk)] });
+    assert.equal(ex.confidence, 'exact');
+    assert.ok(all.bytes - ex.bytes >= 4 * 1024 * 1024, JSON.stringify({ all: all.bytes, ex: ex.bytes }));
+    assert.ok(ex.bytes >= 64 * 1024 && ex.bytes < 1024 * 1024, 'the rest of the tree is still counted');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
