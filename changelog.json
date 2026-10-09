@@ -1,8 +1,36 @@
 [
   {
+    "version": "2.3.2",
+    "date": "2026-10-09",
+    "tag": "Latest",
+    "major": false,
+    "summary": "Developer tools now clean their caches with their own commands, such as brew cleanup, and busy tools are left alone.",
+    "highlight": "Tools clean their own caches, with the exact command shown",
+    "notes": "changelog/2.3.2.md",
+    "links": [
+      {
+        "label": "Download Spaci",
+        "url": "https://spaci.kentom.co.ke/download"
+      }
+    ],
+    "added": [
+      "Homebrew, uv, pnpm, npm, Yarn, Go, Gradle and more clean their caches with their own commands, shown on each row with a preview of what goes.",
+      "A clean that ends early is marked on its row with a button to finish it."
+    ],
+    "improved": [
+      "Tools that are busy (an install running, a lock held, a Gradle daemon working) are refused straight away instead of waited on.",
+      "brew cleanup never uninstalls formulae Homebrew thinks are unneeded, and Homebrew moved from Safe to Review because it also removes old installed versions."
+    ],
+    "fixed": [
+      "The tree icon no longer appears anywhere in the app.",
+      "On Linux, folders inside /usr and /usr/local that belong to a category are no longer counted twice.",
+      "Simulator notes name devices in a stable order."
+    ]
+  },
+  {
     "version": "2.3.1",
     "date": "2026-10-01",
-    "tag": "Latest",
+    "tag": "Feature",
     "major": false,
     "summary": "Projects group their worktrees and packages into one row, and Spaci now finds local AI models and old developer tools.",
     "highlight": "One row per project with its worktrees, plus local AI models and old developer tools",
