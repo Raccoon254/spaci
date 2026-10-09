@@ -690,8 +690,9 @@ async function runNative(target, o = {}) {
   const args = specs.argsFor(spec, mode);
   // Auto-clean runs a tool's own gentle command or nothing: never a permanent
   // folder delete. A folder-only target is staged by auto-clean itself.
-  if (mode === 'auto' && (!args || spec.via !== 'native')) return res({ removedNothing: true, code: 'not-auto', message: 'Auto-clean leaves this to you.' });
   const atomic = specs.isAtomic(spec, mode);
+  // A non-atomic command is safe in auto mode only behind the tool's own lock (uv).
+  if (mode === 'auto' && (!args || spec.via !== 'native' || (!atomic && !spec.lockFiles))) return res({ removedNothing: true, code: 'not-auto', message: 'Auto-clean leaves this to you.' });
   const progress = (p) => { if (o.onProgress) { try { o.onProgress({ target: target.id, ...p }); } catch { /* best effort */ } } };
   const m = o.measure || ((dirs) => measure(dirs, o));
   const snapshot = o.snapshot || (() => processList({ platform: ctx.platform, exec: o.exec }));

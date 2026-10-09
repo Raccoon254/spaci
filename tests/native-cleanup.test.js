@@ -498,7 +498,7 @@ test('finding 1: an autoremove line pushed out of the output tail by a big cache
 });
 
 test('finding 2: auto mode never falls back to a permanent folder delete (critic repro)', async () => {
-  for (const id of ['yarn', 'pip', 'go', 'pnpm', 'uv-cache']) {
+  for (const id of ['pip', 'go', 'pnpm', 'uv-cache']) {
     const deleted = [];
     const r = await nc.runNative(target(id, ['/tmp/x-' + id]), {
       mode: 'auto', env: { PATH: '/nonexistent' }, home: '/nonexistent-home', platform: 'darwin',
@@ -605,6 +605,22 @@ test('finding 3: a non-atomic run killed from outside is reported incomplete', a
   const u = await nc.runNative(target('uv-cache', [tmp()]), opts({ spawn: failed }));
   assert.equal(u.code, 'incomplete');
   assert.match(u.message, /^Incomplete: run the clean again before building\./);
+});
+
+test('auto mode runs a native command only when it is atomic or the tool holds its own lock', async () => {
+  for (const [id, s] of Object.entries(specs.SPECS)) {
+    if (!s.autoRun) continue;
+    assert.ok(specs.isAtomic(s, 'auto') || (s.lockFiles && s.lockFiles.length), id + ' has a non-atomic auto command and no lock');
+  }
+  assert.ok(specs.SPECS['uv-cache'].lockFiles, 'uv is the non-atomic auto command, behind its lock');
+  for (const id of ['yarn', 'cocoapods']) {
+    assert.equal(specs.argsFor(specs.specFor(id), 'auto'), null, id + ' has no auto command');
+    assert.equal(specs.describe(id).auto, null, id);
+    const spawn = fakeSpawn(() => ({}));
+    const r = await nc.runNative(target(id, [tmp()]), opts({ spawn, mode: 'auto' }));
+    assert.equal(r.code, 'not-auto', id);
+    assert.equal(spawn.calls.length, 0, id + ': no command spawned');
+  }
 });
 
 test('a lock wait or a failed spawn marks the result removedNothing, a cut short run does not', async () => {

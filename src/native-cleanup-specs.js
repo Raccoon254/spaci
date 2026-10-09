@@ -62,7 +62,9 @@ const NODE_INSTALLS = ['install', 'i', 'ci', 'add', 'update', 'up', 'upgrade', '
  *               reads correctly; false when a half-done run leaves entries the
  *               tool treats as complete. A non-atomic command is never
  *               cancelled or killed on timeout (see ATOMICITY below)
- *   atomicAuto  the same for `autoRun` (required when autoRun is set)
+ *   atomicAuto  the same for `autoRun` (required when autoRun is set). Auto-clean
+ *               runs a command only when it is atomic or the tool's own lock
+ *               (lockFiles) protects it, as uv's does
  *   status      read-only argv run right before `run`, whose output must say
  *               the tool is idle (Gradle: gradle --status), or null
  *   restoreHint History line
@@ -193,7 +195,9 @@ const SPECS = Object.freeze({
     bins: ['yarn'],
     via: 'native',
     run: ['cache', 'clean'],
-    autoRun: ['cache', 'clean'],
+    // No autoRun: the clean is not atomic and Yarn holds no lock, so
+    // auto-clean stages the folder instead.
+    autoRun: null,
     // Yarn 2+ (berry) cleans only from inside a project, so it is never run:
     // the global mirror is emptied as a folder instead (see variant()).
     versionArgs: ['--version'],
@@ -204,7 +208,6 @@ const SPECS = Object.freeze({
     lockOutput: null,
     timeoutMs: 10 * MIN,
     atomic: false,
-    atomicAuto: false,
     duration: 'Seconds to a minute.',
     fallback: 'folder',
     why: 'Yarn 1 cleans its own cache folder, wherever yarn cache dir points.',
@@ -215,7 +218,8 @@ const SPECS = Object.freeze({
     bins: ['pod'],
     via: 'native',
     run: ['cache', 'clean', '--all'],
-    autoRun: ['cache', 'clean', '--all'],
+    // No autoRun: not atomic and no lock, so auto-clean stages the folder.
+    autoRun: null,
     locate: null,
     preview: 'size',
     busy: { names: ['pod'] },
@@ -223,7 +227,6 @@ const SPECS = Object.freeze({
     lockOutput: null,
     timeoutMs: 5 * MIN,
     atomic: false,
-    atomicAuto: false,
     duration: 'Seconds.',
     fallback: 'folder',
     why: 'CocoaPods removes every cached pod and spec itself, without asking per pod.',
@@ -383,6 +386,7 @@ for (const [id, spec] of Object.entries(SPECS)) {
   if (spec.via !== 'folder' && (!spec.bins.length || !spec.run)) throw new Error('Native cleanup spec ' + id + ' has no command.');
   if (typeof spec.atomic !== 'boolean') throw new Error('Native cleanup spec ' + id + ' does not say whether it is atomic.');
   if (spec.autoRun && typeof spec.atomicAuto !== 'boolean') throw new Error('Native cleanup spec ' + id + ' does not say whether its auto command is atomic.');
+  if (spec.autoRun && spec.atomicAuto !== true && !spec.lockFiles) throw new Error('Native cleanup spec ' + id + ' has a non-atomic auto command that no lock protects.');
 }
 
 module.exports = {
