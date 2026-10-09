@@ -87,7 +87,9 @@
   // preview from main (dry runs and sizes; nothing is changed). The command
   // itself is decided in main from the target id, never here.
   function loadNativePreview(force) {
-    if (!window.api || !api.cleanupPreview || S.nativePreviewLoading) return;
+    // Not during a clean: the dry runs would keep the tools busy and the busy
+    // recheck would refuse the next tool. The clean repaints when it ends.
+    if (!window.api || !api.cleanupPreview || S.nativePreviewLoading || S.systemCleaning) return;
     const ids = targetsNow().filter((t) => t && t.cleanup).map((t) => t.id);
     if (!ids.length) return;
     const key = ids.slice().sort().join(',');
