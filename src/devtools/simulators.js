@@ -75,15 +75,16 @@ async function devicesGroup(ctx) {
   if (res.missing) return null;
   const devices = res.ok ? parseDevices(res.stdout) : null;
   if (!devices) return null;
-  const items = [];
-  await pool(devices, 4, async (d) => {
+  // Keep simctl's order: the runtime notes list device names from this array,
+  // so pushing in completion order made that text change from run to run.
+  return pool(devices, 4, async (d) => {
     let size = d.dataPathSize;
     if (!size && d.dataPath) size = (await dirSize(path.dirname(d.dataPath), { deadline: Date.now() + 8000 })).bytes;
     const booted = /^booted$/i.test(d.state) || /^booting|shutting down$/i.test(d.state);
     const badges = [];
     if (booted) badges.push({ text: 'Booted', kind: 'running' });
     if (!d.available) badges.push({ text: 'Unavailable', kind: 'warn' });
-    items.push(makeItem({
+    return makeItem({
       id: 'simdevice:' + d.udid,
       group: 'simulators',
       kind: 'userdata',
@@ -101,9 +102,8 @@ async function devicesGroup(ctx) {
       paths: d.dataPath ? [path.dirname(d.dataPath)] : [],
       removal: { type: 'command', cmd: 'xcrun', args: ['simctl', 'delete', d.udid], expectGone: d.dataPath ? [path.dirname(d.dataPath)] : [] },
       runtime: d.runtime,
-    }));
+    });
   });
-  return items;
 }
 
 async function runtimesGroup(ctx, devices) {
