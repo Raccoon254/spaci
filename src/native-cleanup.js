@@ -400,6 +400,17 @@ function parseBrewDryRun(stdout) {
   return { bytes, items, autoremove };
 }
 
+// Matched line by line while the output streams: the tail kept in `output`
+// loses the autoremove line when a big cache prints thousands of lines after it.
+const AUTOREMOVE_LINE = /^(?:==>\s*)?(?:Would autoremove|Autoremoving)\b/i;
+const WOULD_REMOVE_LINE = /^Would remove: /;
+
+/** A dry run's plan from a runCommand result: the tail's numbers plus the streamed counters. */
+function brewPlan(r) {
+  const p = parseBrewDryRun(r.output);
+  return { ...p, autoremove: p.autoremove || Boolean(r.autoremove), items: Math.max(p.items, r.items || 0) };
+}
+
 const BREW_AUTOREMOVE_MESSAGE = 'Homebrew said its cleanup would also uninstall formulae (autoremove), so Spaci left it alone. Run brew cleanup yourself to choose.';
 
 /**
@@ -454,7 +465,10 @@ function killTree(child, platform, exec) {
 
 /**
  * Spawn bin with constant args. Resolves { exitCode, signal, timedOut,
- * cancelled, lockWait, missing, output } and never rejects.
+ * cancelled, lockWait, missing, autoremove, items, output } and never rejects.
+ * output is only the last OUTPUT_TAIL characters; autoremove (an autoremove
+ * line was printed) and items (count of "Would remove:" lines) cover the whole
+ * stream.
  *
  * `o.atomic === false` (a command that must not stop part way): the signal is
  * ignored and the timeout only calls `o.onSlow(ms)`; the command is never
@@ -470,6 +484,8 @@ function runCommand(bin, args, o = {}) {
     let timedOut = false;
     let cancelled = false;
     let lockWait = false;
+    let autoremove = false;
+    let items = 0;
     let done = false;
     let child;
     const finish = (r) => {
@@ -477,7 +493,7 @@ function runCommand(bin, args, o = {}) {
       done = true;
       clearTimeout(timer);
       if (o.signal) o.signal.removeEventListener('abort', onAbort);
-      resolve({ timedOut, cancelled, lockWait, missing: false, output: output.slice(-OUTPUT_TAIL), ...r });
+      resolve({ timedOut, cancelled, lockWait, missing: false, autoremove, items, output: output.slice(-OUTPUT_TAIL), ...r });
     };
     const atomic = o.atomic !== false;
     const onAbort = () => { cancelled = true; killTree(child, ctx.platform, o.exec); };
@@ -505,6 +521,10 @@ function runCommand(bin, args, o = {}) {
       else o.signal.addEventListener('abort', onAbort, { once: true });
     }
     let partial = '';
+    const countLine = (l) => {
+      if (AUTOREMOVE_LINE.test(l)) autoremove = true;
+      else if (WOULD_REMOVE_LINE.test(l)) items++;
+    };
     const onData = (chunk) => {
       const text = util.stripAnsi(String(chunk));
       output = (output + text).slice(-OUTPUT_TAIL * 2);
@@ -513,6 +533,7 @@ function runCommand(bin, args, o = {}) {
       for (const line of lines) {
         const l = line.trim();
         if (!l) continue;
+        countLine(l);
         if (o.onLine) { try { o.onLine(l); } catch { /* progress is best effort */ } }
         if (o.lockOutput && o.lockOutput.test(l) && !lockWait) { lockWait = true; killTree(child, ctx.platform, o.exec); }
       }
@@ -521,6 +542,7 @@ function runCommand(bin, args, o = {}) {
     if (child.stderr) child.stderr.on('data', onData);
     child.on('error', (e) => finish({ exitCode: null, signal: null, missing: e && e.code === 'ENOENT', output: String((e && e.message) || e) }));
     child.on('close', (code, sig) => {
+      if (partial.trim()) countLine(partial.trim());
       if (partial.trim() && o.lockOutput && o.lockOutput.test(partial)) lockWait = true;
       finish({ exitCode: typeof code === 'number' ? code : null, signal: sig || null });
     });
@@ -623,7 +645,7 @@ async function preview(target, o = {}) {
     const r = await runCommand(bin, spec.previewArgs, { ...o, env, timeoutMs: 2 * 60 * 1000, lockOutput: spec.lockOutput, onLine: null });
     if (r.lockWait) out.busy = busyMessage(spec, 'process');
     if (r.exitCode === 0) {
-      const p = parseBrewDryRun(r.output);
+      const p = brewPlan(r);
       out.estimate = p.bytes;
       out.estimateKind = 'dry-run';
       out.note = `brew cleanup --dry-run lists ${p.items} ${p.items === 1 ? 'item' : 'items'}.`;
@@ -748,7 +770,7 @@ async function runNative(target, o = {}) {
       const dr = await run(bin, spec.previewArgs, { ...quiet, timeoutMs: 2 * 60 * 1000 });
       if (dr.lockWait) return refuse({ code: 'busy', message: busyMessage(spec, 'process') });
       if (dr.exitCode !== 0) return refuse({ code: 'failed', message: `${[base(bin), ...spec.previewArgs].join(' ')} failed, so Spaci did not run the cleanup.` });
-      if (parseBrewDryRun(dr.output).autoremove) return refuse({ code: 'unsafe', message: BREW_AUTOREMOVE_MESSAGE });
+      if (brewPlan(dr).autoremove) return refuse({ code: 'unsafe', message: BREW_AUTOREMOVE_MESSAGE });
     }
     if (o.signal && o.signal.aborted) return refuse({ code: 'cancelled', message: `Stopped before ${command} started.` });
     const reportMs = o.reportAfterMs || specs.NON_ATOMIC_REPORT_MS;
@@ -821,6 +843,6 @@ async function runNative(target, o = {}) {
 
 module.exports = {
   extraBinDirs, searchDirs, resolveBin, tokenize, commandOf, busyProcesses, checkBusy, busyMessage, daemonPids, lockHolders,
-  outermost, parseDuTotal, measure, pnpmUnreferenced, parseBrewDryRun, parseGradleStatus, BREW_AUTOREMOVE_MESSAGE, childEnv,
+  outermost, parseDuTotal, measure, pnpmUnreferenced, parseBrewDryRun, brewPlan, parseGradleStatus, BREW_AUTOREMOVE_MESSAGE, childEnv,
   runCommand, pickLocated, locate, yarnVariant, measureDirs, safePaths, preview, runNative,
 };

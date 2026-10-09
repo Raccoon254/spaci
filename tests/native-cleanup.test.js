@@ -482,6 +482,21 @@ test('finding 1: a dry run that would autoremove refuses the run, and the previe
   assert.equal(p.blocked, nc.BREW_AUTOREMOVE_MESSAGE);
 });
 
+test('finding 1: an autoremove line pushed out of the output tail by a big cache still refuses the run', async () => {
+  const lines = ['==> Would autoremove 2 unneeded formulae:', 'libfoo', 'libbar'];
+  for (let i = 0; i < 250; i++) lines.push('Would remove: /Users/e/Library/Caches/Homebrew/downloads/' + 'a'.repeat(40) + i + ' (5MB)');
+  lines.push('==> This operation would free approximately 1.5GB of disk space.');
+  assert.equal(nc.parseBrewDryRun(lines.join('\n').slice(-4000)).autoremove, false, 'the tail alone misses it');
+  const spawn = fakeSpawn((args) => (args.includes('--dry-run') ? { out: lines } : args[0] === '--cache' ? { out: ['/Users/e/Library/Caches/Homebrew'] } : {}));
+  const r = await nc.runNative(target('homebrew-cache', [tmp()]), opts({ spawn }));
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'unsafe', JSON.stringify(r));
+  assert.ok(!spawn.calls.some((c) => c.args.join(' ') === 'cleanup --prune=all'), 'the cleanup never ran');
+  const p = await nc.preview(target('homebrew-cache', [tmp()]), opts({ spawn, procs: { ok: true, list: [] } }));
+  assert.equal(p.blocked, nc.BREW_AUTOREMOVE_MESSAGE);
+  assert.match(p.note, /lists 250 items/, 'the item count covers the whole output, not the tail');
+});
+
 test('finding 2: auto mode never falls back to a permanent folder delete (critic repro)', async () => {
   for (const id of ['yarn', 'pip', 'go', 'pnpm', 'uv-cache']) {
     const deleted = [];
