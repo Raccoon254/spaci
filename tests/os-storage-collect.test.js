@@ -229,6 +229,17 @@ test('linux collector: a category folder inside a system root is skipped by that
   assert.equal(linux.isStrictlyInside('/usr/local', '/usr/localx'), false);
 });
 
+test('linux: a category folder with a trailing slash is excluded and counted inside its root', () => {
+  const linux = require('../src/os-storage/linux');
+  assert.equal(linux.globEscape('/usr/local/lib/android/sdk/'), '/usr/local/lib/android/sdk');
+  assert.equal(linux.globEscape('/usr/local/lib/android/sdk//'), '/usr/local/lib/android/sdk');
+  assert.equal(linux.globEscape('/usr/local/odd[1]/'), '/usr/local/odd\\[1\\]');
+  assert.equal(linux.globEscape('/'), '/', 'the root slash stays');
+  assert.equal(linux.isStrictlyInside('/usr/local', '/usr/local/lib/android/sdk/'), true);
+  assert.equal(linux.isStrictlyInside('/usr/local/', '/usr/local/lib/android/sdk/'), true);
+  assert.equal(linux.isStrictlyInside('/usr/local', '/usr/local/'), false);
+});
+
 test('linux collector: ext4 reserve is reported (not part of used)', async () => {
   const linux = require('../src/os-storage/linux');
   const fsp = fakeFs({ files: { '/proc/mounts': fx('linux-proc-mounts.txt'), '/proc/swaps': '' } });

@@ -211,15 +211,21 @@ async function otherHomes(fsp, home) {
   } catch { return []; }
 }
 
+/** Normalized, without a trailing slash (the root slash stays): du matches the path as written. */
+function trimmed(p) {
+  const n = path.posix.normalize(p);
+  return n.length > 1 ? n.replace(/\/+$/, '') : n;
+}
+
 /** True when `p` is a folder below `root` (not `root` itself). POSIX paths. */
 function isStrictlyInside(root, p) {
-  const rel = path.posix.relative(root, path.posix.normalize(p));
+  const rel = path.posix.relative(trimmed(root), trimmed(p));
   return !!rel && !rel.startsWith('..') && !path.posix.isAbsolute(rel);
 }
 
 /** GNU du --exclude takes a glob matched against the whole path: escape it to a literal. */
 function globEscape(p) {
-  return path.posix.normalize(p).replace(/[\\*?[\]]/g, '\\$&');
+  return trimmed(p).replace(/[\\*?[\]]/g, '\\$&');
 }
 
 function topList(children, limit = 12) {
