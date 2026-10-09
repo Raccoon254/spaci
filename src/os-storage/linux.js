@@ -181,7 +181,20 @@ async function collect(ctx) {
     const rest = Math.max(0, varLib.bytes - varLib.children.filter(skip).reduce((a, c) => a + c.bytes, 0));
     if (rest > 0) push(item({ key: 'var-lib', label: 'System service data (/var/lib)', bytes: rest, tier: 'D', group: 'area', paths: ['/var/lib'], confidence: varLib.confidence, icon: 'database', hint: 'Databases and state of system services.' + (varLib.denied ? ' ' + varLib.denied + ' folders need root to measure.' : '') + (known ? ' Docker is listed separately.' : ''), commandNote: 'Owned by system services; remove a service with the package manager to free its data.', children: topList(varLib.children) }));
   }
-  if (usrLocal && usrLocal.bytes > 0 && !categoryDirs.includes('/usr/local')) push(item({ key: 'usr-local', label: 'Locally installed software (/usr/local)', bytes: usrLocal.bytes, tier: 'C', group: 'area', paths: ['/usr/local'], confidence: usrLocal.confidence, icon: 'code', hint: 'Software installed outside the package manager.', children: topList(usrLocal.children) }));
+  // Category folders inside /usr/local (the Android SDK at ANDROID_HOME on CI
+  // images, /usr/local/share/applications) are already counted by their
+  // category: take them out, or the disk adds up to more than it holds.
+  let localCounted = 0;
+  if (usrLocal && usrLocal.bytes > 0) {
+    const inside = categoryDirs.filter((d) => typeof d === 'string' && d.startsWith('/usr/local/'));
+    const outer = inside.filter((d) => !inside.some((o) => o !== d && d.startsWith(o + '/')));
+    for (const d of outer) {
+      const r = await measure(d, { timeoutMs: 60000 });
+      if (r && r.bytes > 0) localCounted += r.bytes;
+    }
+  }
+  const usrLocalRest = usrLocal ? Math.max(0, usrLocal.bytes - localCounted) : 0;
+  if (usrLocal && usrLocalRest > 0 && !categoryDirs.includes('/usr/local')) push(item({ key: 'usr-local', label: 'Locally installed software (/usr/local)', bytes: usrLocalRest, tier: 'C', group: 'area', paths: ['/usr/local'], confidence: usrLocal.confidence, icon: 'code', hint: 'Software installed outside the package manager.', children: topList(usrLocal.children) }));
 
   // 7. Named remainder.
   if (fsType === 'btrfs') push(item({ key: 'btrfs-snapshots', label: 'btrfs snapshots and shared extents', bytes: null, tier: 'D', group: 'remainder', icon: 'clock', hint: 'On btrfs, snapshots (Timeshift, Snapper) and reflinked files share blocks; their exclusive size needs root.', command: 'sudo btrfs subvolume list /', commandNote: 'sudo btrfs filesystem du -s <path> shows shared and exclusive sizes.' }));

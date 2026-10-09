@@ -212,6 +212,20 @@ test('linux collector: journald, package caches, snaps, flatpak, docker, swap, e
   assert.equal(by['ext4-reserved'], undefined, 'no ext4 reserve on btrfs');
 });
 
+test('linux collector: category folders inside /usr/local (ANDROID_HOME on CI) are not counted twice', async () => {
+  const linux = require('../src/os-storage/linux');
+  const fsp = fakeFs({ files: { '/proc/mounts': fx('linux-proc-mounts.txt'), '/proc/swaps': '' } });
+  const measure = fakeMeasure({
+    '/usr/local': { bytes: 20 * GB },
+    '/usr/local/lib/android/sdk': { bytes: 9 * GB },
+    '/usr/local/share/applications': { bytes: 1 * GB },
+  });
+  const categoryDirs = ['/usr/local/lib/android/sdk', '/usr/local/lib/android/sdk/ndk', '/usr/local/share/applications', '/opt'];
+  const { items } = await linux.collect({ home: '/home/me', run: async () => fail(), measure, fs: fsp, statfs: fsp.statfs, categoryDirs });
+  const local = items.find((i) => i.key === 'usr-local');
+  assert.equal(local.bytes, 10 * GB, 'only what no category counts');
+});
+
 test('linux collector: ext4 reserve is reported (not part of used)', async () => {
   const linux = require('../src/os-storage/linux');
   const fsp = fakeFs({ files: { '/proc/mounts': fx('linux-proc-mounts.txt'), '/proc/swaps': '' } });
