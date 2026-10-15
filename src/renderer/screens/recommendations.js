@@ -208,6 +208,104 @@
     SP.go('action');
   }
 
+  // ---- cleaning one recommendation ----
+  // The confirm and the clean, shared by the review page's Clean and the Clean
+  // button on every recommendation row (here and on the dashboard), so the
+  // confirm rules, Docker and the result summary are the same everywhere.
+  function confirmAction(a) {
+    const risk = a.risk || recRisk(a.rec);
+    const safe = risk.key === 'safe';
+    const reversible = risk.key !== 'permanent';
+    const permanentNames = (!reversible && a.kind !== 'docker') ? [a.name] : [];
+    return SP.confirmClean({
+      title: a.kind === 'docker' ? 'Run Docker cleanup?' : undefined,
+      force: !safe || !reversible,
+      count: a.kind === 'docker' ? 1 : a.jobs.length,
+      bytes: a.savings != null ? a.savings : undefined,
+      permanent: permanentNames,
+      note: a.kind === 'docker' ? (a.after ? a.after.text : 'Docker rebuilds this cache the next time you build.') : undefined
+    });
+  }
+  function runAction(a, confirmed) {
+    return a.kind === 'docker'
+      ? api.dockerPrune(a.dockerKind, { confirmed }).then((r) => (r && r.ok ? { ok: true, totalFreed: r.freed, note: r.note || (S.docker && S.docker.diskNote) || null } : r))
+      : api.clean(a.jobs, confirmed ? Object.assign({}, a.meta, { confirmed: true }) : a.meta);
+  }
+
+  // A clean does not touch main's cached scan, so the lists recommendations are
+  // built from drop what went, and the recommendations are worked out again.
+  // Anything refused or failed stays. Docker reports its own change.
+  async function forgetCleaned(a, sum) {
+    if (a.kind !== 'docker') {
+      const gone = new Set(a.jobs.map((j) => j.path).filter((p) => !sum.blocked(p)));
+      [S.projects, S.recsProjects].forEach((list) => (list || []).forEach((p) => {
+        if (!p || !Array.isArray(p.items)) return;
+        const before = p.items.length;
+        p.items = p.items.filter((it) => !gone.has(it.path));
+        if (p.items.length !== before) p.cleanableSize = p.items.filter((i) => i.safe === true).reduce((x, i) => x + (i.size || 0), 0);
+      }));
+      const id = a.kind === 'cache' && a.rec && a.rec.action ? a.rec.action.id : null;
+      if (id && a.jobs.every((j) => gone.has(j.path)) && !sum.refusedTargets.has(id)) {
+        S.sysTargets = (S.sysTargets || []).filter((t) => t.id !== id);
+        S.recsSystem = (S.recsSystem || []).filter((t) => t.id !== id);
+      }
+    }
+    try {
+      const recs = await api.recommendations({
+        projects: (S.recsLoaded ? S.recsProjects : S.projects) || [],
+        sysTargets: (S.recsLoaded ? S.recsSystem : S.sysTargets) || [],
+      });
+      if (Array.isArray(recs)) S.recs = recs;
+    } catch (_) { /* keep the list as it is */ }
+    if (SP.tiers) SP.tiers.invalidate();
+  }
+
+  const recKey = (r) => (r && (r.id || r.title)) || '';
+
+  // The row's Clean button: confirm, then clean in place, without leaving the
+  // screen. Worktrees keep their own remove flow, which confirms each one.
+  async function cleanRec(rec) {
+    if (!rec || S.recCleaning || S.cleaning || S.confirmCfg) return;
+    if (rec.action && rec.action.type === 'remove-worktrees') { openAction(rec); return; }
+    const from = S.route;
+    S.recCleaning = recKey(rec);
+    try {
+      await loadRecs(false);
+      const a = resolveAction(rec);
+      if (!a || (a.kind === 'docker' ? !a.dockerKind : !a.jobs.length)) {
+        SP.toast('Nothing to clean', 'The scan no longer lists files for this. Scan again to refresh.');
+        return;
+      }
+      const cf = await confirmAction(a);
+      if (!cf.go) return;
+      if (S.route === from) SP.go(from); // show the row as cleaning
+      let res;
+      try { res = await runAction(a, cf.confirmed); } catch (err) { res = { ok: false, error: (err && err.message) || 'Clean failed' }; }
+      const sum = SP.reportClean(res, { fallbackFreed: a.savings != null ? a.savings : 0, burstLabel: (a.meta && a.meta.label) || a.name });
+      if (sum.ok) await forgetCleaned(a, sum);
+    } finally {
+      S.recCleaning = null;
+      if (S.route === from) SP.go(from);
+    }
+  }
+  SP.cleanRec = cleanRec;
+  // Clicking a recommendation views it: the review page, from any screen.
+  SP.openRec = async (rec) => { await loadRecs(false); openAction(rec); };
+
+  // The Clean button for a recommendation row, the same on every screen.
+  SP.recCleanButton = function recCleanButton(r, opts) {
+    opts = opts || {};
+    const busy = !!S.recCleaning && S.recCleaning === recKey(r);
+    const off = !!S.recCleaning || !!S.cleaning;
+    return el('button', {
+      'data-rec-clean': '',
+      style: 'height:' + (opts.height || 42) + 'px;padding:0 18px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:8px;cursor:pointer;flex:none'
+        + (off ? ';opacity:.6;pointer-events:none' : ''),
+      hov: 'background:var(--accent-hover)',
+      onclick: (e) => { e.stopPropagation(); cleanRec(r); },
+    }, [busy ? ic('spaci-ring', 15, { anim: 'elastic' }) : ic('trash', 15), busy ? 'Cleaning…' : r.kind === 'worktrees' ? 'Remove' : 'Clean']);
+  };
+
   // ---- shared header (title + subtitle + right-side button) ----
   function pageHeader(title, subtitle, btn) {
     return el('div', { style: 'display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:24px' }, [
@@ -319,18 +417,16 @@
         text: risk.text,
       });
 
-      const cleanBtn = el('button', {
-        style: 'height:42px;padding:0 18px;border-radius:11px;border:none;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:8px;cursor:pointer;flex:none',
-        hov: 'background:var(--accent-hover)',
-        onclick: (e) => { e.stopPropagation(); openAction(r); },
-      }, [ic('trash', 15), r.kind === 'worktrees' ? 'Remove' : 'Clean']);
+      // Clean cleans here; clicking the card views it.
+      const cleanBtn = SP.recCleanButton(r);
 
       return el('div', {
+        'data-rec-id': recKey(r),
         class: 'sp-hov',
         style: `display:flex;align-items:center;gap:16px;padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid ${borderColor};cursor:pointer`,
         hov: 'border-color:var(--border-2);transform:translateX(2px)',
-        // Mouse users can click anywhere on the card; keyboard and screen
-        // reader users get one control, the Clean button inside it.
+        // Mouse users can click anywhere on the card to review it; keyboard and
+        // screen reader users get one control, the Clean button inside it.
         role: 'presentation',
         tabindex: '-1',
         onclick: () => openAction(r),
@@ -512,26 +608,12 @@
 
     async function apply() {
       if (S.actionCleaning || !applicable) return;
-      let confirmed = false;
-      {
-        const permanentNames = (!reversible && a.kind !== 'docker') ? [a.name] : [];
-        const cf = await SP.confirmClean({
-          title: a.kind === 'docker' ? 'Run Docker cleanup?' : undefined,
-          force: !safe || !reversible,
-          count: a.kind === 'docker' ? 1 : a.jobs.length,
-          bytes: a.savings != null ? a.savings : undefined,
-          permanent: permanentNames,
-          note: a.kind === 'docker' ? (a.after ? a.after.text : 'Docker rebuilds this cache the next time you build.') : undefined
-        });
-        if (!cf.go) return;
-        confirmed = cf.confirmed;
-      }
+      const cf = await confirmAction(a);
+      if (!cf.go) return;
       S.actionCleaning = true;
       if (S.route === 'action') SP.go('action'); // reflect the cleaning state
       try {
-        const res = a.kind === 'docker'
-          ? await api.dockerPrune(a.dockerKind, { confirmed }).then((r) => (r && r.ok ? { ok: true, totalFreed: r.freed, note: r.note || (S.docker && S.docker.diskNote) || null } : r))
-          : await api.clean(a.jobs, confirmed ? Object.assign({}, a.meta, { confirmed: true }) : a.meta);
+        const res = await runAction(a, cf.confirmed);
         if (a.kind !== 'docker' && res && res.ok !== false) {
           // Try again resends only what was not removed.
           const sumR = SP.summariseClean(res);

@@ -434,19 +434,20 @@
       ]));
       host.appendChild(
         el('div', { style: 'display:flex;flex-direction:column;gap:9px' },
+          // Clicking a row reviews it; its Clean button cleans it here.
           recs.slice(0, 3).map((r) => el('div', {
+            'data-rec-id': r.id || r.title || '',
             class: 'sp-hov',
             style: 'display:flex;align-items:center;gap:14px;padding:15px 17px;border-radius:15px;background:var(--panel);border:1px solid var(--border);cursor:pointer',
             hov: 'border-color:var(--border-2);transform:translateX(2px)',
-            onclick: () => SP.go('recommendations')
+            onclick: () => (SP.openRec ? SP.openRec(r) : SP.go('recommendations'))
           }, [
             el('div', { style: 'width:42px;height:42px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--text-2)' }, [recMark(r, 23)]),
             el('div', { style: 'flex:1;min-width:0' }, [
               el('div', { style: 'font-weight:600;font-size:14.5px', text: r.title || r.label || 'Cleanable' }),
               el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:2px', text: r.body || r.note || r.path || '' })
             ]),
-            el('div', { style: 'font-weight:700;font-size:15px;color:var(--accent-fg);flex:none', text: fmt(recSize(r)) }),
-            ic('chevron-right', 18, { color: 'var(--text-4)' })
+            SP.recCleanButton ? SP.recCleanButton(r, { height: 38 }) : null
           ]))
         )
       );
