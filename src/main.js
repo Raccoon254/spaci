@@ -1220,6 +1220,9 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
       if (!ran.has(j.path)) items.push({ ...described.get(j.path), outcome: 'failed', bytes: 0, reason: 'Not cleaned: the clean was stopped first.' });
     }
     putHistory(historyLog.finishedEntry({ ...started, finishedAt: Date.now(), status: 'done', items }));
+    // What went leaves the cached scan, so a reload (a restart, a Docker change)
+    // never offers it again. Refused and failed items stay listed.
+    forgetCleaned(items.filter((i) => i.outcome === 'removed' || i.outcome === 'trashed').map((i) => i.path));
 
     const errors = [...del.errors, ...tr.errors].map((er) => ({ ...er }));
     const trashed = (tr.results || []).filter((r) => r.ok).map((r) => r.path);
@@ -1237,6 +1240,31 @@ ipcMain.handle('clean', async (e, jobs, meta) => {
     return { ok: false, error: err.message, historyId };
   }
 });
+
+/**
+ * Cleaned paths leave the cached scan: a project item is dropped and a system
+ * target that was emptied reads as 0 bytes. Returns whether anything changed.
+ * The screens drop what they cleaned themselves, so this does not repaint them.
+ */
+function forgetCleaned(paths) {
+  if (!paths || !paths.length) return false;
+  const set = new Set(paths);
+  let changed = false;
+  for (const p of cache.projects || []) {
+    if (!p || !Array.isArray(p.items)) continue;
+    const n = p.items.length;
+    p.items = p.items.filter((it) => !set.has(it.path));
+    if (p.items.length !== n) {
+      p.cleanableSize = p.items.filter((i) => i.safe === true).reduce((s, i) => s + (i.size || 0), 0);
+      changed = true;
+    }
+  }
+  for (const t of cache.system || []) {
+    if (t && t.size !== 0 && (t.existingPaths || []).some((x) => set.has(x))) { t.size = 0; changed = true; }
+  }
+  if (changed) writeCache();
+  return changed;
+}
 
 // ---------- git worktrees ----------
 // Removing a linked worktree is `git worktree remove` (never --force), run by
@@ -1634,16 +1662,7 @@ function acNotify(title, body) {
 
 /** Staged paths leave the cached scan, so no screen offers them again. */
 function acForget(paths) {
-  if (!paths || !paths.length) return;
-  const set = new Set(paths);
-  for (const p of cache.projects || []) {
-    if (!p || !Array.isArray(p.items)) continue;
-    const n = p.items.length;
-    p.items = p.items.filter((it) => !set.has(it.path));
-    if (p.items.length !== n) p.cleanableSize = p.items.filter((i) => i.safe === true).reduce((s, i) => s + (i.size || 0), 0);
-  }
-  for (const t of cache.system || []) if (t && (t.existingPaths || []).some((x) => set.has(x))) t.size = 0;
-  writeCache();
+  if (!forgetCleaned(paths)) return;
   acEmit('cache:updated', { scannedAt: cache.scannedAt });
 }
 
