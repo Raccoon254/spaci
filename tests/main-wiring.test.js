@@ -667,6 +667,43 @@ test('clean: main decides reversibility, gates irreversible targets, and logs a 
   } finally { m.cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('clean: what was removed leaves the cached scan, so no reload offers it again; failures stay', async () => {
+  const dir = tmpTree('spaci-forget-');
+  const proj = path.join(dir, 'app');
+  const nm = path.join(proj, 'node_modules');
+  const gone = path.join(proj, '.next');
+  fs.mkdirSync(path.join(nm, 'dep'), { recursive: true });
+  fs.writeFileSync(path.join(nm, 'dep', 'index.js'), 'x'.repeat(4000));
+  fs.writeFileSync(path.join(proj, 'package.json'), '{}');
+  const npmDir = path.join(dir, 'npm-cache');
+  fs.mkdirSync(npmDir);
+  fs.writeFileSync(path.join(npmDir, 'tarball'), 'y'.repeat(3000));
+  const NPM = { id: 'npm', name: 'npm cache', category: 'Developer', safe: true, reversible: true, mode: 'contents', paths: [npmDir] };
+  const m = loadMain(undefined, { scanner: { revalidateArtifact: async () => ({ ok: true }) }, system: { TARGETS: [NPM] } });
+  try {
+    await scanInto(m, [{ path: proj, items: [{ name: 'node_modules', path: nm, size: 4000, safe: true }, { name: '.next', path: gone, size: 900, safe: true }], cleanableSize: 4900 }]);
+    const sys = m.handlers['scan:system']({ sender: cleanEvent.sender });
+    await flush();
+    m.jobs.system[0].finish([{ id: 'npm', size: 3000, safe: true, existingPaths: [npmDir] }]);
+    await sys;
+
+    // .next vanished since the scan, so it fails: it stays listed.
+    const res = await m.handlers.clean(cleanEvent, [{ path: nm }, { path: gone }], { scope: 'projects' });
+    assert.equal(res.ok, true, res.error);
+    assert.equal(fs.existsSync(nm), false);
+    let c = await m.handlers['cache:get']();
+    assert.deepEqual(c.projects[0].items.map((i) => i.path), [gone], 'removed leaves the cache, failed stays');
+    assert.equal(c.projects[0].cleanableSize, 900);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(m.userData, 'cache.json'), 'utf8')).projects[0].items.map((i) => i.path), [gone], 'written to disk');
+
+    const res2 = await m.handlers.clean(cleanEvent, [{ path: npmDir, mode: 'contents' }], { scope: 'system' });
+    assert.equal(res2.ok, true, res2.error);
+    assert.deepEqual(res2.refused, []);
+    c = await m.handlers['cache:get']();
+    assert.equal(c.system.find((t) => t.id === 'npm').size, 0, 'an emptied cache reads as empty');
+  } finally { m.cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('clean: a job that fails counts as failed with its error code, never as removed', async () => {
   const dir = tmpTree('spaci-cleanfail-');
   const proj = path.join(dir, 'app');
