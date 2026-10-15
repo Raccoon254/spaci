@@ -1532,20 +1532,61 @@ function tierTrust() {
   return { targetsById, itemsByPath };
 }
 
-// api.cleanTiers({ projects, sysTargets }) -> { tiers, planA, badges }.
-// A system target's paths always come from main's cache, never the renderer.
-ipcMain.handle('tiers:get', (_e, payload) => {
+/** What the renderer shows, with each system target's paths from main's cache, never the renderer. */
+function tierInput(payload) {
   const shown = payload && typeof payload === 'object' ? payload : {};
   const cachedById = new Map((cache.system || []).map((t) => [t && t.id, t]));
-  const input = {
+  return {
     projects: Array.isArray(shown.projects) ? shown.projects : [],
     sysTargets: (Array.isArray(shown.sysTargets) ? shown.sysTargets : []).filter((t) => t && typeof t.id === 'string').map((t) => {
       const c = cachedById.get(t.id);
       return { ...t, existingPaths: c && Array.isArray(c.existingPaths) ? c.existingPaths : [], paths: c && Array.isArray(c.paths) ? c.paths : [] };
     }),
   };
+}
+
+// api.cleanTiers({ projects, sysTargets }) -> { tiers, planA, badges }.
+ipcMain.handle('tiers:get', (_e, payload) => {
+  const input = tierInput(payload);
   const tiers = cleanTiers.classifyScan(input, tierTrust());
   return { tiers, planA: cleanTiers.planTierA(input, tiers), badges: cleanTiers.BADGES };
+});
+
+// When each project was last used (auto-clean's projectEvidence), for "Clean
+// unused developer files". Walked once per scan, and again when asked fresh:
+// the renderer asks fresh right before cleaning, so a project opened since the
+// scan is never included. Checks run one at a time.
+const unusedEv = { scannedAt: null, map: new Map(), queue: Promise.resolve() };
+function unusedEvidence(paths, fresh) {
+  const run = async () => {
+    if (unusedEv.scannedAt !== cache.scannedAt) { unusedEv.scannedAt = cache.scannedAt; unusedEv.map = new Map(); }
+    const staleMs = cleanTiers.UNUSED_DAYS * 24 * HOUR;
+    for (const p of paths) {
+      if (isQuitting) break;
+      if (!fresh && unusedEv.map.has(p)) continue;
+      unusedEv.map.set(p, await autoClean.projectEvidence(p, { now: Date.now(), staleMs }).catch(() => null));
+    }
+    return unusedEv.map;
+  };
+  unusedEv.queue = unusedEv.queue.then(run, run);
+  return unusedEv.queue;
+}
+
+// api.cleanTiersUnused({ projects, sysTargets, fresh }) -> { plan }.
+// Projects and their items come from main's scan, narrowed to the item paths
+// the renderer still shows (what was cleaned since is gone from its lists).
+ipcMain.handle('tiers:unused', async (_e, payload) => {
+  const input = tierInput(payload);
+  const shownPaths = new Set();
+  for (const p of input.projects) for (const it of (p && Array.isArray(p.items)) ? p.items : []) if (it && typeof it.path === 'string') shownPaths.add(it.path);
+  const projects = (cache.projects || []).filter((p) => p && typeof p.path === 'string')
+    .map((p) => ({ path: p.path, items: ((p.items) || []).filter((it) => it && shownPaths.has(it.path)) }))
+    .filter((p) => p.items.length);
+  const trusted = { projects, sysTargets: input.sysTargets };
+  const tiers = cleanTiers.classifyScan(trusted, tierTrust());
+  const withA = projects.filter((p) => p.items.some((it) => tiers.items[it.path] && tiers.items[it.path].tier === 'A')).map((p) => p.path);
+  const evidence = await unusedEvidence(withA, !!(payload && payload.fresh === true));
+  return { plan: cleanTiers.planUnusedTierA(trusted, tiers, evidence) };
 });
 
 const AUTOCLEAN_PATH = path.join(app.getPath('userData'), 'auto-clean.json');

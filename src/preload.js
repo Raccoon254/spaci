@@ -88,6 +88,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // ---- clean tiers and auto-clean ----
   cleanTiers: (payload) => ipcRenderer.invoke('tiers:get', payload),
+  cleanTiersUnused: (payload) => ipcRenderer.invoke('tiers:unused', payload),
   autoCleanGet: () => ipcRenderer.invoke('autoclean:get'),
   autoCleanSet: (patch) => ipcRenderer.invoke('autoclean:set', patch),
   autoCleanApprove: (previewId) => ipcRenderer.invoke('autoclean:approve', previewId),

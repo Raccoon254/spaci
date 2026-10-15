@@ -232,57 +232,108 @@ function pickFlags(t) {
 }
 
 /**
- * Every tier A thing, as clean jobs plus a summary grouped by kind.
- * Only what `classifyScan` put in A is included, and only with a size.
- * count is things (a project folder or a cache), not jobs: one cache can have
- * several paths.
- * @returns {{jobs:object[], groups:object[], count:number, bytes:number, projects:number}}
+ * Collects jobs and their per-kind summary. count is things (a project folder
+ * or a cache), not jobs: one cache can have several paths.
  */
-function planTierA(shown = {}, tiers = classifyScan(shown)) {
+function planBuilder() {
   const jobs = [];
   const groups = new Map();
   const touchedProjects = new Set();
   let count = 0;
-  const add = (key, hint, bytes, label) => {
-    if (!groups.has(key)) groups.set(key, { key, label: label || key, hint, count: 0, bytes: 0 });
+  const add = (key, hint, bytes) => {
+    if (!groups.has(key)) groups.set(key, { key, label: key, hint, count: 0, bytes: 0 });
     const g = groups.get(key);
     count++;
     g.count++;
     g.bytes += bytes;
   };
-  for (const p of Array.isArray(shown.projects) ? shown.projects : []) {
-    for (const it of (p && Array.isArray(p.items)) ? p.items : []) {
-      if (!it || typeof it.path !== 'string') continue;
-      const r = tiers.items[it.path];
-      if (!r || r.tier !== TIERS.A) continue;
+  return {
+    artifact(p, it) {
       const bytes = Number(it.size) || 0;
-      if (bytes <= 0) continue;
+      if (bytes <= 0) return;
       const name = it.name || baseName(it.path);
       const g = ARTIFACT_GROUPS[name];
       jobs.push({ path: it.path, isDir: it.isDir !== false, size: bytes, kind: 'artifact', project: p.path, name });
       touchedProjects.add(p.path);
       add(g.group, g.hint, bytes);
-    }
+    },
+    target(t) {
+      const paths = (Array.isArray(t.existingPaths) && t.existingPaths.length) ? t.existingPaths : (Array.isArray(t.paths) ? t.paths : []);
+      const bytes = Number(t.size) || 0;
+      if (!paths.length || bytes <= 0) return;
+      const g = A_TARGETS[t.id];
+      // The size belongs to the target; spread nothing, so the total stays exact.
+      paths.forEach((path, i) => jobs.push({ path, mode: 'contents', size: i === 0 ? bytes : 0, kind: 'cache', target: t.id, name: t.name }));
+      add(g.group, g.hint, bytes);
+    },
+    done() {
+      const list = [...groups.values()].sort((a, b) => b.bytes - a.bytes);
+      const bytes = list.reduce((s, g) => s + g.bytes, 0);
+      return { jobs, groups: list, count, bytes, projects: touchedProjects.size };
+    },
+  };
+}
+
+/** A project's tier A items, as `classifyScan` sorted them. */
+function aItemsOf(p, tiers) {
+  return ((p && Array.isArray(p.items)) ? p.items : []).filter((it) => {
+    if (!it || typeof it.path !== 'string') return false;
+    const r = tiers.items[it.path];
+    return !!r && r.tier === TIERS.A;
+  });
+}
+
+/**
+ * Every tier A thing, as clean jobs plus a summary grouped by kind.
+ * Only what `classifyScan` put in A is included, and only with a size.
+ * @returns {{jobs:object[], groups:object[], count:number, bytes:number, projects:number}}
+ */
+function planTierA(shown = {}, tiers = classifyScan(shown)) {
+  const b = planBuilder();
+  for (const p of Array.isArray(shown.projects) ? shown.projects : []) {
+    for (const it of aItemsOf(p, tiers)) b.artifact(p, it);
   }
   for (const t of Array.isArray(shown.sysTargets) ? shown.sysTargets : []) {
     if (!t || typeof t.id !== 'string') continue;
     const r = tiers.system[t.id];
     if (!r || r.tier !== TIERS.A) continue;
-    const paths = (Array.isArray(t.existingPaths) && t.existingPaths.length) ? t.existingPaths : (Array.isArray(t.paths) ? t.paths : []);
-    const bytes = Number(t.size) || 0;
-    if (!paths.length || bytes <= 0) continue;
-    const g = A_TARGETS[t.id];
-    // The size belongs to the target; spread nothing, so the total stays exact.
-    paths.forEach((path, i) => jobs.push({ path, mode: 'contents', size: i === 0 ? bytes : 0, kind: 'cache', target: t.id, name: t.name }));
-    add(g.group, g.hint, bytes);
+    b.target(t);
   }
-  const list = [...groups.values()].sort((a, b) => b.bytes - a.bytes);
-  const bytes = list.reduce((s, g) => s + g.bytes, 0);
-  return { jobs, groups: list, count, bytes, projects: touchedProjects.size };
+  return b.done();
+}
+
+/** Days without use before a project's build output counts as unused. */
+const UNUSED_DAYS = 7;
+
+/**
+ * Tier A build output of projects nobody has used for `days`, so cleaning it
+ * never makes an active project reinstall. Package caches are left out: the
+ * active projects share them. `evidence` is per project path, from
+ * auto-clean's projectEvidence ({ lastActivity, keep }). It fails closed: a
+ * project with no evidence, an inconclusive one or a .spaci-keep file is
+ * counted in unknownProjects and left alone.
+ * @returns {{jobs:object[], groups:object[], count:number, bytes:number, projects:number,
+ *   activeProjects:number, unknownProjects:number, days:number}}
+ */
+function planUnusedTierA(shown = {}, tiers = classifyScan(shown), evidence = new Map(), { now = Date.now(), days = UNUSED_DAYS } = {}) {
+  const ev = evidence instanceof Map ? evidence : new Map();
+  const staleMs = days * 24 * 60 * 60 * 1000;
+  const b = planBuilder();
+  let activeProjects = 0;
+  let unknownProjects = 0;
+  for (const p of Array.isArray(shown.projects) ? shown.projects : []) {
+    const a = aItemsOf(p, tiers);
+    if (!a.length) continue;
+    const e = ev.get(p.path);
+    if (!e || e.keep || typeof e.lastActivity !== 'number') { unknownProjects++; continue; }
+    if (now - e.lastActivity < staleMs) { activeProjects++; continue; }
+    for (const it of a) b.artifact(p, it);
+  }
+  return { ...b.done(), activeProjects, unknownProjects, days };
 }
 
 module.exports = {
-  TIERS, BADGES, ARTIFACT_GROUPS, A_TARGETS, DOCKER_TIERS,
+  TIERS, BADGES, ARTIFACT_GROUPS, A_TARGETS, DOCKER_TIERS, UNUSED_DAYS,
   tierOfProjectItem, tierOfTarget, tierOfDockerKind, tierOfLargeFile,
-  classifyScan, planTierA, baseName,
+  classifyScan, planTierA, planUnusedTierA, baseName,
 };

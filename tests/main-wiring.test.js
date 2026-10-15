@@ -1176,10 +1176,59 @@ test('notice notifications honour the notify pref; the notice itself still reach
 });
 
 // ---- clean tiers and auto-clean ----
+test('tiers:unused: only build output of projects unused for 7 days, from main\'s scan, re-checked when fresh', async () => {
+  const dir = tmpTree('spaci-unused-wiring-');
+  const old = Date.now() / 1000 - 30 * 24 * 3600;
+  const mk = (name, stale) => {
+    const proj = path.join(dir, name);
+    const nm = path.join(proj, 'node_modules');
+    fs.mkdirSync(path.join(nm, 'dep'), { recursive: true });
+    fs.writeFileSync(path.join(proj, 'package.json'), '{}');
+    fs.writeFileSync(path.join(nm, 'dep', 'index.js'), 'dep');
+    if (stale) for (const p of [path.join(proj, 'package.json'), nm, proj]) fs.utimesSync(p, old, old);
+    return { proj, nm };
+  };
+  const idle = mk('idle', true);
+  const busy = mk('busy', false);
+  const NPM = { id: 'npm', name: 'npm cache', category: 'Developer', safe: true, reversible: true, mode: 'contents', paths: [path.join(dir, 'npm')] };
+  const m = loadMain(undefined, { system: { TARGETS: [NPM] } });
+  try {
+    const nmItem = (x, o = {}) => ({ name: 'node_modules', path: x.nm, size: 10, safe: true, reversible: true, ...o });
+    await scanInto(m, [
+      { path: idle.proj, items: [nmItem(idle), { name: 'dist', path: path.join(idle.proj, 'dist'), size: 5, safe: false }], cleanableSize: 10 },
+      { path: busy.proj, items: [nmItem(busy)], cleanableSize: 10 },
+    ]);
+    const shown = {
+      // The renderer claims dist is safe and files a busy item under the idle project: main's scan wins.
+      projects: [{ path: idle.proj, items: [nmItem(idle), { name: 'dist', path: path.join(idle.proj, 'dist'), size: 5, safe: true }, nmItem(busy)] }],
+      sysTargets: [{ id: 'npm', safe: true, size: 7 }],
+    };
+    let r = await m.handlers['tiers:unused']({}, shown);
+    assert.deepEqual(r.plan.jobs.map((j) => j.path), [idle.nm]);
+    assert.equal(r.plan.activeProjects, 1);
+    assert.equal(r.plan.days, 7);
+    assert.ok(!r.plan.jobs.some((j) => j.kind === 'cache'), 'package caches are never in the unused plan');
+
+    // Something cleaned since is no longer offered: only what the renderer still shows counts.
+    assert.equal((await m.handlers['tiers:unused']({}, { projects: [], sysTargets: [] })).plan.count, 0);
+    assert.equal((await m.handlers['tiers:unused']({}, 'junk')).plan.count, 0);
+
+    // Used again since the last check: cached until asked fresh, which the renderer does before cleaning.
+    fs.writeFileSync(path.join(idle.proj, 'index.js'), 'edited');
+    r = await m.handlers['tiers:unused']({}, shown);
+    assert.equal(r.plan.count, 1, 'evidence is cached per scan');
+    r = await m.handlers['tiers:unused']({}, { ...shown, fresh: true });
+    assert.equal(r.plan.count, 0);
+    assert.equal(r.plan.activeProjects, 2);
+  } finally {
+    m.cleanup();
+  }
+});
+
 test('clean tiers and auto-clean IPC: bridged, tiers trust main, approve and undo are main-owned', async () => {
   const ac = require('../src/auto-clean');
   const hl = require('../src/history-log');
-  const channels = ['tiers:get', 'autoclean:get', 'autoclean:set', 'autoclean:approve', 'autoclean:undo', 'autoclean:preview'];
+  const channels = ['tiers:get', 'tiers:unused', 'autoclean:get', 'autoclean:set', 'autoclean:approve', 'autoclean:undo', 'autoclean:preview'];
   const preload = fs.readFileSync(path.join(SRC, 'preload.js'), 'utf8');
   const bridged = [...preload.matchAll(/invoke\('((?:tiers|autoclean):[a-z]+)'/g)].map((x) => x[1]).sort();
   assert.deepEqual(bridged, [...channels].sort());
