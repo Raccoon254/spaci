@@ -134,6 +134,36 @@
       .catch(() => { tierState.loading = null; return null; });
     return tierState.loading;
   }
+  // Build output of projects unused for 7 days (main walks each project for
+  // its last use, once per scan). `fresh` re-checks every project, which the
+  // clean does right before it confirms.
+  const unusedState = { data: null, sig: '', loading: null };
+  function loadUnused(fresh) {
+    if (!window.api || typeof window.api.cleanTiersUnused !== 'function') return Promise.resolve(null);
+    const sig = tierSig();
+    if (!fresh && unusedState.data && unusedState.sig === sig) return Promise.resolve(unusedState.data);
+    if (!fresh && unusedState.loading && unusedState.loadingSig === sig) return unusedState.loading;
+    unusedState.loadingSig = sig;
+    const req = window.api.cleanTiersUnused({ projects: S.projects || [], sysTargets: S.sysTargets || [], fresh: !!fresh })
+      .then((d) => {
+        if (unusedState.loading === req) unusedState.loading = null;
+        const changed = !unusedState.data || unusedState.sig !== sig || JSON.stringify(unusedState.data.plan) !== JSON.stringify(d && d.plan);
+        unusedState.data = d || null;
+        unusedState.sig = sig;
+        if (changed && S.route === 'dashboard' && !S.cleaning && !S.confirmCfg) SP.go(S.route);
+        return unusedState.data;
+      })
+      .catch(() => {
+        // Settled with no plan: the card hides instead of checking forever.
+        if (unusedState.loading === req) unusedState.loading = null;
+        unusedState.data = { plan: null };
+        unusedState.sig = sig;
+        if (S.route === 'dashboard' && !S.cleaning && !S.confirmCfg) SP.go(S.route);
+        return null;
+      });
+    unusedState.loading = req;
+    return req;
+  }
   function fallbackTarget(t) {
     if (!t) return 'B';
     if (t.reversible === false || (t.storyCategory === 'aitools' && !t.safe)) return 'C';
@@ -150,8 +180,11 @@
     // badges show a guess; anything that selects or cleans awaits load().
     ready: () => !!(tierState.data && tierState.sig === tierSig()),
     load: loadTiers,
-    invalidate: () => { tierState.sig = ''; },
+    invalidate: () => { tierState.sig = ''; unusedState.sig = ''; },
     plan: () => (tierState.data && tierState.sig === tierSig() ? tierState.data.planA : null),
+    ensureUnused: () => { loadUnused(false); },
+    unusedReady: () => !!(unusedState.data && unusedState.sig === tierSig()),
+    unusedPlan: () => (unusedState.data && unusedState.sig === tierSig() ? unusedState.data.plan : null),
     target: (t) => {
       const d = tierState.data && tierState.data.tiers && tierState.data.tiers.system[t && t.id];
       return d ? d.tier : fallbackTarget(t);
@@ -176,56 +209,78 @@
     },
   };
 
-  // ---------- Clean all developer files (tier A, one confirm) ----------
-  // Every tier A thing across all projects and developer caches, confirmed once
-  // with a summary, then cleaned through api.clean like any other clean: main's
-  // guard, its revalidation of project folders and its confirmation gate decide
-  // what really goes.
+  // ---------- Clean developer files (tier A, one confirm) ----------
+  // Two plans, cleaned the same way: every tier A thing across all projects and
+  // developer caches ("Clean all"), or only the build output of projects
+  // unused for 7 days ("Clean unused"). Each is confirmed once with a summary,
+  // then cleaned through api.clean like any other clean: main's guard, its
+  // revalidation of project folders and its confirmation gate decide what
+  // really goes.
   let cleanAllBusy = false;
-  function planBody(plan) {
+  function planLines(plan) {
     const lines = [];
-    lines.push('Build output and package caches: ' + plan.count + (plan.count === 1 ? ' item' : ' items')
-      + (plan.projects ? ' across ' + plan.projects + (plan.projects === 1 ? ' project' : ' projects') : '') + '.');
-    lines.push('');
     plan.groups.forEach((g) => {
       lines.push('• ' + g.label + ': ' + g.count + ' (' + fmt(g.bytes) + ')');
       if (g.hint) lines.push('   Comes back: ' + String(g.hint).replace(/\.$/, '') + '.');
     });
+    return lines;
+  }
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+  function planBody(plan) {
+    const lines = [];
+    lines.push('Build output and package caches: ' + plural(plan.count, 'item', 'items')
+      + (plan.projects ? ' across ' + plural(plan.projects, 'project', 'projects') : '') + '.');
+    lines.push('');
+    lines.push(...planLines(plan));
     lines.push('');
     lines.push('Everything rebuilds on the next install or build. App caches, the Maven repository, AI tool history, the Trash and anything unverified are not included.');
     return lines.join('\n');
   }
-  SP.cleanAllDev = async function cleanAllDev() {
+  function unusedBody(plan) {
+    const lines = [];
+    lines.push('Build output of ' + plural(plan.projects, 'project', 'projects') + ' not used in ' + plan.days + ' days or more: '
+      + plural(plan.count, 'item', 'items') + '.');
+    lines.push('');
+    lines.push(...planLines(plan));
+    lines.push('');
+    const kept = (plan.activeProjects || 0) + (plan.unknownProjects || 0);
+    lines.push('Each rebuilds on the next install or build in that project. '
+      + (kept ? plural(kept, 'project', 'projects') + ' used recently or that Spaci could not check ' + (kept === 1 ? 'is' : 'are') + ' left alone, and so are' : 'Left alone:')
+      + ' package caches, app caches and anything unverified.');
+    return lines.join('\n');
+  }
+
+  async function runDevClean(kind, o) {
     if (cleanAllBusy || S.cleaning) return;
     cleanAllBusy = true;
     try {
-      const data = await loadTiers(true);
-      const plan = data && data.planA;
+      const plan = await o.plan();
       if (!plan || !plan.count || !plan.jobs.length) {
-        SP.toast('Nothing to clean', 'No developer build output or package caches were found. Scan to look again.');
+        SP.toast('Nothing to clean', o.empty);
+        if (S.route === 'dashboard') SP.go(S.route);
         return;
       }
       const ok = await SP.confirm({
-        title: 'Clean all developer files (' + fmt(plan.bytes) + ')?',
-        body: planBody(plan),
+        title: o.title + ' (' + fmt(plan.bytes) + ')?',
+        body: o.body(plan),
         confirmLabel: 'Clean ' + fmt(plan.bytes),
         icon: 'broom',
       });
       if (!ok) return;
       S.cleaning = true;
-      S.cleanAllRunning = true;
+      S.cleanAllRunning = kind;
       if (TIER_SCREENS.has(S.route)) SP.go(S.route);
       const jobs = plan.jobs.map((j) => (j.mode ? { path: j.path, mode: j.mode } : { path: j.path, isDir: j.isDir, size: j.size }));
       const nameOf = (id) => { const t = (S.sysTargets || []).find((x) => x.id === id); return t ? t.name : ''; };
       let res;
       try {
-        res = await window.api.clean(jobs, { scope: 'developer', label: 'All developer files', confirmed: true });
+        res = await window.api.clean(jobs, { scope: 'developer', label: o.label, confirmed: true });
       } catch (err) {
         res = { ok: false, error: (err && err.message) || 'Clean failed' };
       }
       S.cleaning = false;
       S.cleanAllRunning = false;
-      const sum = SP.reportClean(res, { fallbackFreed: plan.bytes, names: nameOf, burstLabel: 'across ' + plan.count + (plan.count === 1 ? ' item' : ' items') });
+      const sum = SP.reportClean(res, { fallbackFreed: plan.bytes, names: nameOf, burstLabel: 'across ' + plural(plan.count, 'item', 'items') });
       if (sum.ok) {
         // Drop what went; anything refused or failed stays listed.
         const gone = new Set(plan.jobs.filter((j) => !sum.blocked(j.path)).map((j) => j.path));
@@ -245,24 +300,64 @@
       S.cleaning = false;
       S.cleanAllRunning = false;
     }
-  };
+  }
+
+  SP.cleanAllDev = () => runDevClean('all', {
+    plan: async () => { const d = await loadTiers(true); return d && d.planA; },
+    empty: 'No developer build output or package caches were found. Scan to look again.',
+    title: 'Clean all developer files',
+    body: planBody,
+    label: 'All developer files',
+  });
+  SP.cleanUnusedDev = () => runDevClean('unused', {
+    // Fresh: a project opened since the last check is never included.
+    plan: async () => { const d = await loadUnused(true); return d && d.plan; },
+    empty: 'Every project with build output was used in the last 7 days. Nothing to clean.',
+    title: 'Clean unused developer files',
+    body: unusedBody,
+    label: 'Unused developer files',
+  });
+
+  function devCleanButton(o) {
+    const busy = S.cleanAllRunning === o.kind;
+    const off = busy || !!S.cleanAllRunning || o.none;
+    const base = 'height:' + (o.height || 44) + 'px;padding:0 18px;border-radius:11px;font-weight:650;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none';
+    const look = o.primary
+      ? ';border:none;background:var(--accent);color:var(--on-accent);box-shadow:var(--shadow-sm)'
+      : ';border:1px solid var(--border-2);background:var(--panel-2);color:var(--text)';
+    return el('button', {
+      [o.attr]: '',
+      title: o.none ? 'Nothing to clean right now' : o.title,
+      style: base + look + (off ? ';opacity:.55;pointer-events:none' : ''),
+      hov: o.primary ? 'background:var(--accent-hover)' : 'border-color:var(--accent);color:var(--accent-fg)',
+      onclick: o.onclick,
+    }, [busy ? ring('elastic', 16) : ic('broom', 16), busy ? 'Cleaning…' : o.label]);
+  }
 
   // The button, the same on Dashboard and Projects. Shows the tier A total once known.
   SP.cleanAllButton = function cleanAllButton(opts) {
     opts = opts || {};
     SP.tiers.ensure();
     const plan = SP.tiers.plan();
-    const busy = !!S.cleanAllRunning;
-    const none = plan && !plan.count;
-    const label = busy ? 'Cleaning…' : 'Clean all developer files' + (plan && plan.count ? ' (' + fmt(plan.bytes) + ')' : '');
-    return el('button', {
-      'data-clean-all': '',
-      title: none ? 'Nothing to clean right now' : 'Every Safe item: build output and package caches. You confirm once.',
-      style: 'height:' + (opts.height || 44) + 'px;padding:0 18px;border-radius:11px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--text);font-weight:650;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;font-family:inherit;flex:none'
-        + (busy || none ? ';opacity:.55;pointer-events:none' : ''),
-      hov: 'border-color:var(--accent);color:var(--accent-fg)',
+    return devCleanButton({
+      kind: 'all', attr: 'data-clean-all', height: opts.height, none: !!(plan && !plan.count),
+      title: 'Every Safe item: build output and package caches, in every project. You confirm once.',
+      label: 'Clean all developer files' + (plan && plan.count ? ' (' + fmt(plan.bytes) + ')' : ''),
       onclick: () => SP.cleanAllDev(),
-    }, [busy ? ring('elastic', 16) : ic('broom', 16), label]);
+    });
+  };
+
+  // The everyday clean: only projects nobody has used for 7 days.
+  SP.cleanUnusedButton = function cleanUnusedButton(opts) {
+    opts = opts || {};
+    SP.tiers.ensureUnused();
+    const plan = SP.tiers.unusedPlan();
+    return devCleanButton({
+      kind: 'unused', attr: 'data-clean-unused', height: opts.height, primary: true, none: !plan || !plan.count,
+      title: 'Build output of projects not used in 7 days. Active projects and package caches are left alone. You confirm once.',
+      label: 'Clean unused developer files' + (plan && plan.count ? ' (' + fmt(plan.bytes) + ')' : ''),
+      onclick: () => SP.cleanUnusedDev(),
+    });
   };
 
   SP.screens.dashboard = function (host) {
@@ -384,8 +479,36 @@
       ])
     );
 
-    // Developer files: every tier A item, cleaned in one go.
+    // Developer files, unused projects: the everyday clean, above "Clean all".
+    // Shown while main checks project activity, hidden when nothing qualifies.
     const planA = SP.tiers.plan();
+    SP.tiers.ensureUnused();
+    const planU = SP.tiers.unusedPlan();
+    const checking = !SP.tiers.unusedReady() && !!(planA && planA.jobs.some((j) => j.kind === 'artifact'));
+    if ((planU && planU.count > 0) || checking) {
+      const kept = planU ? (planU.activeProjects || 0) : 0;
+      const sub = planU
+        ? plural(planU.count, 'item', 'items') + ' in ' + plural(planU.projects, 'project', 'projects') + ' not used in ' + planU.days + '+ days ('
+          + planU.groups.slice(0, 3).map((g) => g.label).join(', ') + ').'
+          + (kept ? ' ' + plural(kept, 'active project', 'active projects') + ' left alone.' : '')
+        : 'Checking when each project was last used…';
+      host.appendChild(
+        el('div', { 'data-unused-card': '', style: 'margin-top:16px;display:flex;align-items:center;gap:18px;padding:20px 22px;background:var(--panel);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow-sm)' }, [
+          el('div', { style: 'width:44px;height:44px;border-radius:12px;background:var(--panel-2);display:grid;place-items:center;flex:none;color:var(--accent-fg)' }, [ic('clock', 22)]),
+          el('div', { style: 'flex:1;min-width:0' }, [
+            el('div', { style: 'font-size:15px;font-weight:700;display:flex;align-items:center;gap:9px;flex-wrap:wrap' }, [
+              el('span', { text: 'Developer files' }),
+              el('span', { class: 'sp-badge-accent', style: 'display:inline-flex;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:700;flex:none', text: 'Unused' }),
+              planU ? el('span', { style: 'color:var(--accent-fg)', text: fmt(planU.bytes) }) : ring('elastic', 14),
+            ]),
+            el('div', { style: 'color:var(--text-3);font-size:12.5px;margin-top:3px;line-height:1.5', text: sub }),
+          ]),
+          SP.cleanUnusedButton({ height: 42 }),
+        ])
+      );
+    }
+
+    // Developer files: every tier A item, cleaned in one go.
     if (planA && planA.count > 0) {
       const top = planA.groups.slice(0, 3).map((g) => g.label).join(', ');
       host.appendChild(

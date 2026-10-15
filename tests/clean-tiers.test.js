@@ -177,3 +177,64 @@ test('the Maven repository is B: never in Clean all, never auto-cleaned', () => 
   const dash = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'renderer', 'screens', 'dashboard.js'), 'utf8');
   assert.match(dash, /the Maven repository, AI tool history/);
 });
+
+// ---- unused projects ----
+const DAY = 24 * 60 * 60 * 1000;
+const NOW = Date.UTC(2026, 9, 15);
+
+test('planUnusedTierA takes build output only from projects untouched for 7 days', () => {
+  const shown = {
+    projects: [
+      { path: '/p/old', items: [item('node_modules', { path: '/p/old/node_modules', size: 500 }), item('.next', { path: '/p/old/.next', size: 50 }), item('venv', { path: '/p/old/venv', safe: false, size: 900 })] },
+      { path: '/p/active', items: [item('node_modules', { path: '/p/active/node_modules', size: 800 })] },
+      { path: '/p/edge', items: [item('target', { path: '/p/edge/target', size: 300 })] },
+    ],
+    sysTargets: [{ id: 'npm', name: 'npm cache', safe: true, reversible: true, size: 1000, existingPaths: ['/h/.npm/_cacache'] }],
+  };
+  const evidence = new Map([
+    ['/p/old', { lastActivity: NOW - 30 * DAY, keep: false }],
+    ['/p/active', { lastActivity: NOW - 2 * DAY, keep: false }],
+    ['/p/edge', { lastActivity: NOW - 7 * DAY, keep: false }],
+  ]);
+  const plan = tiers.planUnusedTierA(shown, classifyScan(shown), evidence, { now: NOW });
+  assert.deepEqual(plan.jobs.map((j) => j.path).sort(), ['/p/edge/target', '/p/old/.next', '/p/old/node_modules']);
+  assert.ok(plan.jobs.every((j) => j.kind === 'artifact'), 'shared package caches are never in the unused plan');
+  assert.equal(plan.count, 3);
+  assert.equal(plan.bytes, 850);
+  assert.equal(plan.projects, 2);
+  assert.equal(plan.activeProjects, 1);
+  assert.equal(plan.days, 7);
+  assert.equal(plan.groups[0].key, 'node_modules', 'largest group first');
+});
+
+test('planUnusedTierA fails closed: unknown, inconclusive and kept projects are left alone', () => {
+  const shown = {
+    projects: [
+      { path: '/p/none', items: [item('node_modules', { path: '/p/none/node_modules' })] },
+      { path: '/p/null', items: [item('node_modules', { path: '/p/null/node_modules' })] },
+      { path: '/p/keep', items: [item('node_modules', { path: '/p/keep/node_modules' })] },
+      { path: '/p/future', items: [item('node_modules', { path: '/p/future/node_modules' })] },
+    ],
+  };
+  const evidence = new Map([
+    ['/p/null', { lastActivity: null, keep: false }],
+    ['/p/keep', { lastActivity: null, keep: true }],
+    ['/p/future', { lastActivity: NOW + DAY, keep: false }],
+  ]);
+  const plan = tiers.planUnusedTierA(shown, classifyScan(shown), evidence, { now: NOW });
+  assert.equal(plan.count, 0);
+  assert.equal(plan.unknownProjects, 3, 'missing, inconclusive and kept');
+  assert.equal(plan.activeProjects, 1);
+  // Without evidence at all, nothing qualifies.
+  assert.equal(tiers.planUnusedTierA(shown, classifyScan(shown), undefined, { now: NOW }).count, 0);
+});
+
+test('planUnusedTierA only takes A items and honours a custom threshold', () => {
+  const shown = { projects: [{ path: '/p/a', items: [item('dist', { path: '/p/a/dist', safe: false }), item('build', { path: '/p/a/build', size: 40 })] }] };
+  const evidence = new Map([['/p/a', { lastActivity: NOW - 3 * DAY, keep: false }]]);
+  assert.equal(tiers.planUnusedTierA(shown, classifyScan(shown), evidence, { now: NOW }).count, 0);
+  const plan = tiers.planUnusedTierA(shown, classifyScan(shown), evidence, { now: NOW, days: 2 });
+  assert.deepEqual(plan.jobs.map((j) => j.path), ['/p/a/build']);
+  assert.equal(plan.days, 2);
+  assert.equal(tiers.UNUSED_DAYS, 7);
+});
